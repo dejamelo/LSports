@@ -1,1 +1,18 @@
-{"name":"@lsports/worker","private":true,"type":"module","scripts":{"dev":"tsx --env-file-if-exists=../../.env src/index.ts","start":"tsx --env-file-if-exists=../../.env src/index.ts","build":"tsc --noEmit"},"dependencies":{"@lsports/demo":"*","@lsports/contracts":"*"}}
+{
+  "name": "@lsports/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --env-file-if-exists=../../.env src/index.ts",
+    "start": "tsx --env-file-if-exists=../../.env src/index.ts",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lsports/contracts": "*",
+    "@lsports/demo": "*",
+    "amqplib": "^2.2.0",
+    "trade360-nodejs-sdk": "3.10.10",
+    "@lsports/feed-store": "*",
+    "axios": "^1.8.2"
+  }
+}

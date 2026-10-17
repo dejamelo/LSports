@@ -1,63 +1,51 @@
-# LSports — sportsbook de demostración
+# LSports — sportsbook independente
 
-Aplicación independiente con interfaz en español argentino, diseñada para iframe. **No acepta apuestas, pagos, depósitos ni retiros.** Todos los eventos, horarios y cuotas son ficticios. El importe del billete usa puntos sin valor monetario; la confirmación solo cambia el estado de la interfaz. Las selecciones se pierden al recargar.
+React + TypeScript, API Node.js e worker persistente para LSports TRADE, com interface em espanhol argentino preparada para iframe. **O bilhete é sempre uma simulação com pontos fictícios. Não aceita apostas, depósitos, pagamentos ou retiros.**
 
-## Requisitos e instalación
+## Executar
 
-Node.js 22 o superior y npm 10 o superior (verificado con Node 24 y npm 11).
+Requisitos: Node.js 22.13+ (recomendado Node 24 LTS) e npm 10+.
 
 ```sh
-cd /workspace/LSports # o la ubicación del checkout local
-npm ci --cache /workspace/.npm-cache # en local podés omitir --cache
-cp .env.example .env
+npm ci
+# Opcional no modo demo. Não sobrescrever um .env existente:
+test -f .env || cp .env.example .env
 npm run dev
 ```
 
-La copia de `.env` es opcional en modo demo. No sobrescribas un `.env` existente.
-
-- Frontend: puerto 5173, ruta `/sportsbook` (también disponible en `/`).
-- API: puerto 3001, enlazada a loopback por defecto.
-- Worker: proceso continuo con heartbeat cada 30 segundos, sin conexión al proveedor.
-
-Para ejecutar por separado, desde la raíz, en tres terminales:
-
-```sh
-npm run dev:api
-npm run dev:web
-npm run dev:worker
-```
+Frontend: porta 5173, rota `/sportsbook`. API: porta 3001 em loopback. Worker: processo contínuo. Em terminais separados, use `npm run dev:web`, `npm run dev:api` e `npm run dev:worker`.
 
 ```sh
 npm run build
 npm test
-# Vista del frontend compilado; mantener la API en otra terminal:
+# Frontend compilado (API e worker continuam em terminais separados):
 npm run preview -w @lsports/web
 ```
 
-El build compila el frontend en `apps/web/dist` y verifica tipos de API/worker. Los servicios Node se ejecutan con `tsx` mediante sus comandos `start` o `dev`, no se generan bundles Node. El lockfile fija la instalación reproducible. `npm test` comprueba el feed demo, la unicidad de selecciones, cuotas y ausencia de endpoint para apuestas.
+O build gera `apps/web/dist` e verifica os tipos dos serviços Node, que são executados com `tsx`. No ambiente cloud com HOME somente leitura, acrescente `--cache /workspace/.npm-cache` a `npm ci`.
 
-## Arquitectura
+## Modos de dados
 
-- `apps/web`: React + TypeScript + Vite, filtros de deportes, Prepartido/En vivo/Hípica, estados de carga y error, búsqueda, billete simple/combinado y diseño adaptable.
-- `apps/api`: Express, `GET /api/health` y `GET /api/events`. Sin persistencia, usuarios, wallet ni endpoints de transacción.
-- `apps/worker`: bucle persistente de integración con manejo de SIGINT/SIGTERM, ciclos secuenciales y recuperación de errores entre ciclos. En demo solo lee datos y escribe heartbeat; no alimenta la API ni persiste eventos. Para operación continua fuera del desarrollo, ejecutar bajo un supervisor con reinicio automático.
-- `packages/contracts`: interfaz `EventSource` y tipos compartidos.
-- `packages/demo`: fuente ficticia aislada, consumida por API y worker; el frontend recibe datos exclusivamente desde la API.
+- `DATA_MODE=demo`: dados fictícios isolados em `packages/demo`, sem chamadas ao fornecedor; identificação explícita em toda a interface.
+- `DATA_MODE=connected`: consumo de PreMatch 4511 e InPlay 4510 via AMQP no worker, recuperação por Snapshot usando SDK oficial, publicação local atômica para API e atualização da interface. Sem credenciais, conexão ou snapshot válido, mostra falhas/ausência e bloqueia cuotas; **nunca usa demo como fallback**.
 
-## Próxima integración: LSports TRADE
+[Configuração completa TRADE, variáveis do Mac, parâmetros confirmados, recuperação, cobertura de Hípica e limites](docs/TRADE.md). A conexão real aos pacotes depende das credenciais e ainda não foi validada neste ambiente. `.env` e `.runtime` são ignorados; nunca use variáveis `VITE_*` para segredos.
 
-Configuración prevista: **Test**, **PreMatch 4511**, **InPlay 4510**. No existe conexión real en esta etapa. `DATA_MODE` distinto de `demo` aborta API y worker para evitar presentar datos ficticios como reales. El futuro adaptador debe implementar `EventSource`, conservar datos demo separados y definir transporte autorizado por el proveedor, autenticación, normalización, almacenamiento compartido API/worker, deduplicación, recuperación del stream y cuotas suspendidas. No se inventaron URLs ni protocolos del proveedor.
+## Estrutura
 
-Las credenciales futuras deben configurarse en el servidor o gestor de secretos; nunca en código, Git, frontend ni variables `VITE_*`. `.env` y sus variantes están ignorados; `.env.example` solo contiene valores no sensibles.
+- `apps/web`: filtros de esportes, Prepartido/En vivo/Hípica, mercados e bilhete simulado, polling a cada três segundos.
+- `apps/api`: `GET /api/health` e `GET /api/events`, sem wallet ou endpoints de apostas.
+- `apps/worker`: consumidores separados, snapshot e reconexão, encerramento SIGINT/SIGTERM.
+- `packages/contracts`: tipos públicos.
+- `packages/demo`: fonte fictícia separada.
+- `packages/feed-store`: projeção local compartilhada worker/API; requer mesmo filesystem e um único worker escritor.
 
-## Incorporación por iframe
-
-Ejemplo para un servidor publicado con HTTPS:
+## Incorporar por iframe
 
 ```html
 <iframe
   src="https://sportsbook.example.com/sportsbook"
-  title="LSports — demostración deportiva"
+  title="LSports — simulador deportivo"
   width="100%"
   height="900"
   style="border:0"
@@ -66,12 +54,10 @@ Ejemplo para un servidor publicado con HTTPS:
 ></iframe>
 ```
 
-No depende de cookies de terceros, login, navegación superior ni almacenamiento local. Usa altura fija con scroll y diseño responsive; no hay protocolo `postMessage` ni ajuste automático de altura en esta etapa. No pongas información sensible en query strings.
+Não depende de cookies de terceiros, login nem armazenamento local. Altura fixa com scroll; sem ajuste automático via `postMessage`. Não coloque informação sensível na URL.
 
-En desarrollo/preview, `FRAME_ANCESTORS` lista los orígenes exactos autorizados para el padre, separados por espacios. Reiniciá Vite después de cambiarlo. Para una prueba local con padre en puerto 8080, agregá `http://127.0.0.1:8080` y/o `http://localhost:8080`.
+Em dev/preview, `FRAME_ANCESTORS` contém os orígenes exatos autorizados, separados por espaços; reinicie Vite após alterar. Exemplo de pai local: `http://localhost:8080`.
 
-En producción, servir `apps/web/dist` con fallback SPA hacia `index.html` para `/sportsbook`, reenviar `/api` al servicio Node y configurar en el servidor HTTP el header `Content-Security-Policy: frame-ancestors 'self' https://tu-sitio-padre.example`. La variable de Vite no configura headers en un hosting estático. No enviar `X-Frame-Options: DENY` ni `SAMEORIGIN` si el padre es otro origen. Usar HTTPS en padre e iframe. La API permanece interna detrás del mismo origen, sin CORS abierto. Las fuentes de Google son opcionales y tienen fuentes de sistema como alternativa.
+Em produção, servir `apps/web/dist` com fallback SPA para `/sportsbook`, fazer reverse proxy de `/api` para Node e configurar no servidor HTTP `Content-Security-Policy: frame-ancestors 'self' https://seu-site-pai.example`. A variável Vite não configura headers no hosting estático. Não enviar `X-Frame-Options: DENY`/`SAMEORIGIN` se o pai for outro origen. Usar HTTPS. API permanece interna no mesmo origen; sem CORS aberto. Fontes externas são opcionais com fallback de sistema.
 
-## Alcance de esta etapa
-
-La simulación no valida cuotas reales ni elegibilidad y no guarda billetes. “En vivo” muestra fixtures estáticos identificados como demo. Hípica es un ejemplo de selección de ganador, no un sistema de apuestas mutuas. No habilitar operación con dinero real sin una implementación posterior de backend, cumplimiento regulatorio, identidad, límites, auditoría y liquidación.
+Para produção, use supervisor com reinício para API/worker e monitore saúde/freshness. Processos não sobrevivem à publicação de um snapshot do ambiente. O frontend preserva a identidade visual atual; esta etapa não habilita operações com dinheiro real.

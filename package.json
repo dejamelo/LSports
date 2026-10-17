@@ -1,1 +1,28 @@
-{"name":"lsports-demo","private":true,"version":"0.1.0","type":"module","workspaces":["apps/*","packages/*"],"engines":{"node":">=22"},"scripts":{"dev":"concurrently -n web,api,worker \"npm run dev -w @lsports/web\" \"npm run dev -w @lsports/api\" \"npm run dev -w @lsports/worker\"","dev:web":"npm run dev -w @lsports/web","dev:api":"npm run dev -w @lsports/api","dev:worker":"npm run dev -w @lsports/worker","build":"npm run build --workspaces --if-present","test":"tsx --test apps/api/src/*.test.ts"},"devDependencies":{"@types/node":"^22.0.0","concurrently":"^9.0.0","tsx":"^4.0.0","typescript":"^5.7.0"}}
+{
+  "name": "lsports-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "concurrently -n web,api,worker \"npm run dev -w @lsports/web\" \"npm run dev -w @lsports/api\" \"npm run dev -w @lsports/worker\"",
+    "dev:web": "npm run dev -w @lsports/web",
+    "dev:api": "npm run dev -w @lsports/api",
+    "dev:worker": "npm run dev -w @lsports/worker",
+    "build": "npm run build --workspaces --if-present",
+    "test": "tsx --test apps/api/src/*.test.ts apps/worker/src/*.test.ts packages/feed-store/src/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.8",
+    "@types/node": "^22.0.0",
+    "concurrently": "^9.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  }
+}
