@@ -1,3 +1,4 @@
+import { explainOpenEventExclusions } from "./open-event-diagnostics.js";
 import express from "express";
 import { demoSource } from "@lsports/demo";
 import { dataMode, readConnectedFeed } from "@lsports/feed-store";
@@ -63,6 +64,7 @@ export function createApp(source?: EventSource) {
     res.json({ mode: data.mode, health: data.health, updatedAt: data.updatedAt,
       observation: !connected ? "connected_feed_required" : candidates.length ? "candidates_available" : "no_selectable_events_in_current_projection",
       observedEvents: events.length, candidates, connections: data.connections,
+      exclusions: explainOpenEventExclusions(events, new Set(candidates.map(candidate => candidate.eventId))),
     });
   });
   app.get("/api/events", async (_req, res) => res.json(await feed.getEvents()));

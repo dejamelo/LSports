@@ -857,3 +857,64 @@ conserve el feed activo y respete el próximo retryAt; solicite en el ticket 217
 un fixture **aún activo** con mercado 160 abierto y cuotas publicadas dentro de
 las suscripciones actuales, sin crear una suscripción paga ni reabrir una carrera
 liquidada. Las pruebas automatizadas son sintéticas y permanecen aisladas.
+
+### Explicar `observedEvents: 14` con `candidates: []`
+
+La consulta local `/api/diagnostics/open-events?sport=all` conserva exactamente
+el predicado de candidatos y agrega `exclusions` sin consultar a LSports:
+
+- `exclusions.summary`: total observado tras el filtro `sport`, candidatos,
+  excluidos, histogramas de estados de fixtures/mercados y `reasons`.
+- Cada motivo en `summary.reasons` contiene `reason`, `eventCount` y hasta tres
+  ejemplos con `eventId`, `fixtureId`, `competitionId` y feed de origen.
+- `exclusions.excludedEvents`: detalle de **todos** los eventos excluidos, con IDs,
+  deporte, estado del fixture, disponibilidad, si existía el campo `markets` y
+  conteos de mercados, mercados abiertos, selecciones y precios válidos.
+- Cada mercado detalla `marketId`, estado/etiqueta, conteos de selecciones/precios,
+  flags de disponibilidad (true/false/missing), estados y liquidaciones de las
+  selecciones, motivos de bloqueo ya informados y ejemplos de IDs de selección.
+
+Principales códigos:
+
+| Motivo | Qué demuestra en la proyección actual |
+|---|---|
+| `fixture_not_active` / `fixture_status_missing` | El status no es 1/2/9 o no está informado. |
+| `event_not_available` / `event_availability_missing` | El evento no tiene `available: true`, requerido por el filtro existente. |
+| `markets_missing` | No hay mercados en el campo leído; `marketsField` distingue campo ausente de array vacío. |
+| `primary_selections_without_markets` | Hay selecciones en el campo principal, pero no un array de mercados utilizable por el predicado existente; revisar formato de proyección. |
+| `no_open_markets` | Ningún mercado tiene status 1; el histograma distingue liquidado (3), suspendido (2), cerrado (4) y estado ausente. |
+| `selections_missing` | Los mercados observados no contienen selecciones. |
+| `no_valid_prices` | Hay selecciones, pero ningún precio finito mayor que 1. |
+| `open_markets_without_selections` | Los mercados abiertos no tienen selecciones, aunque otros mercados podrían tenerlas. |
+| `open_markets_without_valid_prices` | Las selecciones de mercados abiertos no tienen precios válidos. |
+| `open_markets_without_selectable_selections` | Hay precio válido en mercado abierto, pero ninguna selección satisface los flags/precio del predicado existente. |
+| `selection_availability_missing` | Falta el flag explícito de una o más selecciones; no se asume true. |
+| `projection_inconsistency` | Flags de disponibilidad contradicen estados, liquidaciones, precio o motivos informados; revisar los IDs en `markets[].inconsistencies`. No es por sí solo una prueba del origen del error. |
+| `candidate_filter_inconsistency` | Una fila excluida satisface el predicado anterior; se informa para investigación sin modificar el resultado. |
+
+`selectionBlockingReasonCounts` conserva los motivos recibidos de la proyección
+(por ejemplo, `awaiting_update`, `market_settled`, `feed_disconnected`).
+`not_reported_by_projection` significa que la selección está bloqueada o sin flag,
+pero no trae una razón detallada; no se inventa una causa. Los ejemplos están en
+`markets[].examples.byBlockingReason`, además de los IDs de selecciones bloqueadas
+y de precios inválidos/ausentes.
+
+Los motivos se pueden acumular: **no sume los eventCount de motivos diferentes**
+para obtener el total. Los histogramas del resumen se refieren a eventos excluidos.
+El precio normalizado cero/inválido no permite distinguir por sí solo si el
+payload original omitía el precio o lo enviaba así. Esta respuesta explica los
+datos cargados; no reconstruye mensajes crudos ni fuerza estados.
+
+Para complementar el ticket 217525, adjunte el resumen y un evento/mercado ejemplo
+por motivo relevante. Ejecute solamente la lectura local:
+
+```bash
+curl -sS 'http://localhost:3001/api/diagnostics/open-events?sport=all'
+```
+
+No llama al SDK, no reinicia recuperación, no modifica la agenda/retryAt ni escribe
+el checkpoint. Un test HTTP con 14 eventos sintéticos excluidos comprueba IDs,
+conteos, datos ausentes, estados, precios y bloqueos. También comprueba que una
+fila que el predicado anterior aceptaba sigue siendo candidata: las advertencias
+diagnósticas no se usan como nuevos filtros. No se afirma haber inspeccionado los
+14 eventos reales del Mac desde este workspace.
