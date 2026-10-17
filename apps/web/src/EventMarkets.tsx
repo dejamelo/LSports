@@ -21,7 +21,9 @@ export function EventMarkets({
       {event.restored && <p className="market-empty">Evento recuperado del almacenamiento local. Las cuotas sin actualizar permanecen bloqueadas.</p>}
       {event.marketDiagnostic && (
         <p className="market-empty" role="status">
-          {!event.marketDiagnostic.lastMarketMessageAt
+          {!event.marketDiagnostic.lastMarketMessageAt && event.marketDiagnostic.lastMarketSnapshotAt
+            ? "Mercados recuperados por API; las cuotas dependen del estado publicado por el proveedor."
+            : !event.marketDiagnostic.lastMarketMessageAt
             ? "Todavía no se recibieron mercados para esta carrera durante esta sesión."
             : !event.marketDiagnostic.storedSelections
               ? "Llegaron actualizaciones de mercados, pero sin selecciones agregadas disponibles."

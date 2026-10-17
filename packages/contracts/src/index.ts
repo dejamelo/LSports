@@ -42,6 +42,8 @@ export interface OutrightMarketDiagnostic {
   providerBetUpdates: number;
   staleBetUpdates: number;
   lastMarketMessageAt?: string;
+  snapshotMarketUpdates?: number;
+  lastMarketSnapshotAt?: string;
   storedMarkets: number;
   storedSelections: number;
   selectableSelections: number;
@@ -77,6 +79,8 @@ export interface IntegrationDiagnostic {
     | "distribution.status"
     | "distribution.start"
     | "snapshot.events"
+    | "snapshot.outright.fixtures"
+    | "snapshot.outright.markets"
     | "metadata.sports"
     | "subscriptions.list"
     | "subscriptions.quota"
@@ -203,6 +207,7 @@ export interface ConnectionState {
   lastSnapshotAt?: string;
   snapshotEvents?: number;
   catalogHorseRacing?: boolean;
+  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; checkedAt: string };
 }
 export interface SnapshotAudit {
   bodyShape: "array" | "single_event" | "events_wrapper" | "other" | "missing";

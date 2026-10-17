@@ -12,6 +12,7 @@ import type { IntegrationDiagnostic } from "@lsports/contracts";
 export type Operation = IntegrationDiagnostic["operation"];
 export type Protocol = IntegrationDiagnostic["protocol"];
 type Observation = {
+  rawResponse?: unknown;
   startedAt?: number;
   bodyShape?: "array" | "single_event" | "events_wrapper" | "other" | "missing";
   providerRows?: number;
@@ -36,6 +37,7 @@ function observe(
   observation: Observation,
   response: { status: number; data: unknown },
 ) {
+  observation.rawResponse = response.data;
   observation.httpStatus = status(response.status);
   let data = response.data;
   if (typeof data === "string") {
@@ -411,3 +413,6 @@ export function responseEvidence() {
     fixturesCount: o?.fixturesCount,
   };
 }
+
+// Internal conversion only. Never include this value in logs, diagnostics or public responses.
+export function snapshotResponsePayload(): unknown { return observations.getStore()?.rawResponse; }

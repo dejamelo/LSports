@@ -5,11 +5,18 @@ import {
   formatDiagnostic,
   OperationError,
   responseEvidence,
+  snapshotResponsePayload,
 } from "./diagnostics.js";
 import {
   CustomersApiFactory,
   SnapshotApiFactory,
   GetEventRequestDto,
+  GetOutrightFixtureRequestDto,
+  GetOutrightMarketRequestDto,
+  IdSafeJsonParser,
+  TransformerUtil,
+  OutrightFixtureUpdate,
+  OutrightFixtureMarketUpdate,
   GetInPlayEventRequestDto,
   StatusResponseBody,
   StartResponseBody,
@@ -33,6 +40,8 @@ axios.defaults.maxContentLength = 50 * 1024 * 1024;
 axios.defaults.maxRedirects = 0;
 export interface ProviderClients {
   snapshot(): Promise<TradeEvent[]>;
+  outrightFixtures?: () => Promise<TradeEvent[]>;
+  outrightMarkets?: () => Promise<TradeEvent[]>;
   catalog(): Promise<{ id?: number; name?: string }[]>;
   distributionStatus(): Promise<{
     isDistributionOn: boolean;
@@ -87,6 +96,20 @@ export function clients(
   let audit: SnapshotAudit | undefined;
   return {
     snapshotAudit: () => audit,
+    ...(config.lane === "prematch" ? {
+      async outrightFixtures() {
+        return operation("snapshot.outright.fixtures", "http", async () => {
+          const sdk = await (snapshot as ReturnType<SnapshotApiFactory["createSnapshotApiPrematchHttpClient"]>).getOutrightFixtures(new GetOutrightFixtureRequestDto({}));
+          return decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "fixtures");
+        });
+      },
+      async outrightMarkets() {
+        return operation("snapshot.outright.markets", "http", async () => {
+          const sdk = await (snapshot as ReturnType<SnapshotApiFactory["createSnapshotApiPrematchHttpClient"]>).getOutrightFixtureMarkets(new GetOutrightMarketRequestDto({}));
+          return decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "markets");
+        });
+      },
+    } : {}),
     async subscriptions() {
       return operation("subscriptions.list", "http", async () => {
         const response = await subscription.getSubscriptions(
@@ -205,4 +228,47 @@ export { decodeMessage } from "./messages.js";
 export type { Decoded } from "./messages.js";
 export function safeFailure(error: unknown): string {
   return formatDiagnostic(describeFailure(error, "worker.start", "local"));
+}
+
+// The snapshot DTOs omit Market.Status and rich participant fields. Use the official
+// message entities on the same validated response body to retain supplier fields.
+function decodeOutrightSnapshot(sdk: unknown, payload: unknown, kind: "fixtures" | "markets"): TradeEvent[] {
+  const invalid: () => never = () => { throw new OperationError({
+    operation: kind === "fixtures" ? "snapshot.outright.fixtures" : "snapshot.outright.markets",
+    protocol: "http", category: "invalid_response", reason: "invalid_snapshot", stage: "validation",
+    message: "Snapshot Outright con estructura o conteo inválido; no se reemplazan los datos persistidos.",
+  }); };
+  const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  if (typeof payload === "string") payload = IdSafeJsonParser.parse(payload);
+  if (!object(payload) || payload.Body === undefined || sdk == null) invalid();
+  const raw = Array.isArray(payload.Body) ? payload.Body : [payload.Body];
+  const converted = Array.isArray(sdk) ? sdk : [sdk];
+  if (raw.length !== converted.length) invalid();
+  const events: TradeEvent[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const body = raw[i];
+    const sdkBody = converted[i];
+    if (!object(body) || !Number.isSafeInteger(body.Id) || Number(body.Id) <= 0 || !Array.isArray(body.Events) ||
+        !object(sdkBody) || !Array.isArray(sdkBody.events) || sdkBody.events.length !== body.Events.length)
+      invalid();
+    for (const row of body.Events) {
+      if (!object(row) || !Number.isSafeInteger(row.FixtureId) || Number(row.FixtureId) <= 0 ||
+          (kind === "fixtures" ? !object(row.OutrightFixture) ||
+            (row.OutrightFixture.Participants !== undefined && (!Array.isArray(row.OutrightFixture.Participants) || row.OutrightFixture.Participants.some((p: unknown) => !object(p))))
+            : !Array.isArray(row.Markets) || row.Markets.some((m: unknown) => !object(m) || !Number.isSafeInteger(m.Id) || Number(m.Id) <= 0 || (m.Bets !== undefined && !Array.isArray(m.Bets)))))
+        invalid();
+    }
+    if (kind === "fixtures") {
+      const competition = TransformerUtil.transform({ Competition: body }, OutrightFixtureUpdate).competition!;
+      for (const row of competition.events || []) events.push({ fixtureId: row.fixtureId, outright: {
+        competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type, fixture: row.outrightFixture } });
+    } else {
+      const competition = TransformerUtil.transform({ Competition: body }, OutrightFixtureMarketUpdate).competition!;
+      for (const row of competition.events || []) {
+        if (row.markets?.some(m => m.bets?.some(b => typeof b.id !== "string" || !b.id))) invalid();
+        events.push({ fixtureId: row.fixtureId, outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type }, markets: row.markets, marketRecovery: true });
+      }
+    }
+  }
+  return events;
 }

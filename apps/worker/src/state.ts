@@ -17,6 +17,7 @@ export interface TradeEvent {
   livescore?: Livescore;
   markets?: Market[];
   marketMessageType?: 41 | 42;
+  marketRecovery?: boolean;
 }
 interface Versioned<T> {
   value: T;
@@ -26,7 +27,7 @@ export interface Row {
   restored?: boolean;
   fixture?: Versioned<Fixture>;
   outright?: TradeEvent["outright"];
-  marketReceipt?: { messagesByType: Record<string, number>; marketUpdates: number; betUpdates: number; providerMarketUpdates: number; providerBetUpdates: number; staleBetUpdates: number; lastMarketMessageAt?: string };
+  marketReceipt?: { messagesByType: Record<string, number>; marketUpdates: number; betUpdates: number; providerMarketUpdates: number; providerBetUpdates: number; staleBetUpdates: number; lastMarketMessageAt?: string; snapshotMarketUpdates?: number; lastMarketSnapshotAt?: string };
   livescore?: Versioned<Livescore>;
   markets: Map<string, Market>;
   marketAt: Map<string, number>;
@@ -139,8 +140,13 @@ export class TradeState {
             row.fixture = { value: { ...row.fixture?.value, ...defined(incoming.fixture) } as Fixture, at: t };
           else this.metrics[lane].staleUpdatesIgnored++;
         }
-        if (event.marketMessageType) {
+        if (event.marketMessageType || event.marketRecovery) {
           const receipt = row.marketReceipt ||= { messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0 };
+          if (event.marketRecovery) {
+            receipt.snapshotMarketUpdates = (receipt.snapshotMarketUpdates || 0) + (event.markets?.length || 0);
+            receipt.lastMarketSnapshotAt = new Date(at).toISOString();
+          }
+          if (event.marketMessageType) {
           const type = String(event.marketMessageType);
           receipt.messagesByType[type] = (receipt.messagesByType[type] || 0) + 1;
           receipt.marketUpdates += event.markets?.length || 0;
@@ -148,6 +154,7 @@ export class TradeState {
           receipt.providerMarketUpdates += (event.markets || []).reduce((n, m) => n + (m.providerMarkets?.length || 0), 0);
           receipt.providerBetUpdates += (event.markets || []).reduce((n, m) => n + (m.providerMarkets || []).reduce((count, provider) => count + (provider.Bets?.length || 0), 0), 0);
           receipt.lastMarketMessageAt = new Date(Math.max(at, Date.parse(receipt.lastMarketMessageAt || '') || 0)).toISOString();
+          }
         }
       }
       if (event.fixture) {
@@ -359,7 +366,7 @@ export class TradeState {
       };
     }
     const phases = Object.values(this.connections).map((c) => c.phase);
-    const health = phases.every((p) => p === "connected")
+    const health = phases.every((p) => p === "connected") && !Object.values(this.connections).some(c => c.outrightRecovery?.status === "partial")
       ? "ok"
       : phases.some((p) => p === "connected")
         ? "degraded"

@@ -101,6 +101,10 @@ export async function diagnosePackage(
       snapshotAudit: api.snapshotAudit?.(),
     }),
   );
+  if (api.outrightFixtures) await check("snapshot.outright.fixtures", "http", () => api.outrightFixtures!(), result => ({ events: result.length }));
+  if (api.outrightMarkets) await check("snapshot.outright.markets", "http", () => api.outrightMarkets!(), result => ({ events: result.length }));
+  if (pkg.lane === "inplay" && !api.outrightFixtures)
+    write({ operation: "snapshot.outright.fixtures", status: "unsupported", message: "SDK oficial InPlay sin snapshot outright por fixture; no se inventa ruta." });
   await check(
     "metadata.sports",
     "http",

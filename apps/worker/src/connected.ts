@@ -327,6 +327,30 @@ export async function session(
       if (closed || signal.aborted)
         throw failure || new Error("Disconnected during recovery");
       state.replace(lane, rows, started, api.snapshotAudit?.());
+      const outrightRecovery: NonNullable<import("@lsports/contracts").ConnectionState["outrightRecovery"]> = {
+        status: api.outrightFixtures || api.outrightMarkets ? "ok" : "unsupported", checkedAt: new Date().toISOString(),
+      };
+      for (const [name, action, counter] of [
+        ["snapshot.outright.fixtures", api.outrightFixtures, "fixtures"],
+        ["snapshot.outright.markets", api.outrightMarkets, "marketEvents"],
+      ] as const) {
+        if (!action) continue;
+        const startedOutright = Date.now();
+        try {
+          const recovered = await action();
+          if (closed || signal.aborted) throw failure || new Error("Disconnected during outright recovery");
+          await operation("feed.apply", "local", async () => state.apply(lane, recovered, startedOutright));
+          outrightRecovery[counter] = recovered.length;
+          console.info(JSON.stringify({ lane, operation: name, status: "ok", events: recovered.length }));
+        } catch (error) {
+          if (closed || signal.aborted) throw error;
+          const diagnostic = describeFailure(error, name, "http");
+          outrightRecovery.status = "partial";
+          (outrightRecovery.diagnostics ||= []).push(diagnostic);
+          console.warn(JSON.stringify({ lane, status: "error", ...diagnostic }));
+        }
+      }
+      state.set(lane, { outrightRecovery });
       seen.clear();
       // Messages remain unacknowledged while HTTP recovery runs; replay deltas over snapshot.
       while (buffered.length && !closed) {
@@ -340,8 +364,8 @@ export async function session(
         phase: "connected",
         diagnostic: undefined,
         message: rows.length
-          ? "Feed conectado; snapshot recuperado."
-          : "Feed conectado; snapshot vacío (0 fixtures). Esperando eventos del proveedor.",
+          ? "Feed conectado; snapshot recuperado." + (outrightRecovery.status === "partial" ? " Recuperación Outright incompleta; revisá el diagnóstico." : "")
+          : "Feed conectado; snapshot regular vacío (0 fixtures)." + (outrightRecovery.status === "partial" ? " Recuperación Outright incompleta; revisá el diagnóstico." : " Recuperación Outright consultada por separado."),
       });
       await save();
       console.log(

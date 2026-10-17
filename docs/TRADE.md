@@ -443,3 +443,89 @@ recuperarlos sin esperar al proveedor se necesita una copia anterior de ese arch
 (por ejemplo, de Time Machine). Con los procesos detenidos, conserve el archivo
 actual aparte y restaure la copia en la ruta configurada antes de arrancar.
 `.env` no requiere cambios y no debe reemplazarse.
+
+### Snapshot inicial Outright por API (sin modificar suscripciones)
+
+La restauración local no recupera una carrera si el archivo anterior ya fue
+sobrescrito (`legacy_projection`, `rows: 0`). Para recuperar datos actuales del
+proveedor, el worker consulta además los endpoints **oficiales PreMatch**:
+
+| Operación diagnóstica | Método del SDK | Ruta POST en el host snapshot |
+|---|---|---|
+| `snapshot.outright.fixtures` | `getOutrightFixtures(new GetOutrightFixtureRequestDto({}))` | `/Prematch/GetOutrightFixture` (singular) |
+| `snapshot.outright.markets` | `getOutrightFixtureMarkets(new GetOutrightMarketRequestDto({}))` | `/Prematch/GetOutrightFixtureMarkets` |
+
+El SDK también define `getOutrightEvents` → `/Prematch/GetOutrightEvents` como
+respuesta combinada. Se usan las dos consultas separadas para identificar permisos,
+respuestas vacías y fallas de fixtures/mercados independientemente. No se inventan
+rutas, fechas, filtros ni parámetros. Los DTO admiten filtros opcionales (incluido
+`fixtures`); la recuperación general no aplica filtros. La autenticación sigue en
+el cuerpo generado por el SDK (`packageId`, `username`, `password`), exclusivamente
+servidor. No se llama Subscribe/UnSubscribe ni se cambia la configuración del TRADE.
+
+Fuentes oficiales consultadas:
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/api/snapshot-api/services/prematch-snapshot.service.ts
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/api/snapshot-api/enums/prematch-snapshot-routes-prefix-url.ts
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/api/snapshot-api/interfaces/snapshotapiinplay-http-client.interface.ts
+
+El `Body` de cada respuesta es una competición `{Id, Name, Type, Events}` o un
+array de esas competiciones. Se valida la estructura y el conteo contra la
+conversión del SDK. Se usan las entidades oficiales de mensajes para preservar
+campos del cuerpo que los DTO de snapshot omiten (por ejemplo, estado del mercado
+y metadatos ricos de participantes). Nunca se asume `Status: 1` si no fue recibido.
+Los mercados usan el mismo espacio feed/competición/fixture de los tipos 37/41.
+La consulta ocurre durante la recuperación inicial y periódica, con AMQP ya
+consumiendo en buffer; sus deltas se aplican después. Los resultados se mezclan
+con el checkpoint restaurado. Una respuesta vacía o un error no borra las carreras
+persistidas. La API regular de fútbol conserva su flujo independiente.
+
+`connections.prematch.outrightRecovery` expone `status`, `fixtures`, `marketEvents`,
+`checkedAt` y diagnósticos sanitizados por operación. Una falla parcial degrada
+la salud general aunque el socket esté conectado; no oculta el error bajo
+`connected`. Los logs informan conteos, no payloads. `lastMarketSnapshotAt` y
+`snapshotMarketUpdates` por carrera distinguen la recuperación HTTP de mensajes
+AMQP; no se incrementan ficticiamente los contadores 37/41. Los resultados se
+persisten en el checkpoint y sobreviven al siguiente reinicio.
+
+El cliente **InPlay** de esta versión oficial solo expone Outright **de liga**:
+`GetOutrightLeagues`, `GetOutrightLeagueMarkets`, `GetOutrightLeagueEvents`.
+No expone el equivalente por fixture individual de las rutas anteriores. No se
+supone `/Inplay/GetOutrightFixture` ni se usan credenciales 4510 contra una ruta
+PreMatch. Se informa `outrightRecovery.status: unsupported` en InPlay para esta
+recuperación por carrera. Los mensajes AMQP 37/41/42 de ese feed siguen soportados,
+y los datos locales se restauran normalmente.
+
+Validación en el Mac, con las credenciales existentes y sin borrar `.runtime`:
+
+```bash
+npm run diagnose:trade
+npm run dev
+# En otro terminal (puerto API por defecto):
+curl -sS http://localhost:3001/api/diagnostics/outright/20540377
+```
+
+`diagnose:trade` consulta snapshots sin iniciar distribución, consumir mensajes ni
+cambiar suscripciones. Verifique los dos resultados PreMatch: un HTTP 200 con cero
+filas prueba una respuesta vacía, no entrega del fixture específico. Consulte
+`connections.prematch.outrightRecovery` en la API y los contadores por carrera.
+No se declaró validado el proveedor: los tests usan HTTP local y SDK real.
+
+Si Test devuelve vacío, rechaza la consulta, o la carrera corresponde solo a InPlay,
+solicite a soporte LSports exactamente:
+
+> Para el entorno Test, recuperar el estado completo de la carrera fixture 20540377
+> y su Competition.Id, manteniendo las suscripciones actuales. Confirmar si está
+> disponible en `/Prematch/GetOutrightFixture` y `/Prematch/GetOutrightFixtureMarkets`
+> con filtro `fixtures: [20540377]` y los permisos del paquete PreMatch 4511.
+> Si no es recuperable por snapshot (o pertenece al paquete InPlay 4510), reenviar
+> a la cola ya provisionada un **OutrightFixtureUpdate, tipo 37**, con todos los
+> participantes y estado actual, seguido de **OutrightFixtureMarketUpdate, tipo 41**,
+> con el estado completo del mercado Race Winner 160, `Bets`, `ParticipantId`, precios,
+> estados y timestamps. Si el mercado está liquidado, incluir el estado de liquidación
+> correspondiente (tipo 42). PreMatch: host stm-prematch.lsports.eu, vhost StmPreMatch,
+> cola _4511_; InPlay: host stm-inplay.lsports.eu, vhost StmInPlay, cola _4510_ (o la
+> cola personalizada confirmada por soporte). No cancelar ni recrear suscripciones.
+> Confirmar retención/disponibilidad histórica si la carrera ya finalizó.
+
+Adjunte hora UTC, paquete, HTTP/status y contadores sanitizados; no contraseñas.
+No se requiere cambiar `.env`.
