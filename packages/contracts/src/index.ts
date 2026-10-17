@@ -6,6 +6,8 @@ export interface Selection {
   status?: number;
   available?: boolean;
   line?: string;
+  participantId?: number;
+  settlement?: number;
 }
 export interface EventMarket {
   id: string;
@@ -26,8 +28,26 @@ export interface EventParticipant {
   type?: number;
   extraData?: { name?: string; value?: string }[];
 }
+export interface OutrightMarketDiagnostic {
+  lane: Lane;
+  competitionId: number;
+  fixtureId: number;
+  hasFixture: boolean;
+  messagesByType: Record<string, number>;
+  marketUpdates: number;
+  betUpdates: number;
+  providerMarketUpdates: number;
+  providerBetUpdates: number;
+  staleBetUpdates: number;
+  lastMarketMessageAt?: string;
+  storedMarkets: number;
+  storedSelections: number;
+  selectableSelections: number;
+  market160?: { status?: number; selections: number; pricedSelections: number; selectableSelections: number };
+}
 export interface SportEvent {
   kind?: "fixture" | "outright";
+  marketDiagnostic?: OutrightMarketDiagnostic;
   competition?: { id: number; name?: string; type?: number };
   participants?: EventParticipant[];
   id: string;
@@ -167,6 +187,8 @@ export interface FeedMessageMetadata {
   guidSource?: "envelope" | "transport" | "control_fingerprint";
   rootShape?: "object" | "array" | "string" | "number" | "boolean" | "null";
   eventCount?: number;
+  marketCount?: number;
+  betCount?: number;
   redelivered?: boolean;
   warnings?: string[];
 }
@@ -193,6 +215,7 @@ export interface CoverageStats {
   eventUpdatesReceived: number;
   duplicateMessages: number;
   keepAliveActiveEvents?: number;
+  outrightMarketRowsWithoutFixture?: number;
   rowsStored: number;
   rowsWithoutFixture: number;
   rowsPublished: number;
@@ -211,6 +234,7 @@ export interface EventFeed {
   health?: "ok" | "degraded" | "unavailable";
   connections?: Record<Lane, ConnectionState>;
   coverage?: Record<Lane, CoverageStats>;
+  outrightDiagnostics?: OutrightMarketDiagnostic[];
   horseRacing?: {
     status: "observed" | "not_observed" | "unknown";
     message: string;

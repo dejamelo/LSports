@@ -56,3 +56,28 @@ test("connected API returns an empty unavailable feed without demo fallback", as
     await new Promise<void>((r) => server.close(() => r()));
   }
 });
+
+test('fixture diagnostic route exposes actual projected outright market counters and no invented observations', async () => {
+  const { TradeState } = await import('../../worker/src/state.js');
+  const { decodeMessage } = await import('../../worker/src/messages.js');
+  const state = new TradeState();
+  const at = Date.now();
+  const decoded = decodeMessage(Buffer.from(JSON.stringify({ Header: { Type: 41, MsgGuid: 'api-test', ServerTimestamp: at },
+    Body: { Competition: { Id: 90, Events: [{ FixtureId: 20540377, Markets: [{ Id: 160, Status: 1,
+      Bets: [{ Id: '1', Price: '3.25', Status: 1 }] }] }] } } })));
+  state.apply('prematch', decoded.events, decoded.at);
+  const server = createApp({ async getEvents() { return state.feed(); } }).listen(0, '127.0.0.1');
+  await new Promise<void>(r => server.once('listening', r));
+  try {
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const base = `http://127.0.0.1:${address.port}`;
+    const diagnostic = await (await fetch(`${base}/api/diagnostics/outright/20540377`)).json();
+    assert.equal(diagnostic.observation, 'observed');
+    assert.equal(diagnostic.matches[0].hasFixture, false);
+    assert.equal(diagnostic.matches[0].messagesByType['41'], 1);
+    assert.equal(diagnostic.matches[0].storedSelections, 1);
+    assert.equal((await (await fetch(`${base}/api/diagnostics/outright/123`)).json()).observation, 'not_observed_in_current_projection');
+    assert.equal((await fetch(`${base}/api/diagnostics/outright/invalid`)).status, 400);
+  } finally { await new Promise<void>(r => server.close(() => r())); }
+});

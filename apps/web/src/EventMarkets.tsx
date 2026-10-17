@@ -18,6 +18,17 @@ export function EventMarkets({
   const market = markets.find((m) => m.id === marketId) || markets[0];
   return (
     <div className="markets">
+      {event.marketDiagnostic && (
+        <p className="market-empty" role="status">
+          {!event.marketDiagnostic.lastMarketMessageAt
+            ? "Todavía no se recibieron mercados para esta carrera durante esta sesión."
+            : !event.marketDiagnostic.storedSelections
+              ? "Llegaron actualizaciones de mercados, pero sin selecciones agregadas disponibles."
+              : event.marketDiagnostic.selectableSelections === 0
+                ? "Se recibieron selecciones; sin cuotas habilitadas por estado, precio o conexión."
+                : `${event.marketDiagnostic.selectableSelections} cuotas habilitadas recibidas del proveedor.`}
+        </p>
+      )}
       {markets.length > 1 ? (
         <select
           aria-label={`Mercado de ${event.home}`}

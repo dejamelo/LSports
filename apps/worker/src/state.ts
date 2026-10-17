@@ -1,5 +1,6 @@
 import type {
   ConnectionState,
+  OutrightMarketDiagnostic,
   CoverageStats,
   SnapshotAudit,
   EventFeed,
@@ -11,10 +12,11 @@ import type {
 import type { Fixture, Livescore, Market, OutrightFixtureEvent } from "trade360-nodejs-sdk";
 export interface TradeEvent {
   fixtureId: number;
-  outright?: { competitionId: number; competitionName?: string; competitionType?: number; fixture: NonNullable<OutrightFixtureEvent["outrightFixture"]> };
+  outright?: { competitionId: number; competitionName?: string; competitionType?: number; fixture?: NonNullable<OutrightFixtureEvent["outrightFixture"]> };
   fixture?: Fixture;
   livescore?: Livescore;
   markets?: Market[];
+  marketMessageType?: 41 | 42;
 }
 interface Versioned<T> {
   value: T;
@@ -23,6 +25,7 @@ interface Versioned<T> {
 interface Row {
   fixture?: Versioned<Fixture>;
   outright?: TradeEvent["outright"];
+  marketReceipt?: { messagesByType: Record<string, number>; marketUpdates: number; betUpdates: number; providerMarketUpdates: number; providerBetUpdates: number; staleBetUpdates: number; lastMarketMessageAt?: string };
   livescore?: Versioned<Livescore>;
   markets: Map<string, Market>;
   marketAt: Map<string, number>;
@@ -126,11 +129,24 @@ export class TradeState {
         this.rows[lane].set(key, row);
       }
       if (event.outright) {
-        const t = timestamp(event.outright.fixture.lastUpdate, at);
-        if (!row.fixture || t >= row.fixture.at) {
-          row.outright = { ...row.outright, ...event.outright, competitionName: event.outright.competitionName ?? row.outright?.competitionName };
-          row.fixture = { value: { ...row.fixture?.value, ...defined(event.outright.fixture) } as Fixture, at: t };
-        } else this.metrics[lane].staleUpdatesIgnored++;
+        const incoming = event.outright;
+        row.outright = { ...row.outright, ...defined(incoming), competitionId: incoming.competitionId };
+        if (incoming.fixture) {
+          const t = timestamp(incoming.fixture.lastUpdate, at);
+          if (!row.fixture || t >= row.fixture.at)
+            row.fixture = { value: { ...row.fixture?.value, ...defined(incoming.fixture) } as Fixture, at: t };
+          else this.metrics[lane].staleUpdatesIgnored++;
+        }
+        if (event.marketMessageType) {
+          const receipt = row.marketReceipt ||= { messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0 };
+          const type = String(event.marketMessageType);
+          receipt.messagesByType[type] = (receipt.messagesByType[type] || 0) + 1;
+          receipt.marketUpdates += event.markets?.length || 0;
+          receipt.betUpdates += (event.markets || []).reduce((n, m) => n + (m.bets?.length || 0), 0);
+          receipt.providerMarketUpdates += (event.markets || []).reduce((n, m) => n + (m.providerMarkets?.length || 0), 0);
+          receipt.providerBetUpdates += (event.markets || []).reduce((n, m) => n + (m.providerMarkets || []).reduce((count, provider) => count + (provider.Bets?.length || 0), 0), 0);
+          receipt.lastMarketMessageAt = new Date(Math.max(at, Date.parse(receipt.lastMarketMessageAt || '') || 0)).toISOString();
+        }
       }
       if (event.fixture) {
         const t = timestamp(event.fixture.lastUpdate, at);
@@ -167,7 +183,10 @@ export class TradeState {
               ...defined(bet),
             } as typeof bet);
             row.betAt.set(betKey, t);
-          } else this.metrics[lane].staleUpdatesIgnored++;
+          } else {
+            this.metrics[lane].staleUpdatesIgnored++;
+            if (row.marketReceipt) row.marketReceipt.staleBetUpdates++;
+          }
         }
         merged.bets = [...bets.values()];
         row.markets.set(key, merged);
@@ -187,6 +206,26 @@ export class TradeState {
   feed(now = Date.now()): EventFeed {
     const events: SportEvent[] = [];
     const observed = new Set<string>();
+    const outrightDiagnostics: OutrightMarketDiagnostic[] = [];
+    const diagnosticByKey = new Map<string, OutrightMarketDiagnostic>();
+    for (const lane of ["prematch", "inplay"] as const) {
+      for (const [key, row] of this.rows[lane]) {
+        if (!row.outright) continue;
+        const diagnostic: OutrightMarketDiagnostic = { lane, competitionId: row.outright.competitionId,
+          fixtureId: Number(String(key).split(":").at(-1)), hasFixture: !!row.fixture,
+          messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0,
+          ...structuredClone(row.marketReceipt),
+          storedMarkets: row.markets.size,
+          storedSelections: [...row.markets.values()].reduce((n, m) => n + (m.bets?.length || 0), 0), selectableSelections: 0 };
+        const winner = row.markets.get("160");
+        if (winner) diagnostic.market160 = { status: winner.status,
+          selections: winner.bets?.length || 0,
+          pricedSelections: (winner.bets || []).filter((b) => Number.isFinite(Number(b.price)) && Number(b.price) > 1).length,
+          selectableSelections: 0 };
+        outrightDiagnostics.push(diagnostic);
+        diagnosticByKey.set(`${lane}:${key}`, diagnostic);
+      }
+    }
     for (const lane of ["prematch", "inplay"] as const) {
       for (const [id, row] of this.rows[lane]) {
         const fixture = row.fixture?.value;
@@ -208,8 +247,10 @@ export class TradeState {
           status: m.status,
           selections: (m.bets || []).map((b) => ({
             id: `${prefix}:${m.id}:${b.id}`,
-            label: `${b.name || "Selección"}${b.line ? ` (${b.line})` : ""}`,
+            label: `${b.name || (row.outright && b.participantId !== undefined ? fixture.participants?.find((p) => p.id === b.participantId)?.name : undefined) || "Selección"}${b.line ? ` (${b.line})` : ""}`,
             line: b.line,
+            participantId: b.participantId,
+            settlement: b.settlement,
             odds: Number(b.price) || 0,
             status: b.betStatusId ?? b.status,
             available:
@@ -221,6 +262,14 @@ export class TradeState {
               Number.isFinite(Number(b.price)),
           })),
         }));
+        const marketDiagnostic = diagnosticByKey.get(prefix);
+        if (marketDiagnostic) {
+          marketDiagnostic.selectableSelections = markets.reduce((n, m) => n + m.selections.filter((s) => s.available).length, 0);
+          const winner = markets.find((m) => m.id === `${prefix}:160`);
+          if (winner) marketDiagnostic.market160 = { status: winner.status, selections: winner.selections.length,
+            pricedSelections: winner.selections.filter((s) => s.odds > 1 && Number.isFinite(s.odds)).length,
+            selectableSelections: winner.selections.filter((s) => s.available).length };
+        }
         const primary =
           markets.find((m) => m.selections.some((s) => s.available)) ||
           markets[0];
@@ -232,6 +281,7 @@ export class TradeState {
           id: prefix,
           sport,
           source: lane,
+          marketDiagnostic,
           kind: row.outright ? "outright" : "fixture",
           competition: row.outright ? { id: row.outright.competitionId, name: row.outright.competitionName, type: row.outright.competitionType } : undefined,
           participants: structuredClone(participants),
@@ -285,6 +335,7 @@ export class TradeState {
       const published = visible.filter((e) => e.source === lane);
       coverage[lane] = {
         ...structuredClone(this.metrics[lane]),
+        outrightMarketRowsWithoutFixture: [...this.rows[lane].values()].filter((r) => r.outright && r.marketReceipt && !r.fixture).length,
         rowsStored: this.rows[lane].size,
         rowsWithoutFixture: [...this.rows[lane].values()].filter(
           (r) => !r.fixture,
@@ -321,6 +372,7 @@ export class TradeState {
       connections: structuredClone(this.connections),
       events: visible,
       coverage,
+      outrightDiagnostics,
       horseRacing: {
         status: observed.size
           ? "observed"

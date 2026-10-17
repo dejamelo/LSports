@@ -326,3 +326,66 @@ transporte, sin publicar participantes ni payloads completos en los logs.
 No requiere cambios en `.env`. No equivale a una validación con el proveedor:
 los tests automatizados utilizan mensajes sintéticos identificados como fixtures
 de prueba y un transporte simulado.
+
+### Mercados de Hípica por fixture (tipos 41 y 42)
+
+El SDK oficial distingue `OutrightFixtureMarketUpdate` (41) de
+`OutrightLeagueMarketUpdate` (40). El 41 contiene
+`Body.Competition.{Id,Name,Type,Events}` y cada evento contiene `FixtureId` y
+`Markets`. Usa las mismas entidades `Market` y `Bet` del SDK, con `Bets`,
+`ParticipantId`, `Price`, `Status`, `BetStatusId` y `Settlement`.
+`OutrightSettlementsUpdate` (42) tiene la misma estructura y actualiza las
+liquidaciones; esas selecciones quedan bloqueadas para el billete simulado.
+Fuentes oficiales:
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/entities/message-types/outright-fixture-market-update.ts
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/entities/message-types/outright-settlements-update.ts
+
+Los tipos 41 y 42 se relacionan con el 37 por feed, competición y fixture.
+Se admiten mercados antes de los participantes, sin fabricar metadatos ni
+confundirlos con fútbol. Una actualización 37 o un snapshot regular conserva
+los mercados outright. Los IDs grandes de selecciones siguen siendo strings.
+Las actualizaciones atrasadas no reemplazan precios ni estados más recientes.
+Los tipos 40/43 usan una jerarquía de liga diferente: aún no están implementados,
+no se interpretan como carreras individuales, y conservan el error explícito y
+NACK con requeue. Otros tipos desconocidos tampoco se descartan.
+
+Con la aplicación activa, desde otro terminal del Mac (puerto API por defecto):
+
+```bash
+curl -sS http://localhost:3001/api/diagnostics/outright/20540377
+```
+
+Este endpoint y `/api/health` exponen diagnósticos sanitizados. Los contadores
+corresponden al proceso actual del worker, no al historial completo del proveedor:
+
+- `messagesByType["41"]`: mensajes de mercados decodificados y aplicados para esa
+  competición/fixture. Las entregas duplicadas con mismo GUID no se reaplican.
+- `marketUpdates` / `betUpdates`: entradas acumuladas recibidas por 41/42.
+  `storedMarkets` / `storedSelections`: cantidades actuales de la proyección.
+- `hasFixture: false`: llegaron mercados antes de los metadatos 37; están
+  almacenados, pero no se publica un evento ficticio para mostrarlos.
+- `lastMarketMessageAt` ausente: no se aplicaron mensajes 41/42 a esa carrera
+  durante este proceso. Consulte también `connections.*.diagnostic`: un error de
+  decode puede haber impedido procesar una entrega. No prueba falta de permisos.
+- `market160`: estado, selecciones, selecciones con precio válido y habilitadas
+  de Race Winner, si el mercado fue recibido. El precio debe ser finito y mayor
+  que 1; mercado y selección deben estar abiertos, evento activo, feed conectado
+  y selección sin liquidar. La interfaz distingue selecciones recibidas de cuotas
+  habilitadas. No se generan precios para llenar huecos.
+- `providerMarketUpdates > 0` con `betUpdates: 0`: llegaron `ProviderMarkets`
+  específicos de bookmakers sin `Bets` agregadas. `providerBetUpdates` cuenta sus
+  selecciones separadas de la cotización agregada. No se elige arbitrariamente
+  un bookmaker para reemplazar la cotización agregada de TRADE.
+- `staleBetUpdates`: actualizaciones ignoradas por ser anteriores al estado
+  almacenado. `observation: not_observed_in_current_projection` indica que no hay
+  una fila outright de ese ID en la proyección actual, no que la carrera no exista.
+
+Si no se reciben mercados del fixture, confirme con LSports para Test y el paquete
+correspondiente (4511 o 4510): distribución de mensajes 41 para fixture 20540377,
+competición asociada, habilitación efectiva y cobertura del mercado 160 para ese
+fixture y horario, y publicación de `Markets[].Bets` agregadas bajo la configuración
+Recommended List/Offered. Solicite comprobar entrega en su cola provisionada y un
+reenvío o recuperación oficial del estado de mercados. Activar Offered en el panel
+no demuestra que esta cola haya recibido una actualización. Adjunte hora UTC,
+paquete, fixture, contadores y diagnóstico sanitizado, nunca credenciales ni
+payloads completos. No se modifica `.env` ni se crean colas o suscripciones nuevas.

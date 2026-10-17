@@ -4,6 +4,8 @@ import { TextDecoder } from "node:util";
 import {
   FixtureMetadataUpdate,
   OutrightFixtureUpdate,
+  OutrightFixtureMarketUpdate,
+  OutrightSettlementsUpdate,
   LivescoreUpdate,
   MarketUpdate,
   SettlementUpdate,
@@ -291,7 +293,7 @@ export function decodeMessage(
     );
   metadata.guidSource ??= envelopeGuid ? "envelope" : "transport";
   if (!headers.MessageGuid) metadata.warnings!.push("transport_guid_absent");
-  if (![1, 2, 3, 31, 32, 35, 37].includes(type))
+  if (![1, 2, 3, 31, 32, 35, 37, 41, 42].includes(type))
     fail(
       "unsupported_message_type",
       "entity",
@@ -338,7 +340,7 @@ export function decodeMessage(
   if (
     type !== 31 &&
     type !== 32 &&
-    type !== 37 &&
+    ![37, 41, 42].includes(type) &&
     (!object(body) || !Array.isArray(body.Events))
   )
     fail(
@@ -347,13 +349,25 @@ export function decodeMessage(
       "El tipo de actualización requiere Body.Events como array.",
       ["Body.Events"],
     );
-  if (type === 37 && (!object(body) || !object(body.Competition) ||
-      !Number.isSafeInteger(body.Competition.Id) || Number(body.Competition.Id) <= 0 ||
-      !Array.isArray(body.Competition.Events) || body.Competition.Events.some((event: unknown) =>
-        !object(event) || !object(event.OutrightFixture) ||
-        (event.OutrightFixture.Participants !== undefined &&
-          (!Array.isArray(event.OutrightFixture.Participants) || event.OutrightFixture.Participants.some((p: unknown) => !object(p)))))))
-    fail("invalid_event_body", "entity", "Tipo 37 requiere Competition con ID, Events y OutrightFixture válidos.", ["Body.Competition"]);
+  if ([37, 41, 42].includes(type)) {
+    if (!object(body) || !object(body.Competition) ||
+        !Number.isSafeInteger(body.Competition.Id) || Number(body.Competition.Id) <= 0 ||
+        !Array.isArray(body.Competition.Events))
+      fail("invalid_event_body", "entity", "Outright requiere Competition con ID y Events válidos.", ["Body.Competition"]);
+    const competition = (body as Record<string, unknown>).Competition as Record<string, unknown>;
+    const rawEvents = competition.Events as unknown[];
+    if (rawEvents.some((event) => !object(event) || (type === 37
+      ? !object(event.OutrightFixture) || (event.OutrightFixture.Participants !== undefined &&
+          (!Array.isArray(event.OutrightFixture.Participants) || event.OutrightFixture.Participants.some((p: unknown) => !object(p))))
+      : !Array.isArray(event.Markets) || event.Markets.some((market: unknown) => !object(market) ||
+          !Number.isSafeInteger(market.Id) || Number(market.Id) <= 0 ||
+          (market.Bets !== undefined && (!Array.isArray(market.Bets) || market.Bets.some((bet: unknown) => !object(bet))))))))
+      fail("invalid_event_body", "entity", "Evento outright sin fixture o mercados válidos; se conserva para reprocesar.", ["Body.Competition.Events"]);
+    metadata.marketCount = rawEvents.reduce<number>((count, event) => count +
+      (Array.isArray((event as Record<string, unknown>).Markets) ? ((event as Record<string, unknown>).Markets as unknown[]).length : 0), 0);
+    metadata.betCount = rawEvents.reduce<number>((count, event) => count +
+      (((event as Record<string, unknown>).Markets as Record<string, unknown>[] | undefined) || []).reduce((n, m) => n + (Array.isArray(m.Bets) ? m.Bets.length : 0), 0), 0);
+  }
   if ((type === 31 || type === 32) && body != null && !object(body))
     fail(
       "invalid_event_body",
@@ -386,6 +400,20 @@ export function decodeMessage(
         fixtureId: event.fixtureId,
         outright: { competitionId: competition.id!, competitionName: competition.name,
           competitionType: competition.type, fixture: event.outrightFixture! },
+      }));
+      if (events.length !== ((value.Competition as Record<string, unknown>).Events as unknown[]).length)
+        throw new Error("Conversion lost events");
+    }
+    if (type === 41 || type === 42) {
+      const competition = type === 41
+        ? TransformerUtil.transform(value, OutrightFixtureMarketUpdate).competition
+        : TransformerUtil.transform(value, OutrightSettlementsUpdate).competition;
+      if (!competition || !Array.isArray(competition.events)) throw new Error("Invalid competition");
+      events = competition.events.map((event) => ({
+        fixtureId: event.fixtureId,
+        outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type },
+        markets: event.markets,
+        marketMessageType: type,
       }));
       if (events.length !== ((value.Competition as Record<string, unknown>).Events as unknown[]).length)
         throw new Error("Conversion lost events");
@@ -425,7 +453,7 @@ export function decodeMessage(
         e.fixtureId <= 0 ||
         (type === 1 && !e.fixture) ||
         (type === 37 && !e.outright?.fixture) ||
-        ([3, 35].includes(type) && !Array.isArray(e.markets)) ||
+        ([3, 35, 41, 42].includes(type) && !Array.isArray(e.markets)) ||
         (type === 2 && !e.livescore && !e.fixture),
     )
   )
@@ -434,6 +462,9 @@ export function decodeMessage(
       "entity",
       "La entidad contiene un evento sin ID seguro o sin los campos requeridos para su tipo.",
     );
+  if ([41, 42].includes(type) && events.some((event) => event.markets?.some((market) =>
+      market.bets?.some((bet) => typeof bet.id !== "string" || !bet.id.trim()))))
+    fail("invalid_event_body", "entity", "Selección outright sin ID estable; no se confirma el mensaje.");
   metadata.eventCount = events.length;
   return {
     guid: guid!,

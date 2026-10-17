@@ -24,7 +24,21 @@ export function createApp(source?: EventSource) {
       connections: data.connections,
       apiEventCount: data.events.length,
       coverage: data.coverage,
+      outrightDiagnostics: data.outrightDiagnostics,
       horseRacing: data.horseRacing,
+    });
+  });
+  app.get("/api/diagnostics/outright/:fixtureId", async (req, res) => {
+    const fixtureId = Number(req.params.fixtureId);
+    if (!/^\d+$/.test(req.params.fixtureId) || !Number.isSafeInteger(fixtureId) || fixtureId <= 0) {
+      res.status(400).json({ error: "Fixture ID inválido" });
+      return;
+    }
+    const data = await feed.getEvents();
+    const matches = (data.outrightDiagnostics || []).filter((entry) => entry.fixtureId === fixtureId);
+    res.json({ mode: data.mode, health: data.health, updatedAt: data.updatedAt,
+      observation: matches.length ? "observed" : "not_observed_in_current_projection",
+      matches, connections: data.connections,
     });
   });
   app.get("/api/events", async (_req, res) => res.json(await feed.getEvents()));
