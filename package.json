@@ -16,7 +16,8 @@
     "dev:api": "npm run dev -w @lsports/api",
     "dev:worker": "npm run dev -w @lsports/worker",
     "build": "npm run build --workspaces --if-present",
-    "test": "tsx --test apps/api/src/*.test.ts apps/worker/src/*.test.ts packages/feed-store/src/*.test.ts"
+    "test": "tsx --test apps/api/src/*.test.ts apps/worker/src/*.test.ts packages/feed-store/src/*.test.ts",
+    "diagnose:trade": "npm run diagnose -w @lsports/worker"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",

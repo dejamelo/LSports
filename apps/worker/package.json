@@ -5,12 +5,13 @@
   "scripts": {
     "dev": "tsx --env-file-if-exists=../../.env src/index.ts",
     "start": "tsx --env-file-if-exists=../../.env src/index.ts",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "diagnose": "tsx --env-file-if-exists=../../.env src/diagnose.ts"
   },
   "dependencies": {
     "@lsports/contracts": "*",
     "@lsports/demo": "*",
-    "amqplib": "^2.2.0",
+    "amqplib": "^0.10.9",
     "trade360-nodejs-sdk": "3.10.10",
     "@lsports/feed-store": "*",
     "axios": "^1.8.2"

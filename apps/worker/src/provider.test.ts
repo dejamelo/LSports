@@ -88,7 +88,7 @@ test("connected config requires credentials; no invented or demo credentials", (
   const previous = names.map((n) => process.env[n]);
   try {
     for (const n of names) delete process.env[n];
-    assert.throws(() => loadConfig(), /Missing LSPORTS_PREMATCH_USERNAME/);
+    assert.throws(() => loadConfig(), /LSPORTS_PREMATCH_USERNAME/);
   } finally {
     names.forEach((n, i) => {
       if (previous[i] === undefined) delete process.env[n];

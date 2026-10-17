@@ -90,3 +90,58 @@ Destinos necessários: hosts AMQP fornecidos nas portas confirmadas; HTTPS 443 p
 ## Testes
 
 `npm test` exercita SDK real contra servidor HTTP local controlado, envelopes oficiais de mensagens, IDs grandes, deltas de snapshot, ACK após persistência, suspensões, liquidações, deduplicação, expiração da projeção local, modo conectado sem fallback e configuração sem credenciais. Não são testes de autenticação ou cobertura do fornecedor. Testes de navegador usam respostas controladas para validar estados da interface. Build inclui verificação TypeScript de API/worker/frontend. Credenciais e arquivos `.runtime` são ignorados pelo Git.
+
+## Diagnóstico de autenticação e acesso
+
+Pare o worker antes de testar para evitar confundir as conexões. Preserve seu `.env` existente. Atualize a branch e as dependências e execute, na raiz:
+
+```sh
+git switch feat/sportsbook-demo
+git pull --ff-only origin feat/sportsbook-demo
+npm ci
+npm run diagnose:trade
+```
+
+O comando usa o mesmo `.env` e o mesmo SDK do worker, independentemente de `DATA_MODE`. Faz consultas autenticadas de leitura para **cada pacote**: status da distribuição, snapshot, catálogo e conexão AMQP com verificação passiva da fila existente. Uma rejeição na distribuição não impede o teste independente de snapshot ou RabbitMQ. Não inicia/para distribuição, não altera assinaturas, não consome/ACK mensagens e não modifica `.env` nem o arquivo de eventos. Snapshot pode retornar muitos eventos; usa timeout de 20s e limite de resposta de 50 MiB. AMQP usa timeout de conexão de 15s. Não execute em loop se o fornecedor limitar requisições.
+
+Exit code 1 significa falha ou requisito ausente; os JSONs anteriores ao aviso de lifecycle do npm mostram a causa. Exit code 0 confirma apenas as sondagens realizadas; **não comprova permissão de `basic.consume`, recebimento contínuo, sincronização do feed ou cobertura de Hípica**. Essa validação exige o worker real.
+
+Cada resultado informa `lane`, `packageId`, `operation`, `status`, `protocol`, códigos disponíveis (`httpStatus`, `providerStatus` do Header LSports, `amqpCode`, `networkCode`) e mensagem sanitizada. A tela e `/api/health` também recebem o diagnóstico da operação que bloqueou o worker. Respostas e erros brutos, request bodies, headers, username, password, tokens, stacks e URLs com credenciais não são registrados. Mensagens do fornecedor são traduzidas para categorias controladas, sem reproduzir texto arbitrário. Campos não disponíveis não são inventados.
+
+| Operação / resultado                         | Interpretação                                                                                                                             |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `config`, `missing_credentials`              | Lista **nomes** das variáveis ausentes/vazias; nenhuma autenticação foi tentada para esse pacote.                                         |
+| `distribution.status`, HTTP 401 / Header 401 | Rejeição ao consultar `POST /Package/GetDistributionStatus`. O worker ainda não tentou snapshot ou RabbitMQ.                              |
+| `distribution.start`, HTTP 403               | Distribuição estava desligada, mas o início em `POST /Distribution/Start` foi negado. O diagnóstico de leitura não chama esse endpoint.   |
+| `snapshot.events`, HTTP 401/403              | Falhou especificamente `/Prematch/GetEvents` ou `/Inplay/GetEvents`. HTTP 403 pode vir do fornecedor ou de proxy; não prova senha errada. |
+| HTTP 200, Header 401 / `Header.Errors`       | Erro semântico do fornecedor mesmo com transporte HTTP bem-sucedido; agora tratado como falha, não como snapshot vazio.                   |
+| `amqp.connect`, AMQP 403                     | Broker recusou login/mecanismo PLAIN **ou** acesso ao vhost; o código sozinho não distingue esses casos.                                  |
+| `amqp.queue`, AMQP 404                       | Fila ausente no vhost; o diagnóstico não a cria. A prova passiva não testa `basic.consume`.                                               |
+| `amqp.consume`, AMQP 403                     | Worker foi impedido de consumir a fila. Confirme permissão de leitura.                                                                    |
+| `network` / `tls`                            | Problema de rede, listener, timeout ou certificados, separado de credenciais ausentes.                                                    |
+
+### Comparação com o SDK oficial
+
+O portal `docs.lsports.eu` continuou retornando 403 **pelo proxy deste ambiente de desenvolvimento**; isso não é uma resposta dos seus pacotes no Mac. Foram reconferidos os fontes oficiais e a versão instalada:
+
+- `HttpRequestDto`, `Mapper`, `BaseHttpClient` e `AxiosService`: autenticação HTTP por JSON POST com `packageId`, `username`, `password`. Sem Basic Auth, Bearer, senha em query string ou username derivado do package ID. O código continua usando as factories oficiais.
+- Snapshot: `GetEventRequestDto`/`GetInPlayEventRequestDto`, sem filtros opcionais, para recuperação do pacote. Rotas oficiais permanecem `/Prematch/GetEvents` e `/Inplay/GetEvents`; não foi acrescentado um parâmetro `Test` inventado. Os testes verificam o corpo HTTP realmente enviado pelo SDK.
+- `sample/feed-sample/src/config/app-config.json` e `consume-queue-name`: vhosts `StmPreMatch`/`StmInPlay`, filas `_4511_`/`_4510_`, conforme IDs informados. O mesmo par do pacote é usado em HTTP e AMQP por padrão. Não se presume que o username RabbitMQ seja `4511` ou `4510`.
+- O `amqplib` direto foi alinhado à linha 0.10 usada pelo SDK; o lockfile fixa a instalação. Isso remove uma divergência de dependências, mas não prova a causa de uma rejeição de autenticação.
+- Corrigida a observação dos erros HTTP: o SDK CommonJS usa uma instância de Axios diferente daquela carregada por import ESM. Timeout, bloqueio de redirects e captura de status agora são aplicados à instância efetivamente usada pelo SDK, inclusive quando há dependência aninhada. O observador guarda apenas códigos/categorias. Isso corrige os diagnósticos e limites, sem alterar o formato de autenticação.
+- Corrigida a perda do erro original quando fechar a conexão AMQP após uma falha HTTP gerava um evento `close`. O diagnóstico preserva a operação que falhou.
+
+### Credenciais diferentes para HTTP e RabbitMQ
+
+Só configure overrides se o fornecedor tiver atribuído um par RabbitMQ ou vhost diferente. As variáveis existentes continuam válidas e não são alteradas automaticamente:
+
+- `LSPORTS_PREMATCH_USERNAME` / `LSPORTS_PREMATCH_PASSWORD`: par HTTP do pacote 4511 e default AMQP.
+- `LSPORTS_INPLAY_USERNAME` / `LSPORTS_INPLAY_PASSWORD`: par HTTP do pacote 4510 e default AMQP.
+- `LSPORTS_PREMATCH_MQ_USERNAME` / `LSPORTS_PREMATCH_MQ_PASSWORD`: par AMQP explícito opcional, sempre completo.
+- `LSPORTS_INPLAY_MQ_USERNAME` / `LSPORTS_INPLAY_MQ_PASSWORD`: equivalente para InPlay.
+- `LSPORTS_PREMATCH_VHOST` / `LSPORTS_INPLAY_VHOST`: overrides opcionais; default conforme SDK.
+- `LSPORTS_PREMATCH_QUEUE` / `LSPORTS_INPLAY_QUEUE`: filas específicas somente quando atribuídas pelo fornecedor.
+
+Node dá precedência às variáveis já exportadas no shell sobre os valores do `.env`. Se você preencheu `.env` mas havia exports antigos, rode o diagnóstico em um terminal sem esses exports ou use `unset` apenas nos nomes conflitantes. Não imprima variáveis nem use `source .env`. Um valor composto só de espaços é tratado como ausente; os demais valores de credenciais não são recortados ou modificados silenciosamente.
+
+Após corrigir o parâmetro identificado, execute `npm run diagnose:trade` outra vez e depois `npm run dev`. A causa da rejeição real só pode ser estabelecida com esse resultado autenticado; testes locais com respostas controladas não validam o acesso aos pacotes do fornecedor.

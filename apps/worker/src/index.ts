@@ -25,9 +25,13 @@ async function main() {
     await delay(interval, undefined, { signal: abort.signal }).catch(() => {});
   }
 }
-main().catch(() => {
+main().catch(async (error) => {
+  const { describeFailure } = await import("./diagnostics.js");
   console.error(
-    "Worker no iniciado. Verificá DATA_MODE, variables LSPORTS_* requeridas y el bloqueo del archivo de estado. No se muestran credenciales.",
+    JSON.stringify({
+      status: "error",
+      ...describeFailure(error, "worker.start", "local"),
+    }),
   );
   process.exitCode = 1;
 });

@@ -31,6 +31,8 @@ O build gera `apps/web/dist` e verifica os tipos dos serviços Node, que são ex
 
 [Configuração completa TRADE, variáveis do Mac, parâmetros confirmados, recuperação, cobertura de Hípica e limites](docs/TRADE.md). A conexão real aos pacotes depende das credenciais e ainda não foi validada neste ambiente. `.env` e `.runtime` são ignorados; nunca use variáveis `VITE_*` para segredos.
 
+Para investigar autenticação sem iniciar distribuição nem consumir mensagens, pare o worker e execute `npm run diagnose:trade`. O comando preserva `.env`, testa cada operação separadamente e retorna códigos HTTP/AMQP e mensagens sanitizadas. Veja a seção de diagnóstico em [docs/TRADE.md](docs/TRADE.md).
+
 ## Estrutura
 
 - `apps/web`: filtros de esportes, Prepartido/En vivo/Hípica, mercados e bilhete simulado, polling a cada três segundos.

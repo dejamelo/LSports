@@ -7,7 +7,14 @@ import { createPublisher, statePath } from "@lsports/feed-store";
 import { loadConfig } from "./config.js";
 import type { PackageConfig } from "./config.js";
 import { TradeState, classifySport } from "./state.js";
-import { clients, decodeMessage, safeFailure } from "./provider.js";
+import { clients, decodeMessage } from "./provider.js";
+import {
+  operation,
+  describeFailure,
+  formatDiagnostic,
+  OperationError,
+} from "./diagnostics.js";
+import { connectMq } from "./mq.js";
 
 export async function runConnected(signal: AbortSignal) {
   const fatal = new AbortController();
@@ -36,7 +43,8 @@ export async function runConnected(signal: AbortSignal) {
   }
   const state = new TradeState();
   const publish = createPublisher(path);
-  const save = () => publish(state.feed());
+  const save = () =>
+    operation("file.persist", "local", () => publish(state.feed()));
   let writing: Promise<void> | undefined;
   const heartbeat = setInterval(() => {
     if (!writing)
@@ -58,10 +66,15 @@ export async function runConnected(signal: AbortSignal) {
           attempt = 0;
         } catch (error) {
           if (!signal.aborted) {
-            const message = safeFailure(error);
-            state.set(pkg.lane, { phase: "error", message });
+            const diagnostic = describeFailure(error, "worker.start", "local");
+            const message = formatDiagnostic(diagnostic);
+            state.set(pkg.lane, { phase: "error", message, diagnostic });
             console.error(
-              JSON.stringify({ lane: pkg.lane, status: "error", message }),
+              JSON.stringify({
+                lane: pkg.lane,
+                status: "error",
+                ...diagnostic,
+              }),
             );
             await save();
           }
@@ -107,6 +120,7 @@ export async function session(
   const lane = pkg.lane;
   state.set(lane, {
     phase: "recovering",
+    diagnostic: undefined,
     message: "Conectando y recuperando snapshot…",
   });
   await save();
@@ -114,28 +128,20 @@ export async function session(
   await api.startDistribution();
   await delay(2000, undefined, { signal });
   if (signal.aborted) return;
-  const connection = await dependencies.connect(
-    {
-      protocol: pkg.tls ? "amqps" : "amqp",
-      hostname: pkg.hostname,
-      port: pkg.port,
-      username: pkg.username,
-      password: pkg.password,
-      vhost: pkg.vhost,
-      heartbeat: 30,
-    },
-    { timeout: 15000, ...(pkg.tls ? { servername: pkg.hostname } : {}) },
-  );
+  const connection = await connectMq(pkg, dependencies.connect);
   let failure: unknown;
   let closed = false;
   const fail = (error: unknown) => {
+    if (closed) return;
     failure = error;
     closed = true;
+    const diagnostic = describeFailure(error, "amqp.connection", "amqp");
     state.set(lane, {
       phase: signal.aborted ? "stopped" : "error",
       message: signal.aborted
         ? "Worker detenido. Cuotas bloqueadas."
-        : safeFailure(error),
+        : formatDiagnostic(diagnostic),
+      diagnostic: signal.aborted ? undefined : diagnostic,
     });
     void save().catch(() => {});
   };
@@ -149,10 +155,14 @@ export async function session(
   let lastReceived = Date.now();
   const seen = new Set<string>();
   try {
-    const channel = await connection.createChannel();
-    channel.on("error", fail);
+    const channel = await operation("amqp.channel", "amqp", () =>
+      connection.createChannel(),
+    );
+    channel.on("error", (error) =>
+      fail(new OperationError(describeFailure(error, "amqp.channel", "amqp"))),
+    );
     channel.on("close", () => fail(new Error("Channel closed")));
-    await channel.prefetch(100);
+    await operation("amqp.prefetch", "amqp", () => channel.prefetch(100));
     const processMessage = async (msg: ConsumeMessage) => {
       if (closed) return;
       try {
@@ -175,21 +185,25 @@ export async function session(
         try {
           channel.nack(msg, false, false);
         } catch {}
-        fail(error);
+        fail(
+          new OperationError(describeFailure(error, "feed.decode", "local")),
+        );
       }
     };
-    await channel.consume(
-      pkg.queue,
-      (msg) => {
-        if (!msg) {
-          fail(new Error("Consumer cancelled"));
-          return;
-        }
-        lastReceived = Date.now();
-        if (recovering) buffered.push(msg);
-        else processing = processing.then(() => processMessage(msg));
-      },
-      { noAck: false },
+    await operation("amqp.consume", "amqp", () =>
+      channel.consume(
+        pkg.queue,
+        (msg) => {
+          if (!msg) {
+            fail(new Error("Consumer cancelled"));
+            return;
+          }
+          lastReceived = Date.now();
+          if (recovering) buffered.push(msg);
+          else processing = processing.then(() => processMessage(msg));
+        },
+        { noAck: false },
+      ),
     );
     const recover = async () => {
       recovering = true;
@@ -202,7 +216,7 @@ export async function session(
       const started = Date.now();
       const rows = await api.snapshot();
       if (closed || signal.aborted)
-        throw new Error("Disconnected during recovery");
+        throw failure || new Error("Disconnected during recovery");
       state.replace(lane, rows, started);
       seen.clear();
       // Messages remain unacknowledged while HTTP recovery runs; replay deltas over snapshot.
@@ -215,6 +229,7 @@ export async function session(
       recovering = false;
       state.set(lane, {
         phase: "connected",
+        diagnostic: undefined,
         message: "Feed conectado; snapshot recuperado.",
       });
       await save();
@@ -235,12 +250,13 @@ export async function session(
         ),
       });
       await save();
-    } catch {
+    } catch (error) {
+      const diagnostic = describeFailure(error, "metadata.sports", "http");
       console.warn(
         JSON.stringify({
           lane,
           status: "metadata_unavailable",
-          message: "El catálogo no confirma la habilitación de Hípica.",
+          ...diagnostic,
         }),
       );
     }
@@ -248,20 +264,29 @@ export async function session(
     while (!closed && !signal.aborted) {
       await delay(500, undefined, { signal }).catch(() => {});
       if (Date.now() - lastReceived > config.staleMs)
-        throw new Error("Feed timeout");
+        throw new OperationError(
+          describeFailure(
+            Object.assign(new Error("Feed timeout"), { code: "ETIMEDOUT" }),
+            "feed.stale",
+            "amqp",
+          ),
+        );
       if (Date.now() >= nextSnapshot) {
         await recover();
         nextSnapshot = Date.now() + config.recoveryMs;
       }
     }
     if (!signal.aborted) throw failure || new Error("Disconnected");
+  } catch (error) {
+    if (!signal.aborted) fail(error);
+    throw error;
   } finally {
     signal.removeEventListener("abort", abort);
     state.set(lane, {
       phase: signal.aborted ? "stopped" : "error",
       message: signal.aborted
         ? "Worker detenido."
-        : "Conexión interrumpida; cuotas bloqueadas.",
+        : state.connections[lane].message,
     });
     try {
       await save();

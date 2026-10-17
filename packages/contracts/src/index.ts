@@ -32,7 +32,47 @@ export interface SportEvent {
   source?: "prematch" | "inplay";
 }
 export type Lane = "prematch" | "inplay";
+export interface IntegrationDiagnostic {
+  operation:
+    | "config"
+    | "distribution.status"
+    | "distribution.start"
+    | "snapshot.events"
+    | "metadata.sports"
+    | "amqp.connect"
+    | "amqp.channel"
+    | "amqp.prefetch"
+    | "amqp.queue"
+    | "amqp.consume"
+    | "amqp.connection"
+    | "feed.decode"
+    | "feed.stale"
+    | "file.persist"
+    | "worker.start";
+  protocol: "http" | "amqp" | "local";
+  category:
+    | "missing_credentials"
+    | "configuration"
+    | "authentication_rejected"
+    | "authentication_or_permission"
+    | "permission_denied"
+    | "not_found"
+    | "rate_limited"
+    | "invalid_request"
+    | "network"
+    | "tls"
+    | "supplier_error"
+    | "invalid_response"
+    | "unexpected";
+  message: string;
+  httpStatus?: number;
+  providerStatus?: number;
+  amqpCode?: number;
+  networkCode?: string;
+  fields?: string[];
+}
 export interface ConnectionState {
+  diagnostic?: IntegrationDiagnostic;
   phase: "starting" | "recovering" | "connected" | "error" | "stopped";
   message: string;
   lastMessageAt?: string;

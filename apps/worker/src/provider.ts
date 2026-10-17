@@ -1,4 +1,10 @@
-import axios from "axios";
+import { sdkAxios as axios } from "./diagnostics.js";
+import {
+  operation,
+  describeFailure,
+  formatDiagnostic,
+  OperationError,
+} from "./diagnostics.js";
 import {
   CustomersApiFactory,
   SnapshotApiFactory,
@@ -30,6 +36,7 @@ export const silentLogger: ILogger = {
 };
 axios.defaults.timeout = 20000;
 axios.defaults.maxContentLength = 50 * 1024 * 1024;
+axios.defaults.maxRedirects = 0;
 export function clients(
   config: PackageConfig,
   urls: { snapshotUrl: string; customersUrl: string },
@@ -62,30 +69,50 @@ export function clients(
   });
   return {
     async snapshot(): Promise<TradeEvent[]> {
-      const response =
-        config.lane === "inplay"
-          ? await snapshot.getEvents(new GetInPlayEventRequestDto({}))
-          : await snapshot.getEvents(new GetEventRequestDto({}));
-      if (response === undefined || response === null)
-        throw new Error("Invalid snapshot response");
-      const rows = Array.isArray(response) ? response : [response];
-      if (rows.some((e) => !Number.isSafeInteger(e.fixtureId) || !e.fixture))
-        throw new Error("Invalid snapshot event");
-      return rows;
+      return operation("snapshot.events", "http", async () => {
+        const response =
+          config.lane === "inplay"
+            ? await snapshot.getEvents(new GetInPlayEventRequestDto({}))
+            : await snapshot.getEvents(new GetEventRequestDto({}));
+        if (response === undefined || response === null)
+          throw new Error("Invalid snapshot response");
+        const rows = Array.isArray(response) ? response : [response];
+        if (rows.some((e) => !Number.isSafeInteger(e.fixtureId) || !e.fixture))
+          throw new Error("Invalid snapshot event");
+        return rows;
+      });
     },
     async catalog() {
-      const sports = await metadata.getSports();
-      if (!Array.isArray(sports)) throw new Error("Invalid metadata");
-      return sports;
+      return operation("metadata.sports", "http", async () => {
+        const sports = await metadata.getSports();
+        if (!Array.isArray(sports)) throw new Error("Invalid metadata");
+        return sports;
+      });
+    },
+    async distributionStatus() {
+      return operation("distribution.status", "http", async () => {
+        const status =
+          await distribution.getDistributionStatus(StatusResponseBody);
+        if (!status || typeof status.isDistributionOn !== "boolean")
+          throw new Error("Distribution status missing");
+        return status;
+      });
     },
     async startDistribution() {
-      let status = await distribution.getDistributionStatus(StatusResponseBody);
-      if (!status) throw new Error("Distribution status missing");
+      let status = await this.distributionStatus();
       if (!status.isDistributionOn) {
-        await distribution.startDistribution(StartResponseBody);
-        status = await distribution.getDistributionStatus(StatusResponseBody);
+        await operation("distribution.start", "http", () =>
+          distribution.startDistribution(StartResponseBody),
+        );
+        status = await this.distributionStatus();
         if (!status?.isDistributionOn)
-          throw new Error("Distribution did not start");
+          throw new OperationError({
+            operation: "distribution.start",
+            protocol: "http",
+            category: "invalid_response",
+            message:
+              "La distribución sigue apagada después de solicitar inicio.",
+          });
       }
     },
   };
@@ -133,13 +160,5 @@ export function decodeMessage(
   return { guid: msgGuid, at, events, interrupted, type };
 }
 export function safeFailure(error: unknown): string {
-  // Classification only. Never return supplier text, URLs, usernames, body or stack.
-  const text = error instanceof Error ? `${error.name} ${error.message}` : "";
-  if (/401|403|ACCESS_REFUSED|authentication/i.test(text))
-    return "Autenticación o permisos rechazados. Revisá las credenciales y el acceso al paquete.";
-  if (/certificate|TLS|SSL/i.test(text))
-    return "Falló la verificación TLS. Revisá puerto y certificado del proveedor.";
-  if (/ECONN|ETIMEDOUT|ENOTFOUND|timeout/i.test(text))
-    return "Proveedor no accesible. Revisá red, host y puerto.";
-  return "Falló la conexión, el snapshot o el procesamiento del proveedor. Reintentando sin datos demo.";
+  return formatDiagnostic(describeFailure(error, "worker.start", "local"));
 }
