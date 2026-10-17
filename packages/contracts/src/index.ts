@@ -63,8 +63,38 @@ export interface IntegrationDiagnostic {
     | "tls"
     | "supplier_error"
     | "invalid_response"
+    | "response_limit"
+    | "redirect"
+    | "sdk_error"
     | "unexpected";
   message: string;
+  reason?:
+    | "timeout"
+    | "response_size_limit"
+    | "request_size_limit"
+    | "redirect_limit"
+    | "connection_reset"
+    | "dns"
+    | "tls_failure"
+    | "non_json_response"
+    | "sdk_conversion"
+    | "sdk_validation"
+    | "invalid_snapshot"
+    | "unknown_exception";
+  stage?: "request" | "response" | "sdk" | "validation";
+  errorType?:
+    | "axios"
+    | "sdk_http"
+    | "sdk_conversion"
+    | "sdk_validation"
+    | "syntax"
+    | "type"
+    | "range"
+    | "unknown";
+  clientCode?: string;
+  elapsedMs?: number;
+  timeoutMs?: number;
+  responseLimitBytes?: number;
   httpStatus?: number;
   providerStatus?: number;
   amqpCode?: number;

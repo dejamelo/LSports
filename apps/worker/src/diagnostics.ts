@@ -12,6 +12,11 @@ import type { IntegrationDiagnostic } from "@lsports/contracts";
 export type Operation = IntegrationDiagnostic["operation"];
 export type Protocol = IntegrationDiagnostic["protocol"];
 type Observation = {
+  startedAt?: number;
+  reason?: IntegrationDiagnostic["reason"];
+  clientCode?: string;
+  timeoutMs?: number;
+  responseLimitBytes?: number;
   httpStatus?: number;
   providerStatus?: number;
   envelopeError?: boolean;
@@ -37,6 +42,8 @@ function observe(
       data = undefined;
     }
   }
+  if (typeof data === "string" && data.trim())
+    observation.reason = "non_json_response";
   const header =
     data && typeof data === "object" && "Header" in data
       ? (data.Header as Record<string, unknown>)
@@ -57,6 +64,15 @@ function observe(
 }
 axios.defaults.adapter = async (config) => {
   const observation = observations.getStore();
+  if (observation) {
+    if (typeof config.timeout === "number" && config.timeout > 0)
+      observation.timeoutMs = config.timeout;
+    if (
+      typeof config.maxContentLength === "number" &&
+      config.maxContentLength > 0
+    )
+      observation.responseLimitBytes = config.maxContentLength;
+  }
   try {
     const response = await adapter(config);
     if (observation) {
@@ -66,8 +82,15 @@ axios.defaults.adapter = async (config) => {
     }
     return response;
   } catch (error) {
-    if (observation && axios.isAxiosError(error) && error.response)
-      observe(observation, error.response);
+    if (observation && axios.isAxiosError(error)) {
+      if (error.response) observe(observation, error.response);
+      else
+        observation.httpStatus =
+          status(error.request?.res?.statusCode) || observation.httpStatus;
+      if (typeof error.code === "string" && clientCodes.has(error.code))
+        observation.clientCode = error.code;
+      observation.reason = classifyReason(error.message) || observation.reason;
+    }
     throw error;
   }
 };
@@ -87,6 +110,36 @@ const networkCodes = new Set([
   "EPIPE",
   "ERR_NETWORK",
 ]);
+const clientCodes = new Set([
+  ...networkCodes,
+  "ERR_BAD_RESPONSE",
+  "ERR_BAD_REQUEST",
+  "ERR_FR_TOO_MANY_REDIRECTS",
+  "ERR_INVALID_URL",
+  "ERR_NOT_SUPPORT",
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+function classifyReason(
+  text: string,
+): IntegrationDiagnostic["reason"] | undefined {
+  if (
+    /maxContentLength|response size.*exceed|maximum response size/i.test(text)
+  )
+    return "response_size_limit";
+  if (/maxBodyLength/i.test(text)) return "request_size_limit";
+  if (/timeout|timed out/i.test(text)) return "timeout";
+  if (/maximum.*redirect|too many redirects/i.test(text))
+    return "redirect_limit";
+  if (/socket hang up|ECONNRESET/i.test(text)) return "connection_reset";
+  if (/getaddrinfo|ENOTFOUND|EAI_AGAIN/i.test(text)) return "dns";
+  if (/certificate|CERT_|TLS|SSL|self.signed/i.test(text)) return "tls_failure";
+  if (/Invalid snapshot (event|response)/i.test(text))
+    return "invalid_snapshot";
+  return undefined;
+}
 export function describeFailure(
   error: unknown,
   operation: Operation,
@@ -99,9 +152,33 @@ export function describeFailure(
   let amqpCode: number | undefined;
   let networkCode: string | undefined;
   let text = "";
+  let reason = observation.reason;
+  let clientCode = observation.clientCode;
+  let errorType: IntegrationDiagnostic["errorType"] = "unknown";
   for (let i = 0; i < 5 && current && typeof current === "object"; i++) {
     const record = current as Record<string, unknown>;
-    if (typeof record.message === "string") text += " " + record.message;
+    if (typeof record.message === "string")
+      text += " " + record.message.slice(0, 4096);
+    if (errorType === "unknown") {
+      const types: Record<
+        string,
+        NonNullable<IntegrationDiagnostic["errorType"]>
+      > = {
+        AxiosError: "axios",
+        HttpResponseError: "sdk_http",
+        ConversionError: "sdk_conversion",
+        IdTransformationError: "sdk_conversion",
+        ValidationError: "sdk_validation",
+        ZodError: "sdk_validation",
+        SyntaxError: "syntax",
+        TypeError: "type",
+        RangeError: "range",
+      };
+      if (typeof record.name === "string" && Object.hasOwn(types, record.name))
+        errorType = types[record.name];
+    }
+    if (typeof record.code === "string" && clientCodes.has(record.code))
+      clientCode ??= record.code;
     if (
       protocol === "http" &&
       record.response &&
@@ -116,6 +193,11 @@ export function describeFailure(
       networkCode = record.code;
     current = record.cause;
   }
+  if (networkCodes.has(clientCode || "")) networkCode ??= clientCode;
+  if (!reason && errorType === "sdk_conversion") reason = "sdk_conversion";
+  if (!reason && errorType === "sdk_validation") reason = "sdk_validation";
+  if (!reason && (observation.providerStatus || httpStatus || 0) < 400)
+    reason = classifyReason(text);
   if (protocol === "amqp" && !amqpCode) {
     const match = text.match(
       /(?:code[=: ]+|\b)(403|404|405|406|530|541)\s*(?:\(|-|ACCESS_REFUSED|NOT_FOUND|ACCESS-REFUSED|NOT-FOUND)/i,
@@ -131,7 +213,22 @@ export function describeFailure(
   let category: IntegrationDiagnostic["category"] = "unexpected";
   let message =
     "Falló la operación. No se publica el texto crudo del proveedor por seguridad.";
-  if (!code && /certificate|CERT_|TLS|SSL|self.signed/i.test(text)) {
+  if (reason === "response_size_limit") {
+    category = "response_limit";
+    message =
+      "La respuesta superó el límite local de tamaño. Revisá responseLimitBytes; no es un rechazo de autenticación.";
+  } else if (reason === "request_size_limit") {
+    category = "invalid_request";
+    message = "La solicitud superó el límite de tamaño del cliente HTTP.";
+  } else if (reason === "timeout") {
+    category = "network";
+    message =
+      "La solicitud agotó el tiempo de espera. Revisá timeoutMs y conectividad; no confirma un error de credenciales.";
+  } else if (reason === "redirect_limit") {
+    category = "redirect";
+    message =
+      "El cliente rechazó una redirección HTTP. Revisá el endpoint canónico; no se reenvían credenciales automáticamente.";
+  } else if (!code && reason === "tls_failure") {
     category = "tls";
     message =
       "Falló la negociación o verificación TLS. Revisá listener, puerto y certificado.";
@@ -180,6 +277,22 @@ export function describeFailure(
     category = "supplier_error";
     message =
       "El proveedor devolvió errores en Header.Errors; contenido crudo omitido.";
+  } else if (reason === "sdk_conversion" || reason === "sdk_validation") {
+    category = "sdk_error";
+    message =
+      reason === "sdk_conversion"
+        ? "El SDK no pudo convertir la respuesta. Revisá el esquema del proveedor y la versión del SDK."
+        : "El SDK rechazó la configuración o estructura de la solicitud antes de completarla.";
+  } else if (
+    reason === "invalid_snapshot" ||
+    reason === "non_json_response" ||
+    (protocol === "http" && ["syntax", "type", "range"].includes(errorType))
+  ) {
+    category = "invalid_response";
+    message =
+      reason === "non_json_response"
+        ? "El servidor devolvió contenido que no es JSON; puede ser una página de proxy o un endpoint incorrecto."
+        : "La respuesta no pudo normalizarse como snapshot válido. No se reemplaza por datos demo.";
   } else if (protocol === "http" && httpStatus && httpStatus < 300) {
     category = "invalid_response";
     message =
@@ -190,6 +303,31 @@ export function describeFailure(
     protocol,
     category,
     message,
+    ...(reason
+      ? { reason }
+      : category === "unexpected"
+        ? { reason: "unknown_exception" as const }
+        : {}),
+    ...(protocol === "http"
+      ? {
+          stage: (errorType === "sdk_conversion"
+            ? "sdk"
+            : errorType === "sdk_validation"
+              ? "validation"
+              : httpStatus
+                ? "response"
+                : "request") as IntegrationDiagnostic["stage"],
+          errorType,
+        }
+      : {}),
+    ...(clientCode ? { clientCode } : {}),
+    ...(observation.startedAt
+      ? { elapsedMs: Math.max(0, Date.now() - observation.startedAt) }
+      : {}),
+    ...(observation.timeoutMs ? { timeoutMs: observation.timeoutMs } : {}),
+    ...(observation.responseLimitBytes
+      ? { responseLimitBytes: observation.responseLimitBytes }
+      : {}),
     ...(httpStatus ? { httpStatus } : {}),
     ...(observation.providerStatus
       ? { providerStatus: observation.providerStatus }
@@ -203,7 +341,7 @@ export async function operation<T>(
   protocol: Protocol,
   action: () => Promise<T>,
 ): Promise<T> {
-  const observation: Observation = {};
+  const observation: Observation = { startedAt: Date.now() };
   return observations.run(observation, async () => {
     try {
       return await action();

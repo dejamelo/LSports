@@ -1,3 +1,4 @@
+import { resolveConsumeQueueName } from "trade360-nodejs-sdk";
 import type { Lane } from "@lsports/contracts";
 import { configError } from "./diagnostics.js";
 export interface PackageConfig {
@@ -12,6 +13,8 @@ export interface PackageConfig {
   port: number;
   tls: boolean;
   queue: string;
+  queueSource?: "sdk_default" | "environment_override";
+  defaultQueue?: string;
 }
 function integer(
   name: string,
@@ -80,7 +83,14 @@ export function loadPackageConfig(lane: Lane): PackageConfig {
       (lane === "prematch" ? "StmPreMatch" : "StmInPlay"),
     port,
     tls,
-    queue: process.env[`${prefix}_QUEUE`]?.trim() || `_${packageId}_`,
+    queue: resolveConsumeQueueName({
+      packageId,
+      customQueueName: process.env[`${prefix}_QUEUE`],
+    }),
+    defaultQueue: resolveConsumeQueueName({ packageId }),
+    queueSource: process.env[`${prefix}_QUEUE`]?.trim()
+      ? "environment_override"
+      : "sdk_default",
   };
 }
 export function loadRuntimeConfig() {

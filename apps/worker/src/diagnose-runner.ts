@@ -24,6 +24,23 @@ export async function diagnosePackage(
     secrets.some((s) => text.includes(s)) || /[:@\r\n]/.test(text)
       ? "[omitido]"
       : text.slice(0, 255);
+  const defaultQueue = pkg.defaultQueue || `_${pkg.packageId}_`;
+  const queueDetails = {
+    queue: identifier(pkg.queue),
+    sdkDefaultQueue: defaultQueue,
+    queueSource: pkg.queueSource || "unspecified",
+    queueVariable: `LSPORTS_${pkg.lane.toUpperCase()}_QUEUE`,
+    vhost: identifier(pkg.vhost),
+  };
+  const warnings: string[] = [];
+  if ((pkg.tls && pkg.port === 5672) || (!pkg.tls && pkg.port === 5671))
+    warnings.push(
+      "Puerto/TLS no coincide con el listener estándar; confirmá si el proveedor asignó un listener personalizado.",
+    );
+  if (pkg.queue === String(pkg.packageId))
+    warnings.push(
+      `El override de cola es el ID sin underscores. El default oficial es ${defaultQueue}; revisá LSPORTS_${pkg.lane.toUpperCase()}_QUEUE y los exports del shell. No se cambia automáticamente una cola personalizada.`,
+    );
   write({
     operation: "config",
     status: "ok",
@@ -35,17 +52,11 @@ export async function diagnosePackage(
       host: identifier(pkg.hostname),
       port: pkg.port,
       tls: pkg.tls,
-      vhost: identifier(pkg.vhost),
-      queue: identifier(pkg.queue),
+      ...queueDetails,
     },
     snapshotHost: identifier(new URL(urls.snapshotUrl).hostname),
     customersHost: identifier(new URL(urls.customersUrl).hostname),
-    warnings:
-      (pkg.tls && pkg.port === 5672) || (!pkg.tls && pkg.port === 5671)
-        ? [
-            "Puerto/TLS no coincide con el listener estándar; confirmá si el proveedor asignó un listener personalizado.",
-          ]
-        : [],
+    warnings,
   });
   const api = deps.clientFactory(pkg, urls);
   async function check<T>(
@@ -56,11 +67,21 @@ export async function diagnosePackage(
   ) {
     try {
       const result = await operation(name, protocol, action);
-      write({ operation: name, protocol, status: "ok", ...summary(result) });
+      write({
+        operation: name,
+        protocol,
+        status: "ok",
+        ...(name === "amqp.queue" ? queueDetails : {}),
+        ...summary(result),
+      });
       return result;
     } catch (error) {
       healthy = false;
-      write({ status: "error", ...describeFailure(error, name, protocol) });
+      write({
+        status: "error",
+        ...(name === "amqp.queue" ? queueDetails : {}),
+        ...describeFailure(error, name, protocol),
+      });
       return undefined;
     }
   }

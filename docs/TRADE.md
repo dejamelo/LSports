@@ -145,3 +145,47 @@ Só configure overrides se o fornecedor tiver atribuído um par RabbitMQ ou vhos
 Node dá precedência às variáveis já exportadas no shell sobre os valores do `.env`. Se você preencheu `.env` mas havia exports antigos, rode o diagnóstico em um terminal sem esses exports ou use `unset` apenas nos nomes conflitantes. Não imprima variáveis nem use `source .env`. Um valor composto só de espaços é tratado como ausente; os demais valores de credenciais não são recortados ou modificados silenciosamente.
 
 Após corrigir o parâmetro identificado, execute `npm run diagnose:trade` outra vez e depois `npm run dev`. A causa da rejeição real só pode ser estabelecida com esse resultado autenticado; testes locais com respostas controladas não validam o acesso aos pacotes do fornecedor.
+
+## Fila 404 com conexão e canal OK
+
+A conexão RabbitMQ bem-sucedida confirma acesso ao broker/vhost usado no teste; não comprova que a fila solicitada exista. O SDK oficial `resolveConsumeQueueName` usa **um underscore antes e um depois** do package ID, a menos que `customQueueName` tenha sido configurado:
+
+| Pacote        | Vhost do exemplo oficial | Fila default do SDK |
+| ------------- | ------------------------ | ------------------- |
+| PreMatch 4511 | `StmPreMatch`            | `_4511_`            |
+| InPlay 4510   | `StmInPlay`              | `_4510_`            |
+
+A configuração agora usa diretamente esse resolvedor oficial. O default já tinha os underscores; uma saída `queue: "4510"` indica um override efetivo, por exemplo `LSPORTS_INPLAY_QUEUE=4510` no `.env` **ou no shell**. Não se conclui, só pela captura, qual dessas fontes forneceu o valor. O diagnóstico mostra `queueSource`, `queueVariable`, `sdkDefaultQueue` e o nome solicitado também na linha `amqp.queue`, e alerta quando o override corresponde apenas ao ID numérico. Não altera overrides silenciosamente, pois o fornecedor pode ter atribuído uma fila personalizada válida.
+
+Se LSports não atribuiu filas personalizadas, ajuste **você mesmo**, no `.env` do Mac:
+
+```dotenv
+LSPORTS_PREMATCH_QUEUE=_4511_
+LSPORTS_INPLAY_QUEUE=_4510_
+LSPORTS_PREMATCH_VHOST=StmPreMatch
+LSPORTS_INPLAY_VHOST=StmInPlay
+```
+
+Alternativa: deixe as duas variáveis `*_QUEUE` vazias para usar os defaults do SDK. Se houver exports antigos dessas quatro variáveis, eles têm precedência sobre `.env`. Para repetir a prova usando os valores do arquivo sem modificar suas senhas, rode na raiz:
+
+```sh
+env -u LSPORTS_PREMATCH_QUEUE -u LSPORTS_INPLAY_QUEUE \
+    -u LSPORTS_PREMATCH_VHOST -u LSPORTS_INPLAY_VHOST \
+    npm run diagnose:trade
+```
+
+O código não modifica `.env` e continua usando somente `checkQueue`, declaração **passiva**. Não cria filas, não tenta variantes automaticamente e não consome eventos durante o diagnóstico. Se `_4511_`/`_4510_` ainda retornarem 404 nos vhosts confirmados pelo fornecedor, solicite a LSports confirmação das filas provisionadas para esses pacotes Test. Não crie filas manualmente para contornar o erro.
+
+### Snapshot PreMatch sem código HTTP
+
+Uma falha anterior a uma resposta completa não necessariamente tem código HTTP. Antes, o SDK podia remover o código Axios ao encapsular esse erro e o resultado acabava como `unexpected`. O diagnóstico agora preserva dados técnicos controlados antes desse encapsulamento:
+
+- `clientCode`: somente códigos conhecidos, como `ERR_BAD_RESPONSE`, `ECONNABORTED` e `ECONNRESET`.
+- `reason`: causa classificada, como `response_size_limit`, `timeout`, `sdk_conversion`, `non_json_response` ou `invalid_snapshot`; não é uma cópia do payload.
+- `stage`: `request`, `response`, `sdk` ou `validation`.
+- `elapsedMs`, `timeoutMs`, `responseLimitBytes`: duração e limites locais efetivamente usados, quando disponíveis.
+- `httpStatus`: quando observado, inclusive em algumas falhas ao ler a resposta; não é inventado quando a requisição termina antes dos headers.
+
+Exemplo: `category: "response_limit"`, `reason: "response_size_limit"`, `clientCode: "ERR_BAD_RESPONSE"`, `responseLimitBytes: 52428800` identifica uma resposta maior que o limite local de 50 MiB, não uma senha incorreta. `reason: "timeout"` informa a expiração do timeout configurado. `reason: "sdk_conversion"` identifica falha de conversão da resposta pelo SDK. Os testes reproduzem esses casos contra um servidor local, preservando a sanitização. Se continuar `unexpected`, o diagnóstico explicita `unknown_exception`/tipo seguro sem expor a mensagem arbitrária; será necessária investigação adicional da resposta real.
+
+Não se presume que alguma dessas causas seja a falha do seu PreMatch até repetir o teste autenticado. Não foram alterados limites, filtros do snapshot nem credenciais com base apenas nessa captura. InPlay `events: 0` continua sendo uma resposta vazia válida — não prova disponibilidade de eventos nem permite inserir dados fictícios.

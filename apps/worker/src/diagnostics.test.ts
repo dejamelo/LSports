@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import type { RequestListener } from "node:http";
 import { randomUUID } from "node:crypto";
 import { clients } from "./provider.js";
-import { OperationError, describeFailure } from "./diagnostics.js";
+import { OperationError, describeFailure, sdkAxios } from "./diagnostics.js";
 import { diagnosePackage } from "./diagnose-runner.js";
 import { loadPackageConfig } from "./config.js";
 import type { PackageConfig } from "./config.js";
@@ -364,13 +364,12 @@ test("successful diagnostic checks existing queue passively and uses explicit MQ
     true,
   );
   assert(passive);
-  assert.deepEqual(reports[0].amqp, {
-    host: pkg.hostname,
-    port: 5672,
-    tls: false,
-    vhost: "StmPreMatch",
-    queue: "_4511_",
-  });
+  const amqpSummary = reports[0].amqp as Record<string, unknown>;
+  assert.equal(amqpSummary.host, pkg.hostname);
+  assert.equal(amqpSummary.vhost, "StmPreMatch");
+  assert.equal(amqpSummary.queue, "_4511_");
+  assert.equal(amqpSummary.sdkDefaultQueue, "_4511_");
+
   for (const secret of [
     pkg.username,
     pkg.password,
@@ -378,4 +377,123 @@ test("successful diagnostic checks existing queue passively and uses explicit MQ
     pkg.mqPassword,
   ])
     assert(!JSON.stringify(reports).includes(secret));
+});
+test("PreMatch oversized snapshot preserves client error and response limit through SDK wrapping without secrets", async () => {
+  const pkg = config();
+  const server = await httpFixture(async (req, res) => {
+    for await (const _ of req) {
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        Header: { HttpStatusCode: 200 },
+        Body: [],
+        padding: pkg.password.repeat(100),
+      }),
+    );
+  });
+  const previous = sdkAxios.defaults.maxContentLength;
+  try {
+    sdkAxios.defaults.maxContentLength = 256;
+    const api = clients(pkg, {
+      snapshotUrl: server.url,
+      customersUrl: server.url,
+    });
+    sdkAxios.defaults.maxContentLength = previous;
+    await assert.rejects(
+      () => api.snapshot(),
+      (error) => {
+        assert(error instanceof OperationError);
+        const d = error.diagnostic;
+        assert.equal(d.operation, "snapshot.events");
+        assert.equal(d.category, "response_limit");
+        assert.equal(d.reason, "response_size_limit");
+        assert.equal(d.clientCode, "ERR_BAD_RESPONSE");
+        assert.equal(d.responseLimitBytes, 256);
+        assert(typeof d.elapsedMs === "number");
+        assert(!JSON.stringify(d).includes(pkg.password));
+        return true;
+      },
+    );
+  } finally {
+    sdkAxios.defaults.maxContentLength = previous;
+    await server.close();
+  }
+});
+test("PreMatch timeout survives SDK wrapping with exact configured deadline and no invented HTTP status", async () => {
+  const pkg = config();
+  const server = await httpFixture(async (req, res) => {
+    for await (const _ of req) {
+    }
+    setTimeout(() => res.end("{}"), 150);
+  });
+  const previous = sdkAxios.defaults.timeout;
+  try {
+    sdkAxios.defaults.timeout = 25;
+    const api = clients(pkg, {
+      snapshotUrl: server.url,
+      customersUrl: server.url,
+    });
+    sdkAxios.defaults.timeout = previous;
+    await assert.rejects(
+      () => api.snapshot(),
+      (error) => {
+        assert(error instanceof OperationError);
+        const d = error.diagnostic;
+        assert.equal(d.reason, "timeout");
+        assert.equal(d.category, "network");
+        assert.equal(d.timeoutMs, 25);
+        assert.equal(d.clientCode, "ECONNABORTED");
+        assert.equal(d.httpStatus, undefined);
+        assert.equal(d.stage, "request");
+        return true;
+      },
+    );
+  } finally {
+    sdkAxios.defaults.timeout = previous;
+    await server.close();
+  }
+});
+test("SDK conversion failure is classified instead of unexpected without disclosing invalid payload IDs", async () => {
+  const pkg = config();
+  const server = await httpFixture(async (req, res) => {
+    for await (const _ of req) {
+    }
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        Header: { HttpStatusCode: 200 },
+        Body: [
+          {
+            FixtureId: 123,
+            Fixture: { Status: 1 },
+            Markets: [
+              { Id: 1, Bets: [{ Id: pkg.password, Price: "2.1", Status: 1 }] },
+            ],
+          },
+        ],
+      }),
+    );
+  });
+  try {
+    await assert.rejects(
+      () =>
+        clients(pkg, {
+          snapshotUrl: server.url,
+          customersUrl: server.url,
+        }).snapshot(),
+      (error) => {
+        assert(error instanceof OperationError);
+        const d = error.diagnostic;
+        assert.equal(d.httpStatus, 200);
+        assert.equal(d.category, "sdk_error");
+        assert.equal(d.reason, "sdk_conversion");
+        assert.equal(d.stage, "sdk");
+        assert(!JSON.stringify(d).includes(pkg.password));
+        return true;
+      },
+    );
+  } finally {
+    await server.close();
+  }
 });
