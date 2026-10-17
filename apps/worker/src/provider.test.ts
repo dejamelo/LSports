@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { clients, decodeMessage, safeFailure } from "./provider.js";
+import { clients as createClients, decodeMessage, safeFailure } from "./provider.js";
 import { loadConfig } from "./config.js";
 const headers = {
   MessageGuid: "test-guid",
@@ -96,3 +96,7 @@ test("connected config requires credentials; no invented or demo credentials", (
     });
   }
 });
+
+// Protocol tests isolate scheduling; cross-process coordination is exercised separately.
+const clients = (pkg: Parameters<typeof createClients>[0], urls: Parameters<typeof createClients>[1]) =>
+  createClients(pkg, urls, { run: (_operation, action) => action() });

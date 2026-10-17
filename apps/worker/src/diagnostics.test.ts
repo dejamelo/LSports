@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { RequestListener } from "node:http";
 import { randomUUID } from "node:crypto";
-import { clients } from "./provider.js";
+import { clients as createClients } from "./provider.js";
 import { OperationError, describeFailure, sdkAxios } from "./diagnostics.js";
 import { diagnosePackage } from "./diagnose-runner.js";
 import { loadPackageConfig } from "./config.js";
@@ -497,3 +497,7 @@ test("SDK conversion failure is classified instead of unexpected without disclos
     await server.close();
   }
 });
+
+// Protocol tests isolate scheduling; cross-process coordination is exercised separately.
+const clients = (pkg: Parameters<typeof createClients>[0], urls: Parameters<typeof createClients>[1]) =>
+  createClients(pkg, urls, { run: (_operation, action) => action() });

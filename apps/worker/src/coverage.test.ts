@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clients } from "./provider.js";
+import { clients as createClients } from "./provider.js";
 import { TradeState } from "./state.js";
 import { createPublisher, readConnectedFeed } from "@lsports/feed-store";
 import { createApp } from "../../api/src/app.js";
@@ -191,3 +191,7 @@ test("subscription, quota and schedule diagnostics use SDK read routes without f
     await new Promise<void>((r) => supplier.close(() => r()));
   }
 });
+
+// Protocol tests isolate scheduling; cross-process coordination is exercised separately.
+const clients = (pkg: Parameters<typeof createClients>[0], urls: Parameters<typeof createClients>[1]) =>
+  createClients(pkg, urls, { run: (_operation, action) => action() });

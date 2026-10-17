@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import amqp from 'amqplib';
-import { clients } from './provider.js';
+import { clients as createClients } from './provider.js';
 import { session } from './connected.js';
 import { TradeState } from './state.js';
 import { checkpoint, restore } from './persistence.js';
@@ -112,3 +112,39 @@ for (const failure of [false, true]) {
     if (failure) assert.equal(state.connections.prematch.outrightRecovery?.diagnostics?.[0].httpStatus, 403);
   });
 }
+
+// Protocol tests isolate scheduling; cross-process coordination is exercised separately.
+const clients = (pkg: Parameters<typeof createClients>[0], urls: Parameters<typeof createClients>[1]) =>
+  createClients(pkg, urls, { run: (_operation, action) => action() });
+
+test('429 keeps checkpoint rows and AMQP message processing active without waiting for Retry-After or closing feed', { timeout: 8000 }, async () => {
+  const { OperationError } = await import('./diagnostics.js');
+  const state = new TradeState();
+  state.apply('prematch', [{ fixtureId: 20540377, outright: { competitionId: 90, fixture: { sport: { name: 'Horse Racing' }, status: 1,
+    participants: [{ id: 1, name: 'Persisted runner' }] } }, markets: [{ id: 160, status: 1, bets: [{ id: '1', price: '3.25', status: 1, isChanged: 0 }] }] }], Date.now() - 10000);
+  let callback: (message: import('amqplib').ConsumeMessage) => void = () => {};
+  let acks = 0;
+  const channel = Object.assign(new EventEmitter(), { async prefetch() {}, async consume(_queue: string, cb: typeof callback) { callback = cb; return { consumerTag: 'test' }; }, ack() { acks++; } });
+  const connection = Object.assign(new EventEmitter(), { async createChannel() { return channel; }, async close() { connection.emit('close'); } });
+  const abort = new AbortController();
+  const limit = (operation: 'snapshot.events' | 'snapshot.outright.fixtures' | 'snapshot.outright.markets') => new OperationError({ operation, protocol: 'http', category: 'rate_limited', httpStatus: 429, retryAfterMs: 3600000, retryAt: new Date(Date.now() + 3600000).toISOString(), message: 'Esperando al proveedor.' });
+  await session(pkg, { packages: [pkg], snapshotUrl: 'https://stm-snapshot.lsports.eu', customersUrl: 'https://stm-api.lsports.eu', recoveryMs: 10000, staleMs: 90000 }, state,
+    async () => {
+      if (state.connections.prematch.phase === 'connected') {
+        assert.equal(acks, 1);
+        assert.equal(state.connections.prematch.outrightRecovery?.status, 'rate_limited');
+        assert.equal(state.connections.prematch.diagnostic?.httpStatus, 429);
+        assert.equal(state.feed().events[0].selections[0].odds, 3.25);
+        abort.abort();
+      }
+    }, abort.signal, { connect: (async () => connection) as unknown as typeof amqp.connect, clientFactory: () => ({
+      async startDistribution() {}, async distributionStatus() { return { isDistributionOn: true, consumers: [], numberMessagesInQueue: 0, messagesPerSecond: 0 }; }, async catalog() { return []; },
+      async snapshot() {
+        callback({ content: Buffer.from(JSON.stringify({ Header: { Type: 31 }, Body: {} })), properties: {}, fields: {} } as import('amqplib').ConsumeMessage);
+        throw limit('snapshot.events');
+      },
+      async outrightFixtures() { throw limit('snapshot.outright.fixtures'); },
+      async outrightMarkets() { throw limit('snapshot.outright.markets'); },
+    }) });
+  assert.equal(state.feed().events[0].participants?.length, 1);
+});

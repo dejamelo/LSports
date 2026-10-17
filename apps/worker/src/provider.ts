@@ -1,3 +1,4 @@
+import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import { sdkAxios as axios } from "./diagnostics.js";
 import {
   operation,
@@ -62,7 +63,10 @@ export interface ProviderClients {
 export function clients(
   config: PackageConfig,
   urls: { snapshotUrl: string; customersUrl: string },
+  scheduling?: Pick<SnapshotScheduler, "run">,
 ): ProviderClients {
+  const scheduler = scheduling || new SnapshotScheduler(urls.snapshotUrl, config.packageId);
+  const snapshotRequest = <T>(name: import("./diagnostics.js").Operation, action: () => Promise<T>) => scheduler.run(name, () => operation(name, "http", action));
   const credentials = {
     packageId: config.packageId,
     username: config.username,
@@ -98,13 +102,13 @@ export function clients(
     snapshotAudit: () => audit,
     ...(config.lane === "prematch" ? {
       async outrightFixtures() {
-        return operation("snapshot.outright.fixtures", "http", async () => {
+        return snapshotRequest("snapshot.outright.fixtures", async () => {
           const sdk = await (snapshot as ReturnType<SnapshotApiFactory["createSnapshotApiPrematchHttpClient"]>).getOutrightFixtures(new GetOutrightFixtureRequestDto({}));
           return decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "fixtures");
         });
       },
       async outrightMarkets() {
-        return operation("snapshot.outright.markets", "http", async () => {
+        return snapshotRequest("snapshot.outright.markets", async () => {
           const sdk = await (snapshot as ReturnType<SnapshotApiFactory["createSnapshotApiPrematchHttpClient"]>).getOutrightFixtureMarkets(new GetOutrightMarketRequestDto({}));
           return decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "markets");
         });
@@ -158,7 +162,7 @@ export function clients(
       });
     },
     async snapshot(): Promise<TradeEvent[]> {
-      return operation("snapshot.events", "http", async () => {
+      return snapshotRequest("snapshot.events", async () => {
         const response =
           config.lane === "inplay"
             ? await snapshot.getEvents(new GetInPlayEventRequestDto({}))

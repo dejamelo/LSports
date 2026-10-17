@@ -13,6 +13,7 @@ export type Operation = IntegrationDiagnostic["operation"];
 export type Protocol = IntegrationDiagnostic["protocol"];
 type Observation = {
   rawResponse?: unknown;
+  retryAfterMs?: number;
   startedAt?: number;
   bodyShape?: "array" | "single_event" | "events_wrapper" | "other" | "missing";
   providerRows?: number;
@@ -35,10 +36,16 @@ const status = (n: unknown) =>
 const adapter = axios.getAdapter(axios.defaults.adapter);
 function observe(
   observation: Observation,
-  response: { status: number; data: unknown },
+  response: { status: number; data: unknown; headers?: Record<string, unknown> },
 ) {
   observation.rawResponse = response.data;
   observation.httpStatus = status(response.status);
+  const retry = response.headers?.['retry-after'];
+  if (typeof retry === 'string' || typeof retry === 'number') {
+    const text = String(retry).trim();
+    const ms = /^\d+(?:\.\d+)?$/.test(text) ? Number(text) * 1000 : (/[A-Za-z]{3}/.test(text) ? Date.parse(text) - Date.now() : NaN);
+    if (Number.isFinite(ms)) observation.retryAfterMs = Math.max(0, ms);
+  }
   let data = response.data;
   if (typeof data === "string") {
     try {
@@ -356,6 +363,7 @@ export function describeFailure(
           errorType,
         }
       : {}),
+    ...(observation.retryAfterMs !== undefined ? { retryAfterMs: observation.retryAfterMs } : {}),
     ...(clientCode ? { clientCode } : {}),
     ...(observation.startedAt
       ? { elapsedMs: Math.max(0, Date.now() - observation.startedAt) }

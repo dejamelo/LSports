@@ -77,10 +77,11 @@ export async function diagnosePackage(
       return result;
     } catch (error) {
       healthy = false;
+      const diagnostic = describeFailure(error, name, protocol);
       write({
-        status: "error",
+        status: diagnostic.category === "rate_limited" ? "deferred" : "error",
         ...(name === "amqp.queue" ? queueDetails : {}),
-        ...describeFailure(error, name, protocol),
+        ...diagnostic,
       });
       return undefined;
     }

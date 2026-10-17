@@ -156,6 +156,10 @@ export interface IntegrationDiagnostic {
     | "unknown";
   clientCode?: string;
   elapsedMs?: number;
+  retryAfterMs?: number;
+  retryAt?: string;
+  attempts?: number;
+  deferred?: boolean;
   timeoutMs?: number;
   responseLimitBytes?: number;
   httpStatus?: number;
@@ -207,7 +211,7 @@ export interface ConnectionState {
   lastSnapshotAt?: string;
   snapshotEvents?: number;
   catalogHorseRacing?: boolean;
-  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; checkedAt: string };
+  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; checkedAt: string };
 }
 export interface SnapshotAudit {
   bodyShape: "array" | "single_event" | "events_wrapper" | "other" | "missing";

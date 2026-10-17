@@ -529,3 +529,56 @@ solicite a soporte LSports exactamente:
 
 Adjunte hora UTC, paquete, HTTP/status y contadores sanitizados; no contraseñas.
 No se requiere cambiar `.env`.
+
+### HTTP 429 y coordinación de snapshots
+
+HTTP 429 significa límite de consultas, **no** ausencia de carreras, participantes
+u odds. La API local en puerto 3001 puede funcionar normalmente mientras la
+recuperación HTTP del proveedor está limitada.
+
+Worker y `diagnose:trade` ahora comparten una agenda persistente junto al archivo
+`LSPORTS_STATE_FILE`: `<archivo>.snapshot-<hash-del-host>.json` y su lock temporal.
+Se coordina por host de snapshot entre paquetes y procesos del mismo workspace.
+No se guardan credenciales ni payloads allí. El checkpoint conserva su archivo y
+su restauración; la agenda no lo reemplaza. Ejecute ambos comandos con la misma
+ruta de estado y no borre la agenda para saltar una pausa del proveedor.
+
+Política local (no representa una cuota documentada de LSports):
+
+- Una consulta de snapshot por host a la vez, separadas al menos 5 segundos.
+- Cada paquete/operación se refresca como máximo una vez cada 5 minutos si tuvo
+  éxito. Un `LSPORTS_SNAPSHOT_INTERVAL_MS` mayor sigue respetándose en el worker;
+  valores menores no aumentan la frecuencia por debajo de ese mínimo local.
+- HTTP 429 con `Retry-After` válido respeta tanto segundos como fecha HTTP. El
+  plazo se comparte con las demás operaciones/paquetes del host y sobrevive a
+  reinicios. Una pausa menor al espaciado local se amplía hasta ese espaciado.
+- Sin un `Retry-After` válido, los 429 de la misma operación esperan 60, 120, 240…
+  segundos hasta una base máxima de 30 minutos, con jitter positivo de hasta 10%.
+  Un éxito reinicia la progresión de esa operación. El contador se conserva al
+  reiniciar; un aplazamiento local no lo incrementa.
+- Un proceso que encuentra otra consulta activa o un plazo pendiente **no envía
+  HTTP** ni queda dormido durante toda la pausa: informa el aplazamiento.
+
+El worker agenda por separado snapshot regular, fixtures Outright y mercados
+Outright. Así una operación exitosa no ocupa todos los turnos mientras otra
+espera. Los 429 también se manejan en el snapshot regular: no provocan reconexión
+AMQP ni vacían el estado. Se continúan procesando y confirmando mensajes AMQP,
+publicando el heartbeat y guardando el checkpoint durante la espera. Los errores
+Outright conservan salud degradada y diagnóstico explícito, sin datos demo.
+
+Campos sanitizados:
+
+- `category: rate_limited`, `httpStatus: 429`, `deferred: false`: respuesta real
+  del proveedor; `retryAt`, `retryAfterMs` y `attempts` indican el nuevo plazo.
+- `category: rate_limited`, `deferred: true`, sin `httpStatus`: coordinación local;
+  no se realizó otra petición. `retryAt` informa cuándo vuelve a ser elegible.
+- `connections.*.outrightRecovery.status: rate_limited`: recuperación pendiente,
+  sin reemplazar conteos anteriores por cero. El diagnóstico regular aparece en
+  `connections.*.diagnostic`. Una consulta aplazada no genera un snapshot vacío.
+
+`diagnose:trade` utiliza la misma agenda y no fuerza consultas. Puede terminar
+con código 1 y operaciones `status: deferred` cuando la comprobación está pendiente;
+no equivale a credenciales rechazadas. No lo ejecute en loop para forzar snapshots.
+Mantenga `npm run dev` activo y consulte `/api/diagnostics/outright/20540377` o
+`/api/health`, que leen la proyección local y no consultan al proveedor.
+No es necesario modificar `.env`.

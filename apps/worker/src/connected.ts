@@ -314,6 +314,10 @@ export async function session(
         { noAck: false },
       ),
     );
+    const nextDue: Record<string, number> = { "snapshot.events": 0,
+      "snapshot.outright.fixtures": api.outrightFixtures ? 0 : Infinity,
+      "snapshot.outright.markets": api.outrightMarkets ? 0 : Infinity };
+    const retryTime = (d: import("@lsports/contracts").IntegrationDiagnostic) => Math.max(Date.now() + 1000, Date.parse(d.retryAt || "") || Date.now() + (d.retryAfterMs ?? 60000));
     const recover = async () => {
       recovering = true;
       state.set(lane, {
@@ -322,36 +326,53 @@ export async function session(
       });
       await processing;
       await save();
-      const started = Date.now();
-      const rows = await api.snapshot();
-      if (closed || signal.aborted)
-        throw failure || new Error("Disconnected during recovery");
-      state.replace(lane, rows, started, api.snapshotAudit?.());
+      let rows: import("./state.js").TradeEvent[] | undefined;
+      if (Date.now() >= nextDue["snapshot.events"]) {
+        const started = Date.now();
+        try {
+          rows = await api.snapshot();
+          if (closed || signal.aborted) throw failure || new Error("Disconnected during recovery");
+          state.replace(lane, rows, started, api.snapshotAudit?.());
+          state.set(lane, { diagnostic: undefined });
+          nextDue["snapshot.events"] = Date.now() + Math.max(300000, config.recoveryMs);
+        } catch (error) {
+          if (closed || signal.aborted) throw error;
+          const diagnostic = describeFailure(error, "snapshot.events", "http");
+          if (diagnostic.category !== "rate_limited") throw error;
+          state.set(lane, { diagnostic });
+          nextDue["snapshot.events"] = retryTime(diagnostic);
+          console.warn(JSON.stringify({ lane, status: "deferred", ...diagnostic }));
+        }
+      }
       const outrightRecovery: NonNullable<import("@lsports/contracts").ConnectionState["outrightRecovery"]> = {
+        ...state.connections[lane].outrightRecovery,
         status: api.outrightFixtures || api.outrightMarkets ? "ok" : "unsupported", checkedAt: new Date().toISOString(),
       };
       for (const [name, action, counter] of [
         ["snapshot.outright.fixtures", api.outrightFixtures, "fixtures"],
         ["snapshot.outright.markets", api.outrightMarkets, "marketEvents"],
       ] as const) {
-        if (!action) continue;
+        if (!action || Date.now() < nextDue[name]) continue;
+        outrightRecovery.diagnostics = outrightRecovery.diagnostics?.filter(d => d.operation !== name);
         const startedOutright = Date.now();
         try {
           const recovered = await action();
           if (closed || signal.aborted) throw failure || new Error("Disconnected during outright recovery");
           await operation("feed.apply", "local", async () => state.apply(lane, recovered, startedOutright));
           outrightRecovery[counter] = recovered.length;
+          nextDue[name] = Date.now() + Math.max(300000, config.recoveryMs);
           console.info(JSON.stringify({ lane, operation: name, status: "ok", events: recovered.length }));
         } catch (error) {
           if (closed || signal.aborted) throw error;
           const diagnostic = describeFailure(error, name, "http");
-          outrightRecovery.status = "partial";
+          nextDue[name] = diagnostic.category === "rate_limited" ? retryTime(diagnostic) : Date.now() + Math.max(300000, config.recoveryMs);
           (outrightRecovery.diagnostics ||= []).push(diagnostic);
           console.warn(JSON.stringify({ lane, status: "error", ...diagnostic }));
         }
       }
+      if (outrightRecovery.diagnostics?.length) outrightRecovery.status = outrightRecovery.diagnostics.some(d => d.category === "rate_limited") ? "rate_limited" : "partial";
       state.set(lane, { outrightRecovery });
-      seen.clear();
+      if (rows !== undefined) seen.clear();
       // Messages remain unacknowledged while HTTP recovery runs; replay deltas over snapshot.
       while (buffered.length && !closed) {
         const batch = buffered;
@@ -362,17 +383,16 @@ export async function session(
       recovering = false;
       state.set(lane, {
         phase: "connected",
-        diagnostic: undefined,
-        message: rows.length
-          ? "Feed conectado; snapshot recuperado." + (outrightRecovery.status === "partial" ? " Recuperación Outright incompleta; revisá el diagnóstico." : "")
-          : "Feed conectado; snapshot regular vacío (0 fixtures)." + (outrightRecovery.status === "partial" ? " Recuperación Outright incompleta; revisá el diagnóstico." : " Recuperación Outright consultada por separado."),
+        message: rows !== undefined && rows.length
+          ? "Feed conectado; snapshot recuperado." + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : "")
+          : (rows === undefined ? "Feed AMQP conectado; recuperación HTTP pendiente." : "Feed conectado; snapshot regular vacío (0 fixtures).") + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : " Recuperación Outright consultada por separado."),
       });
       await save();
       console.log(
         JSON.stringify({
           lane,
           status: "snapshot_recovered",
-          events: rows.length,
+          ...(rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
           snapshotAudit: api.snapshotAudit?.(),
           coverage: state.feed().coverage?.[lane],
         }),
@@ -397,7 +417,7 @@ export async function session(
         }),
       );
     }
-    let nextSnapshot = Date.now() + config.recoveryMs;
+    let nextSnapshot = Math.min(...Object.values(nextDue));
     while (!closed && !signal.aborted) {
       await delay(500, undefined, { signal }).catch(() => {});
       if (Date.now() - lastReceived > config.staleMs)
@@ -410,7 +430,7 @@ export async function session(
         );
       if (Date.now() >= nextSnapshot) {
         await recover();
-        nextSnapshot = Date.now() + config.recoveryMs;
+        nextSnapshot = Math.min(...Object.values(nextDue));
       }
     }
     if (!signal.aborted) throw failure || new Error("Disconnected");

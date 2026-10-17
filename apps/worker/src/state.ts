@@ -366,7 +366,7 @@ export class TradeState {
       };
     }
     const phases = Object.values(this.connections).map((c) => c.phase);
-    const health = phases.every((p) => p === "connected") && !Object.values(this.connections).some(c => c.outrightRecovery?.status === "partial")
+    const health = phases.every((p) => p === "connected") && !Object.values(this.connections).some(c => ["partial", "rate_limited"].includes(c.outrightRecovery?.status || "") || c.diagnostic?.category === "rate_limited")
       ? "ok"
       : phases.some((p) => p === "connected")
         ? "degraded"
