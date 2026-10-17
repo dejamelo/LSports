@@ -121,7 +121,7 @@ export function clients(
       async outrightMarkets(fixtureIds = recoveredFixtureIds) {
         const ids = [...new Set(fixtureIds || [])];
         if (ids.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error("Invalid outright fixture filter");
-        marketRequest = { method: "POST", route: "/Prematch/GetOutrightFixtureMarkets", filter: ids.length ? "fixtures" : "none", fixtureCount: ids.length, competitionIdSent: false };
+        marketRequest = { method: "POST", route: "/Prematch/GetOutrightFixtureMarkets", filter: ids.length ? "fixtures" : "none", fixtureCount: ids.length, competitionIdSent: false, credentialField: "userName" };
         try {
           return await snapshotRequest("snapshot.outright.markets", async () => {
             const sdk = await (snapshot as ReturnType<SnapshotApiFactory["createSnapshotApiPrematchHttpClient"]>).getOutrightFixtureMarkets(new GetOutrightMarketRequestDto(ids.length ? { fixtures: ids } : {}));

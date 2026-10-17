@@ -725,3 +725,63 @@ Adjunte hora UTC, versión del SDK (3.10.10), `requestInspection`,
 `responseInspection`, HTTP/status y `reason`, sin credenciales ni payloads completos.
 No se afirma que el filtro haya corregido la respuesta real hasta verificarlo en
 el Mac. La persistencia y el flujo de fútbol permanecen independientes.
+
+### Validación local durante el ticket LSports 217525
+
+El soporte confirmó para mercados: `userName`, `password`, `packageId: 4511`
+y `fixtures` como array. Se encontró una divergencia verificable: el SDK 3.10.10
+usa `username` en `HttpRequestDto` y lo serializa con esa misma grafía. El cliente
+ahora adapta el JSON **solo** en el transporte de
+`/Prematch/GetOutrightFixtureMarkets`: envía `userName` y elimina `username`.
+Las opciones y validaciones internas del SDK, variables `.env`, credenciales
+RabbitMQ y endpoints regulares de fútbol conservan su contrato anterior.
+No se envían simultáneamente ambas variantes del campo de usuario.
+
+`fixtures` se envía siempre como array; los IDs conocidos siguen siendo fixtures,
+no competiciones. Si no hay IDs, se envía `[]`: no se presume que eso signifique
+"todos" ni que garantice datos. `Body:null` continúa siendo error. El resumen
+sanitizado `requestInspection.credentialField` muestra `userName`, sin su valor.
+Los tests con el SDK real y un HTTP local comprueban claves, paquete, array y
+ruta exactos, además de conservar `username` en las consultas regulares.
+
+**Alcance de los datos inspeccionados:** el workspace de esta validación no tenía
+`.env`, credenciales inyectadas, proyección `trade-feed.json`, checkpoint ni captura
+AMQP real. Su `.runtime` contenía solo scripts e imágenes de validaciones previas.
+Esto no permite concluir que no existan odds en el Mac o en LSports. No se consultó
+al proveedor para buscar otros eventos ni se consumió/purgó la cola.
+
+**Auditoría del recorrido:** tipos regulares 1/2/3/35 y outright 37/41/42 tienen
+handlers explícitos. Los tipos sin soporte, incluidos 40/43 de otra jerarquía,
+generan error y requeue; no se confirman como procesados. Los mercados que llegan
+antes del fixture se almacenan y se contabilizan como filas sin metadata, sin
+fabricar eventos. Updates anteriores se contabilizan como `staleUpdatesIgnored`;
+no reemplazan odds más recientes. `marketsWithoutId` registra entradas sin ID en
+la ruta regular del estado; no había mensajes reales para determinar si ese
+contador aumentó en el Mac. No se modificaron handlers o filtros basándose en
+suposiciones sobre mensajes no observados. Las restricciones de estado, precio,
+liquidación y conexión bloquean selecciones; no deben interpretarse como ausencia
+de una selección recibida.
+
+**Validación de extremo a extremo ejecutada con muestras aisladas:** se construyeron
+mensajes gzip sintéticos de tipos 37/41 (9 participantes, Race Winner 160) y 1/3
+(fútbol). Pasaron por el decoder SDK, TradeState, archivo/checkpoint atómico en un
+directorio temporal, API Express real y React/Vite real en Chromium. Se verificó
+selección en el billete, simulación, preservación tras restaurar el checkpoint y
+ancho mobile. No hubo requests de pago ni consultas al proveedor. El aviso y los
+nombres dicen PRUEBA AISLADA; ninguna muestra se escribió en `.runtime` ni se
+presentó como dato real de LSports.
+
+El script reproducible es `scripts/validate-local-sportsbook.mts` y se ejecuta con
+`npm run validate:local-ui`. Requiere la herramienta opcional Playwright y Chromium
+instalados en el entorno de tests; no se agregaron dependencias a la aplicación.
+`PLAYWRIGHT_MODULE` permite indicar la ruta al módulo instalado fuera del repo y
+`CHROMIUM_EXECUTABLE` el binario local. Usa puertos locales efímeros y directorio
+temporal, y cierra los procesos/archivos de prueba al terminar.
+
+En el Mac, actualice el código y mantenga el worker activo respetando `retryAt`.
+La siguiente consulta elegible usará el formato confirmado. Para revisar el avance
+sin producir requests al proveedor, lea `/api/health` y
+`/api/diagnostics/outright/20540377`. El ticket 217525 aún debe confirmar si el
+formato corregido produce mercados reales, el significado del Header/Body:null
+si persiste, cobertura y publicación de odds, y un reenvío si corresponde. No se
+crean ni cancelan suscripciones, incluidas suscripciones pagas.

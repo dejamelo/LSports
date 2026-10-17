@@ -1,3 +1,4 @@
+import { marketRequestBody } from "./http-compat.js";
 import { inspectResponse } from "./response-inspection.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
@@ -128,6 +129,9 @@ axios.defaults.adapter = async (config) => {
       observation.responseLimitBytes = config.maxContentLength;
   }
   try {
+    if (observation?.operation === "snapshot.outright.markets" &&
+        new URL(config.url || "", config.baseURL).pathname === "/Prematch/GetOutrightFixtureMarkets")
+      config.data = marketRequestBody(config.data);
     const response = await adapter(config);
     if (observation) {
       observe(observation, response);

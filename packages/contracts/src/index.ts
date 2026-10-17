@@ -102,6 +102,7 @@ export interface SnapshotRequestInspection {
   filter: "fixtures" | "none";
   fixtureCount: number;
   competitionIdSent: false;
+  credentialField: "userName";
 }
 export interface IntegrationDiagnostic {
   requestInspection?: SnapshotRequestInspection;

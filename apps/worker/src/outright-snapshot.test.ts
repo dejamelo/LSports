@@ -29,12 +29,16 @@ test('official SDK initial outright fixture/market snapshots restore an empty in
     const request = JSON.parse(text);
     assert.equal(req.method, 'POST');
     assert.equal(request.packageId, 4511);
-    assert.equal(request.username, pkg.username);
+    const isMarkets = req.url === '/Prematch/GetOutrightFixtureMarkets';
+    assert.equal(isMarkets ? request.userName : request.username, pkg.username);
+    if (isMarkets) assert.equal(request.username, undefined);
+    else assert.equal(request.userName, undefined);
     assert.equal(request.password, pkg.password);
-    assert.deepEqual(Object.keys(request).sort(), request.fixtures ? ['fixtures', 'packageId', 'password', 'username'] : ['packageId', 'password', 'username']);
+    assert.deepEqual(Object.keys(request).sort(), [...(request.fixtures ? ['fixtures'] : []), 'packageId', 'password', isMarkets ? 'userName' : 'username'].sort());
     if (request.fixtures) {
       assert.equal(req.url, '/Prematch/GetOutrightFixtureMarkets');
-      assert.deepEqual(request.fixtures, [20540377]);
+      assert(Array.isArray(request.fixtures));
+      if (request.fixtures.length) assert.deepEqual(request.fixtures, [20540377]);
       assert(!request.fixtures.includes(11144));
     }
     assert.equal(request.competitionId, undefined);
