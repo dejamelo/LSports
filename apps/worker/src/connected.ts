@@ -360,6 +360,7 @@ export async function session(
           if (closed || signal.aborted) throw failure || new Error("Disconnected during outright recovery");
           await operation("feed.apply", "local", async () => state.apply(lane, recovered, startedOutright));
           outrightRecovery[counter] = recovered.length;
+          outrightRecovery.responseInspections = api.outrightResponseInspections?.();
           nextDue[name] = Date.now() + Math.max(300000, config.recoveryMs);
           console.info(JSON.stringify({ lane, operation: name, status: "ok", events: recovered.length }));
         } catch (error) {

@@ -73,6 +73,24 @@ export interface SportEvent {
   source?: "prematch" | "inplay";
 }
 export type Lane = "prematch" | "inplay";
+export interface HttpResponseInspection {
+  contentType: "json" | "html" | "text" | "other" | "unspecified";
+  root: "missing" | "null" | "array" | "object" | "string" | "number" | "boolean" | "other";
+  header: HttpResponseInspection["root"];
+  body: HttpResponseInspection["root"];
+  headerStatusType?: HttpResponseInspection["root"];
+  knownRootFields: string[];
+  knownBodyFields: string[];
+  otherRootFields: number;
+  applicationErrorFields: number;
+  applicationErrorItems: number;
+  competitionRows: number;
+  eventRows: number;
+  marketRows: number;
+  selectionRows: number;
+  bodyEmptyArray: boolean;
+  bodyEmptyObject: boolean;
+}
 export interface IntegrationDiagnostic {
   operation:
     | "config"
@@ -127,6 +145,11 @@ export interface IntegrationDiagnostic {
     | "dns"
     | "tls_failure"
     | "non_json_response"
+    | "missing_response_header"
+    | "missing_response_body"
+    | "null_response_body"
+    | "empty_http_body"
+    | "application_error"
     | "sdk_conversion"
     | "sdk_validation"
     | "invalid_snapshot"
@@ -156,6 +179,7 @@ export interface IntegrationDiagnostic {
     | "unknown";
   clientCode?: string;
   elapsedMs?: number;
+  responseInspection?: HttpResponseInspection;
   retryAfterMs?: number;
   retryAt?: string;
   attempts?: number;
@@ -211,7 +235,7 @@ export interface ConnectionState {
   lastSnapshotAt?: string;
   snapshotEvents?: number;
   catalogHorseRacing?: boolean;
-  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; checkedAt: string };
+  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; checkedAt: string; responseInspections?: { fixtures?: HttpResponseInspection; markets?: HttpResponseInspection } };
 }
 export interface SnapshotAudit {
   bodyShape: "array" | "single_event" | "events_wrapper" | "other" | "missing";

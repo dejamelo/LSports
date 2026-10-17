@@ -582,3 +582,63 @@ no equivale a credenciales rechazadas. No lo ejecute en loop para forzar snapsho
 Mantenga `npm run dev` activo y consulte `/api/diagnostics/outright/20540377` o
 `/api/health`, que leen la proyección local y no consultan al proveedor.
 No es necesario modificar `.env`.
+
+### HTTP 200 sin recuperación válida: inspección sanitizada
+
+HTTP 200 por sí solo no valida un snapshot. El SDK oficial, en
+`BaseHttpClient.validateResponsePayloadStructure`, exige `Header` y `Body` no nulos.
+Después, nuestro parser exige competiciones con `Id` y `Events`, eventos con
+`FixtureId` y `Markets`, y selecciones con IDs válidos. La ausencia de esos campos
+no debe convertirse en una lista vacía ni en éxito.
+
+El diagnóstico ahora adjunta `responseInspection` en errores de snapshot. Contiene
+solo tipos, nombres **fijos y permitidos** de campos y cantidades: `root`, `header`,
+`body`, `knownRootFields`, `knownBodyFields`, `contentType`,
+`applicationErrorFields/Items`, `competitionRows`, `eventRows`, `marketRows`,
+`selectionRows`, `bodyEmptyArray` y `bodyEmptyObject`. No incluye valores de
+credenciales, nombres de participantes, IDs, URLs, textos de error, fragmentos
+HTML, claves arbitrarias ni payloads completos. Un objeto desconocido puede
+contabilizarse, pero sus claves no se imprimen.
+
+Los motivos distinguen:
+
+| `reason` | Evidencia | Interpretación |
+|---|---|---|
+| `missing_response_header` | Header ausente o null | Envelope incompatible con el SDK. Revisar campos permitidos observados. |
+| `missing_response_body` | Body ausente | Respuesta incompleta; no equivale a cero mercados. |
+| `null_response_body` | Body explícitamente null | El SDK lo rechaza; no se transforma en `[]` sin confirmación del proveedor. |
+| `empty_http_body` | Transporte sin contenido | No hay recuperación demostrada. |
+| `non_json_response` | JSON inválido o HTML/texto | No se interpreta como datos TRADE. |
+| `application_error` | Errors/Error explícitos no vacíos en Header, raíz o Body | Error de aplicación incluso con HTTP 200; texto omitido. |
+| `invalid_snapshot` | Envelope legible, entidad/conteo inválido | Estructura incompatible con las entidades esperadas. |
+
+`Header.HttpStatusCode` de error sigue figurando como `providerStatus`, separado
+del `httpStatus` del transporte. Se detectan errores de aplicación en arrays,
+objetos o strings no vacíos; el contenido no se publica. Un envelope válido con
+`Body: []` pasa la validación como respuesta vacía; no demuestra que el fixture
+20540377 haya sido recuperado. En éxitos estructuralmente válidos se guarda el
+resumen en `connections.prematch.outrightRecovery.responseInspections.markets`.
+
+Para obtener evidencia real en el Mac:
+
+1. Actualice y reinicie el worker conservando `.runtime`, `.env` y la agenda.
+2. Espere la siguiente consulta **ya coordinada**; no fuerce llamadas ni borre
+   archivos para saltar `retryAt`. La instrumentación no agrega requests HTTP.
+3. Lea el endpoint local, que no consulta al proveedor:
+
+```bash
+curl -sS http://localhost:3001/api/diagnostics/outright/20540377
+```
+
+En `connections.prematch.outrightRecovery.diagnostics`, copie únicamente
+`operation`, `httpStatus`, `providerStatus`, `reason`, `responseInspection` y
+`retryAt` de `snapshot.outright.markets`. No envíe `.env` ni el payload bruto.
+Si la consulta sigue aplazada, espere al horario indicado y vuelva a leer el
+endpoint local. El resumen aparece cuando se realiza la siguiente petición real.
+
+Este entorno de desarrollo no dispone de las credenciales del Mac ni de la
+respuesta real reportada. Los tests verifican los formatos anteriores con HTTP
+local y SDK oficial, incluida recuperación de mercado/selección válida y ausencia
+de filtraciones. No se atribuye un formato específico al proveedor sin observarlo;
+una adaptación a otro envelope requiere esa evidencia y su confirmación oficial.
+El checkpoint y los límites de consulta conservan su funcionamiento.

@@ -7,6 +7,7 @@ import {
   OperationError,
   responseEvidence,
   snapshotResponsePayload,
+  snapshotResponseInspection,
 } from "./diagnostics.js";
 import {
   CustomersApiFactory,
@@ -52,6 +53,7 @@ export interface ProviderClients {
   }>;
   startDistribution(): Promise<void>;
   snapshotAudit?: () => SnapshotAudit | undefined;
+  outrightResponseInspections?: () => NonNullable<import("@lsports/contracts").ConnectionState["outrightRecovery"]>["responseInspections"];
   subscriptions?: () => Promise<{ fixtures: number }>;
   quota?: () => Promise<{
     creditLimit: number;
@@ -98,19 +100,25 @@ export function clients(
     restApiBaseUrl: urls.customersUrl,
   });
   let audit: SnapshotAudit | undefined;
+  const outrightInspections: NonNullable<ReturnType<NonNullable<ProviderClients["outrightResponseInspections"]>>> = {};
   return {
     snapshotAudit: () => audit,
+    outrightResponseInspections: () => structuredClone(outrightInspections),
     ...(config.lane === "prematch" ? {
       async outrightFixtures() {
         return snapshotRequest("snapshot.outright.fixtures", async () => {
           const sdk = await (snapshot as ReturnType<SnapshotApiFactory["createSnapshotApiPrematchHttpClient"]>).getOutrightFixtures(new GetOutrightFixtureRequestDto({}));
-          return decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "fixtures");
+          const result = decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "fixtures");
+          outrightInspections.fixtures = snapshotResponseInspection();
+          return result;
         });
       },
       async outrightMarkets() {
         return snapshotRequest("snapshot.outright.markets", async () => {
           const sdk = await (snapshot as ReturnType<SnapshotApiFactory["createSnapshotApiPrematchHttpClient"]>).getOutrightFixtureMarkets(new GetOutrightMarketRequestDto({}));
-          return decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "markets");
+          const result = decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "markets");
+          outrightInspections.markets = snapshotResponseInspection();
+          return result;
         });
       },
     } : {}),

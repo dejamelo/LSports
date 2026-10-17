@@ -1,3 +1,4 @@
+import { inspectResponse } from "./response-inspection.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import type { AxiosStatic } from "axios";
@@ -12,7 +13,9 @@ import type { IntegrationDiagnostic } from "@lsports/contracts";
 export type Operation = IntegrationDiagnostic["operation"];
 export type Protocol = IntegrationDiagnostic["protocol"];
 type Observation = {
+  operation?: Operation;
   rawResponse?: unknown;
+  responseInspection?: import("@lsports/contracts").HttpResponseInspection;
   retryAfterMs?: number;
   startedAt?: number;
   bodyShape?: "array" | "single_event" | "events_wrapper" | "other" | "missing";
@@ -51,11 +54,20 @@ function observe(
     try {
       data = JSON.parse(data);
     } catch {
+      observation.reason = typeof response.data === "string" && !response.data.trim() ? "empty_http_body" : "non_json_response";
       data = undefined;
     }
   }
   if (typeof data === "string" && data.trim())
     observation.reason = "non_json_response";
+  observation.responseInspection = inspectResponse(data, response.headers?.["content-type"]);
+  if (!observation.reason && observation.operation?.startsWith("snapshot.")) {
+    const inspection = observation.responseInspection;
+    if (inspection.applicationErrorFields) observation.reason = "application_error";
+    else if (inspection.header === "missing" || inspection.header === "null") observation.reason = "missing_response_header";
+    else if (inspection.body === "missing") observation.reason = "missing_response_body";
+    else if (inspection.body === "null") observation.reason = "null_response_body";
+  }
   const body =
     data && typeof data === "object" && "Body" in data
       ? (data as Record<string, unknown>).Body
@@ -92,8 +104,7 @@ function observe(
       ? (data.Header as Record<string, unknown>)
       : undefined;
   observation.providerStatus = status(header?.HttpStatusCode);
-  observation.envelopeError =
-    Array.isArray(header?.Errors) && header.Errors.length > 0;
+  observation.envelopeError = observation.responseInspection.applicationErrorFields > 0;
   observation.credentialRejection =
     Array.isArray(header?.Errors) &&
     header.Errors.some(
@@ -320,6 +331,12 @@ export function describeFailure(
     category = "supplier_error";
     message =
       "El proveedor devolvió errores en Header.Errors; contenido crudo omitido.";
+  } else if (["missing_response_header", "missing_response_body", "null_response_body", "empty_http_body"].includes(reason || "")) {
+    category = "invalid_response";
+    message = reason === "missing_response_header" ? "HTTP respondió sin Header válido para el envelope oficial; revisar responseInspection."
+      : reason === "missing_response_body" ? "El envelope no contiene Body; no se interpreta como recuperación vacía."
+      : reason === "null_response_body" ? "El proveedor devolvió Body: null; el SDK lo rechaza y no confirma recuperación vacía."
+      : "El transporte devolvió un cuerpo vacío; no se confirma recuperación.";
   } else if (reason === "sdk_conversion" || reason === "sdk_validation") {
     category = "sdk_error";
     message =
@@ -363,6 +380,7 @@ export function describeFailure(
           errorType,
         }
       : {}),
+    ...(observation.responseInspection && operation.startsWith("snapshot.") ? { responseInspection: observation.responseInspection } : {}),
     ...(observation.retryAfterMs !== undefined ? { retryAfterMs: observation.retryAfterMs } : {}),
     ...(clientCode ? { clientCode } : {}),
     ...(observation.startedAt
@@ -385,14 +403,17 @@ export async function operation<T>(
   protocol: Protocol,
   action: () => Promise<T>,
 ): Promise<T> {
-  const observation: Observation = { startedAt: Date.now() };
+  const observation: Observation = { operation: name, startedAt: Date.now() };
   return observations.run(observation, async () => {
     try {
       return await action();
     } catch (error) {
-      throw new OperationError(
-        describeFailure(error, name, protocol, observation),
-      );
+      const diagnostic = describeFailure(error, name, protocol, observation);
+      throw new OperationError({ ...diagnostic,
+        ...(observation.httpStatus && diagnostic.httpStatus === undefined ? { httpStatus: observation.httpStatus } : {}),
+        ...(observation.providerStatus && diagnostic.providerStatus === undefined ? { providerStatus: observation.providerStatus } : {}),
+        ...(name.startsWith("snapshot.") && observation.responseInspection ? { responseInspection: observation.responseInspection } : {}),
+      });
     }
   });
 }
@@ -424,3 +445,5 @@ export function responseEvidence() {
 
 // Internal conversion only. Never include this value in logs, diagnostics or public responses.
 export function snapshotResponsePayload(): unknown { return observations.getStore()?.rawResponse; }
+
+export function snapshotResponseInspection() { return observations.getStore()?.responseInspection; }
