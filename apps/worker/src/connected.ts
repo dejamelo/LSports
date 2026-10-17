@@ -350,7 +350,7 @@ export async function session(
       };
       for (const [name, action, counter] of [
         ["snapshot.outright.fixtures", api.outrightFixtures, "fixtures"],
-        ["snapshot.outright.markets", api.outrightMarkets, "marketEvents"],
+        ["snapshot.outright.markets", api.outrightMarkets ? () => api.outrightMarkets!(state.outrightFixtureIds(lane)) : undefined, "marketEvents"],
       ] as const) {
         if (!action || Date.now() < nextDue[name]) continue;
         outrightRecovery.diagnostics = outrightRecovery.diagnostics?.filter(d => d.operation !== name);
@@ -372,6 +372,7 @@ export async function session(
         }
       }
       if (outrightRecovery.diagnostics?.length) outrightRecovery.status = outrightRecovery.diagnostics.some(d => d.category === "rate_limited") ? "rate_limited" : "partial";
+      outrightRecovery.marketRequest = api.outrightMarketRequest?.();
       state.set(lane, { outrightRecovery });
       if (rows !== undefined) seen.clear();
       // Messages remain unacknowledged while HTTP recovery runs; replay deltas over snapshot.

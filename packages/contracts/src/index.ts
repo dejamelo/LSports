@@ -79,6 +79,11 @@ export interface HttpResponseInspection {
   header: HttpResponseInspection["root"];
   body: HttpResponseInspection["root"];
   headerStatusType?: HttpResponseInspection["root"];
+  headerFields?: Record<string, HttpResponseInspection["root"]>;
+  headerOtherFieldCount?: number;
+  headerCodes?: Record<string, number>;
+  headerFlags?: Record<string, boolean>;
+  headerMessageSignals?: string[];
   knownRootFields: string[];
   knownBodyFields: string[];
   otherRootFields: number;
@@ -91,7 +96,15 @@ export interface HttpResponseInspection {
   bodyEmptyArray: boolean;
   bodyEmptyObject: boolean;
 }
+export interface SnapshotRequestInspection {
+  method: "POST";
+  route: "/Prematch/GetOutrightFixtureMarkets";
+  filter: "fixtures" | "none";
+  fixtureCount: number;
+  competitionIdSent: false;
+}
 export interface IntegrationDiagnostic {
+  requestInspection?: SnapshotRequestInspection;
   operation:
     | "config"
     | "distribution.status"
@@ -235,7 +248,7 @@ export interface ConnectionState {
   lastSnapshotAt?: string;
   snapshotEvents?: number;
   catalogHorseRacing?: boolean;
-  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; checkedAt: string; responseInspections?: { fixtures?: HttpResponseInspection; markets?: HttpResponseInspection } };
+  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; checkedAt: string; responseInspections?: { fixtures?: HttpResponseInspection; markets?: HttpResponseInspection }; marketRequest?: SnapshotRequestInspection };
 }
 export interface SnapshotAudit {
   bodyShape: "array" | "single_event" | "events_wrapper" | "other" | "missing";

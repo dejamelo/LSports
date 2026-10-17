@@ -118,6 +118,9 @@ export class TradeState {
     prematch: { phase: "starting", message: "Esperando conexión PreMatch" },
     inplay: { phase: "starting", message: "Esperando conexión InPlay" },
   };
+  outrightFixtureIds(lane: Lane) {
+    return [...new Set([...this.rows[lane]].filter(([, row]) => !!row.outright).map(([key]) => Number(String(key).split(":").at(-1))))];
+  }
   set(lane: Lane, patch: Partial<ConnectionState>) {
     Object.assign(this.connections[lane], patch);
   }

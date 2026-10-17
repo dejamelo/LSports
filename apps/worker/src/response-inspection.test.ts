@@ -71,3 +71,21 @@ test('HTTP 200 distinguishes missing/null/empty Body, alternate envelope, applic
     assert.equal(requests, 11); // one request per explicit test input, no fallback retry
   } finally { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); }
 });
+
+test('Header inspection reveals only allowed field types, bounded numeric codes, booleans and fixed semantic signals', async () => {
+  const { inspectResponse } = await import('./response-inspection.js');
+  const secret = 'PRIVATE_USERNAME_TOKEN_OR_URL';
+  const summary = inspectResponse({ Header: { StatusCode: 400, ErrorCode: '1001', Success: false,
+    Message: `Invalid fixture parameter; access denied ${secret}`, RequestId: secret,
+    [secret]: secret, Password: secret }, Body: null }, 'application/json');
+  assert.equal(summary.headerStatusType, 'missing');
+  assert.equal(summary.headerFields?.StatusCode, 'number');
+  assert.equal(summary.headerFields?.Message, 'string');
+  assert.deepEqual(summary.headerCodes, { StatusCode: 400, ErrorCode: 1001 });
+  assert.deepEqual(summary.headerFlags, { Success: false });
+  assert.deepEqual(summary.headerMessageSignals, ['permission', 'invalid_parameter']);
+  assert.equal(summary.headerOtherFieldCount, 2);
+  assert.equal(summary.body, 'null');
+  assert(!JSON.stringify(summary).includes(secret));
+  assert(!JSON.stringify(summary).includes('Password'));
+});

@@ -453,13 +453,13 @@ proveedor, el worker consulta además los endpoints **oficiales PreMatch**:
 | Operación diagnóstica | Método del SDK | Ruta POST en el host snapshot |
 |---|---|---|
 | `snapshot.outright.fixtures` | `getOutrightFixtures(new GetOutrightFixtureRequestDto({}))` | `/Prematch/GetOutrightFixture` (singular) |
-| `snapshot.outright.markets` | `getOutrightFixtureMarkets(new GetOutrightMarketRequestDto({}))` | `/Prematch/GetOutrightFixtureMarkets` |
+| `snapshot.outright.markets` | `getOutrightFixtureMarkets(new GetOutrightMarketRequestDto({ fixtures }))` | `/Prematch/GetOutrightFixtureMarkets` |
 
 El SDK también define `getOutrightEvents` → `/Prematch/GetOutrightEvents` como
 respuesta combinada. Se usan las dos consultas separadas para identificar permisos,
 respuestas vacías y fallas de fixtures/mercados independientemente. No se inventan
 rutas, fechas, filtros ni parámetros. Los DTO admiten filtros opcionales (incluido
-`fixtures`); la recuperación general no aplica filtros. La autenticación sigue en
+`fixtures`); la recuperación de mercados usa IDs de fixtures conocidos cuando están disponibles. La autenticación sigue en
 el cuerpo generado por el SDK (`packageId`, `username`, `password`), exclusivamente
 servidor. No se llama Subscribe/UnSubscribe ni se cambia la configuración del TRADE.
 
@@ -642,3 +642,86 @@ local y SDK oficial, incluida recuperación de mercado/selección válida y ause
 de filtraciones. No se atribuye un formato específico al proveedor sin observarlo;
 una adaptación a otro envelope requiere esa evidencia y su confirmación oficial.
 El checkpoint y los límites de consulta conservan su funcionamiento.
+
+### Verificación de competitionId 11144 frente a fixtureId 20540377
+
+Se reconfirmó el SDK oficial: `PrematchSnapshotApiClientPrefixUrl` define
+`POST /Prematch/GetOutrightFixtureMarkets`. `GetOutrightMarketRequestDto` y su
+request mapeado admiten `fixtures`, `markets`, `sports`, `locations`, `tournaments`,
+`timestamp`, `fromDate`, `toDate`. **No definen `competitionId` ni `competitions`.**
+La respuesta sí usa el `Id` de la competición como agrupación de `Events`.
+El ejemplo oficial usa un DTO vacío: la consulta general anterior era compatible
+con ese ejemplo; por sí sola no demostraba disponibilidad del mercado específico.
+
+Ahora el worker envía en la siguiente consulta coordinada los **fixture IDs**
+conocidos en el estado (incluidos los restaurados). Para el caso informado:
+
+```json
+{"fixtures":[20540377]}
+```
+
+Es el filtro del cuerpo JSON, además de la autenticación creada por el SDK.
+`11144` no sustituye a `20540377`. No se agrega un parámetro de competición sin
+respaldo del contrato oficial. El cliente recuerda los fixtures de la última
+respuesta válida para el diagnóstico de lectura; sin IDs conocidos, conserva la
+consulta general admitida por el ejemplo, sin consultas adicionales por fixture.
+No aplica filtros de mercado ni fechas inventados, ni cancela suscripciones.
+Los tests HTTP comprueban la ruta exacta, el filtro `fixtures: [20540377]` y la
+ausencia de `competitionId`, con la competición de prueba 11144.
+
+Fuentes:
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/api/common/snapshot/dtos/outright-market-request.dto.ts
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/api/common/snapshot/requests/outright-market-request.ts
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/sample/snapshot-api-sample/src/index.ts
+
+El portal `docs.lsports.eu` volvió a ser bloqueado con HTTP 403 por el proxy de
+este entorno; no se atribuye esa respuesta a los paquetes del proveedor. Las
+conclusiones de parámetros anteriores se basan en el SDK oficial y su serialización
+verificada, no en una supuesta lectura exitosa del portal.
+
+El diagnóstico agrega `requestInspection` al error y `marketRequest` al resumen
+Outright: método, ruta, filtro elegido, cantidad de fixtures y
+`competitionIdSent: false`. No expone el cuerpo de autenticación. Una consulta
+aplazada muestra los parámetros preparados, con `deferred: true`; no representa
+una petición nueva ya enviada.
+
+Para el `Header`, `responseInspection` ahora incluye:
+
+- `headerFields`: solo nombres permitidos y sus tipos, sin valores de texto.
+- `headerCodes`: códigos numéricos acotados de HttpStatusCode, StatusCode, Status,
+  Code y ErrorCode, si existen; no copia strings arbitrarios.
+- `headerFlags`: Success, IsSuccess y Cached únicamente si son booleanos.
+- `headerMessageSignals`: etiquetas fijas detectadas en los campos de mensaje
+  permitidos (autenticación, permisos, parámetro inválido, no encontrado, límite
+  o sin datos). No incluye mensajes, URLs, credenciales ni IDs de solicitud.
+- `headerOtherFieldCount`: cantidad de campos no permitidos, sin imprimir sus
+  nombres ni valores.
+
+Esas señales ayudan a investigar; no reinterpretan un Header desconocido como
+éxito ni sustituyen la semántica que debe confirmar LSports. `Body: null` permanece
+como `null_response_body`, sin vaciar el checkpoint y sin fabricar odds. La
+instrumentación usa la siguiente consulta elegible y respeta la agenda/retryAt.
+
+Si el filtro explícito sigue devolviendo null, solicite al soporte:
+
+> En Test, paquete PreMatch 4511, `POST https://stm-snapshot.lsports.eu/Prematch/GetOutrightFixtureMarkets`,
+> con autenticación del SDK oficial y `fixtures: [20540377]` sin otros filtros,
+> responde HTTP 200 con Body:null y sin Header.HttpStatusCode. GetOutrightFixture
+> sí devuelve competitionId 11144 / fixtureId 20540377 y 9 participantes.
+> Confirmen que esta ruta y el filtro por fixture son válidos en nuestro contrato
+> y versión Test; si su backend exige competitionId, envíen el esquema exacto y
+> expliquen la diferencia con GetOutrightMarketRequestDto del SDK oficial.
+> Expliquen los campos y códigos del Header sanitizado adjunto y la causa exacta
+> del null (parámetros, autorización de snapshot, falta de publicación/cobertura,
+> estado finalizado o retención). Confirmen habilitación y publicación efectiva
+> de Race Winner 160 con Bets agregadas para esta competición/fixture y acceso
+> del paquete a esos datos, además de Recommended List/Offered en el panel.
+> Si snapshot no puede recuperarlo, reenvíen el estado completo tipo 41 para
+> competition 11144 / fixture 20540377 en la cola _4511_ del vhost StmPreMatch,
+> incluyendo estados, precios, ParticipantId y timestamps; tipo 42 si liquidado.
+> Mantengan las suscripciones existentes.
+
+Adjunte hora UTC, versión del SDK (3.10.10), `requestInspection`,
+`responseInspection`, HTTP/status y `reason`, sin credenciales ni payloads completos.
+No se afirma que el filtro haya corregido la respuesta real hasta verificarlo en
+el Mac. La persistencia y el flujo de fútbol permanecen independientes.

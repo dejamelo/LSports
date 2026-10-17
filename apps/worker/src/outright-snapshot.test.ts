@@ -14,10 +14,10 @@ import { createPublisher, readConnectedFeed } from '@lsports/feed-store';
 import type { PackageConfig } from './config.js';
 const pkg: PackageConfig = { lane: 'prematch', packageId: 4511, username: 'synthetic-user', password: 'synthetic-secret', hostname: 'unused', vhost: 'StmPreMatch', queue: '_4511_', port: 5672, tls: false };
 // Synthetic HTTP responses only; no live supplier observations or demo fallback.
-const fixtures = { Id: 90, Name: 'Synthetic meeting', Type: 1, Events: [{ FixtureId: 20540377,
+const fixtures = { Id: 11144, Name: 'Synthetic meeting', Type: 1, Events: [{ FixtureId: 20540377,
   OutrightFixture: { FixtureName: 'Synthetic race', Sport: { Name: 'Horse Racing' }, Status: 1,
     Participants: Array.from({ length: 9 }, (_, i) => ({ Id: i + 1, Name: `Test runner ${i + 1}`, Position: String(i + 1), IsActive: 1, Form: '123' })) } }] };
-const markets = { Id: 90, Events: [{ FixtureId: 20540377, Markets: [{ Id: 160, Name: 'Race Winner', Status: 1,
+const markets = { Id: 11144, Events: [{ FixtureId: 20540377, Markets: [{ Id: 160, Name: 'Race Winner', Status: 1,
   Bets: [{ Id: '9223372036854775807', ParticipantId: 1, Status: 1, Price: '3.25' }] }] }] };
 test('official SDK initial outright fixture/market snapshots restore an empty installation without new AMQP messages, persist, and survive restart', { timeout: 10000 }, async () => {
   const routes: string[] = [];
@@ -31,7 +31,13 @@ test('official SDK initial outright fixture/market snapshots restore an empty in
     assert.equal(request.packageId, 4511);
     assert.equal(request.username, pkg.username);
     assert.equal(request.password, pkg.password);
-    assert.deepEqual(Object.keys(request).sort(), ['packageId', 'password', 'username']); // no invented filters or unsubscribe
+    assert.deepEqual(Object.keys(request).sort(), request.fixtures ? ['fixtures', 'packageId', 'password', 'username'] : ['packageId', 'password', 'username']);
+    if (request.fixtures) {
+      assert.equal(req.url, '/Prematch/GetOutrightFixtureMarkets');
+      assert.deepEqual(request.fixtures, [20540377]);
+      assert(!request.fixtures.includes(11144));
+    }
+    assert.equal(request.competitionId, undefined);
     routes.push(req.url!);
     const body = req.url === '/Prematch/GetOutrightFixture' ? fixtureBody : req.url === '/Prematch/GetOutrightFixtureMarkets' ? marketBody : [];
     res.statusCode = req.url === '/Prematch/GetOutrightFixtureMarkets' ? marketStatus : 200;
@@ -55,6 +61,8 @@ test('official SDK initial outright fixture/market snapshots restore an empty in
         clientFactory: () => ({ ...api, async startDistribution() {}, async catalog() { return []; } }) });
     assert.deepEqual(routes, ['/Prematch/GetEvents', '/Prematch/GetOutrightFixture', '/Prematch/GetOutrightFixtureMarkets']);
     assert.equal(state.connections.prematch.outrightRecovery?.status, 'ok');
+    assert.equal(state.connections.prematch.outrightRecovery?.marketRequest?.filter, 'fixtures');
+    assert.equal(state.connections.prematch.outrightRecovery?.marketRequest?.fixtureCount, 1);
     const race = state.feed().events[0];
     assert.equal(race.participants?.length, 9);
     assert.equal(race.participants?.[8].form, '123');
