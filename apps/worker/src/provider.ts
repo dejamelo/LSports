@@ -12,16 +12,6 @@ import {
   GetInPlayEventRequestDto,
   StatusResponseBody,
   StartResponseBody,
-  FixtureMetadataUpdate,
-  LivescoreUpdate,
-  MarketUpdate,
-  SettlementUpdate,
-  HeartbeatUpdate,
-  KeepAliveUpdate,
-  TransformerUtil,
-  IdSafeJsonParser,
-  WrappedMessage,
-  TransportMessageHeaders,
 } from "trade360-nodejs-sdk";
 import type { ILogger } from "trade360-nodejs-sdk";
 import type { PackageConfig } from "./config.js";
@@ -117,48 +107,8 @@ export function clients(
     },
   };
 }
-export interface Decoded {
-  guid: string;
-  at: number;
-  events: TradeEvent[];
-  interrupted: boolean;
-  type: number;
-}
-export function decodeMessage(
-  content: Buffer,
-  headers: Record<string, unknown>,
-): Decoded {
-  const transport = TransportMessageHeaders.createFromProperties(headers);
-  const wrapped = TransformerUtil.transform(
-    IdSafeJsonParser.parse(content.toString("utf8")) as WrappedMessage,
-    WrappedMessage,
-  );
-  if (!wrapped.header || !wrapped.body)
-    throw new Error("Missing message envelope");
-  const { type, msgGuid } = wrapped.header;
-  const at = Number(transport.timestampInMs);
-  if (!Number.isFinite(at) || at <= 0 || !msgGuid)
-    throw new Error("Invalid message timestamp/guid");
-  let events: TradeEvent[] = [];
-  let interrupted = false;
-  if (type === 1)
-    events =
-      TransformerUtil.transform(wrapped.body, FixtureMetadataUpdate).events ||
-      [];
-  if (type === 2)
-    events = (TransformerUtil.transform(wrapped.body, LivescoreUpdate).events ||
-      []) as TradeEvent[];
-  if (type === 3)
-    events = TransformerUtil.transform(wrapped.body, MarketUpdate).events || [];
-  if (type === 35)
-    events =
-      TransformerUtil.transform(wrapped.body, SettlementUpdate).events || [];
-  if (type === 32)
-    interrupted = !!TransformerUtil.transform(wrapped.body, HeartbeatUpdate)
-      .feedInterrupted?.length;
-  if (type === 31) TransformerUtil.transform(wrapped.body, KeepAliveUpdate);
-  return { guid: msgGuid, at, events, interrupted, type };
-}
+export { decodeMessage } from "./messages.js";
+export type { Decoded } from "./messages.js";
 export function safeFailure(error: unknown): string {
   return formatDiagnostic(describeFailure(error, "worker.start", "local"));
 }

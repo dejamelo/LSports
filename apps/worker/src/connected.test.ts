@@ -1,3 +1,4 @@
+import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -70,7 +71,7 @@ test("worker connects to configured queue, buffers deltas during snapshot, persi
     },
     async snapshot() {
       const msg = {
-        content: Buffer.from(
+        content: gzipSync(
           JSON.stringify({
             Header: { Type: 3, MsgGuid: "delta" },
             Body: {
@@ -90,6 +91,8 @@ test("worker connects to configured queue, buffers deltas during snapshot, persi
           }),
         ),
         properties: {
+          contentType: "application/octet-stream",
+          contentEncoding: "gzip",
           headers: {
             MessageGuid: "delta",
             MessageType: "3",
@@ -226,3 +229,220 @@ test("snapshot HTTP failure remains identified after AMQP cleanup instead of bec
     state.connections.prematch.message.includes("snapshot.events [HTTP 403]"),
   );
 });
+test("malformed and unsupported messages are not ACKed or discarded: NACK requests requeue and closes the session", async () => {
+  const { OperationError } = await import("./diagnostics.js");
+  for (const [content, reason] of [
+    [Buffer.from("invalid private payload"), "invalid_json"],
+    [
+      Buffer.from(
+        JSON.stringify({ Header: { Type: 999, MsgGuid: "test" }, Body: {} }),
+      ),
+      "unsupported_message_type",
+    ],
+  ] as const) {
+    const state = new TradeState();
+    const abort = new AbortController();
+    let callback: (msg: ConsumeMessage | null) => void = () => {};
+    let nacks = 0;
+    let closed = false;
+    const channel = Object.assign(new EventEmitter(), {
+      async prefetch() {},
+      async consume(_queue: string, cb: typeof callback) {
+        callback = cb;
+        return { consumerTag: "test" };
+      },
+      ack() {
+        assert.fail("Failed message must not be ACKed");
+      },
+      nack(_msg: ConsumeMessage, all: boolean, requeue: boolean) {
+        assert.equal(all, false);
+        assert.equal(requeue, true);
+        nacks++;
+      },
+    });
+    const connection = Object.assign(new EventEmitter(), {
+      async createChannel() {
+        return channel;
+      },
+      async close() {
+        closed = true;
+        connection.emit("close");
+      },
+    });
+    const pkg: PackageConfig = {
+      lane: "prematch",
+      packageId: 4511,
+      username: "test-only",
+      password: "",
+      hostname: "stm-prematch.lsports.eu",
+      vhost: "StmPreMatch",
+      port: 5672,
+      tls: false,
+      queue: "_4511_",
+    };
+    const fake: ReturnType<typeof clients> = {
+      async distributionStatus() {
+        return {
+          isDistributionOn: true,
+          consumers: [],
+          numberMessagesInQueue: 0,
+          messagesPerSecond: 0,
+        };
+      },
+      async startDistribution() {},
+      async catalog() {
+        return [];
+      },
+      async snapshot() {
+        callback({
+          content,
+          properties: {
+            contentType: "application/json",
+            headers: { timestamp_in_ms: Date.now() },
+          },
+          fields: { redelivered: true },
+        } as unknown as ConsumeMessage);
+        return [];
+      },
+    };
+    await assert.rejects(
+      () =>
+        session(
+          pkg,
+          {
+            packages: [pkg],
+            snapshotUrl: "https://stm-snapshot.lsports.eu",
+            customersUrl: "https://stm-api.lsports.eu",
+            recoveryMs: 300000,
+            staleMs: 90000,
+          },
+          state,
+          async () => {},
+          abort.signal,
+          {
+            clientFactory: () => fake,
+            connect: (async () => connection) as unknown as typeof amqp.connect,
+          },
+        ),
+      OperationError,
+    );
+    assert.equal(nacks, 1);
+    assert(closed);
+    assert.equal(state.connections.prematch.diagnostic?.reason, reason);
+    assert.equal(
+      state.connections.prematch.diagnostic?.deliveryDisposition,
+      "requeue_requested",
+    );
+    assert.equal(
+      state.connections.prematch.diagnostic?.messageMetadata?.redelivered,
+      true,
+    );
+    assert(
+      !JSON.stringify(state.connections.prematch).includes("private payload"),
+    );
+  }
+});
+test(
+  "provider interruption heartbeat is processed and ACKed after blocked state instead of becoming a poison message",
+  { timeout: 5000 },
+  async () => {
+    const { OperationError } = await import("./diagnostics.js");
+    const state = new TradeState();
+    const abort = new AbortController();
+    let callback: (msg: ConsumeMessage | null) => void = () => {};
+    let acks = 0;
+    let persisted = false;
+    const channel = Object.assign(new EventEmitter(), {
+      async prefetch() {},
+      async consume(_queue: string, cb: typeof callback) {
+        callback = cb;
+        return { consumerTag: "test" };
+      },
+      ack() {
+        assert(persisted);
+        acks++;
+      },
+      nack() {
+        assert.fail("Processed control must not be redelivered");
+      },
+    });
+    const connection = Object.assign(new EventEmitter(), {
+      async createChannel() {
+        return channel;
+      },
+      async close() {
+        connection.emit("close");
+      },
+    });
+    const pkg: PackageConfig = {
+      lane: "inplay",
+      packageId: 4510,
+      username: "test-only",
+      password: "",
+      hostname: "stm-inplay.lsports.eu",
+      vhost: "StmInPlay",
+      port: 5672,
+      tls: false,
+      queue: "_4510_",
+    };
+    const fake: ReturnType<typeof clients> = {
+      async distributionStatus() {
+        return {
+          isDistributionOn: true,
+          consumers: [],
+          numberMessagesInQueue: 0,
+          messagesPerSecond: 0,
+        };
+      },
+      async startDistribution() {},
+      async catalog() {
+        return [];
+      },
+      async snapshot() {
+        callback({
+          content: Buffer.from(
+            JSON.stringify({
+              Header: { Type: 32 },
+              Body: { FeedInterrupted: [1] },
+            }),
+          ),
+          properties: {},
+        } as unknown as ConsumeMessage);
+        return [];
+      },
+    };
+    await assert.rejects(
+      () =>
+        session(
+          pkg,
+          {
+            packages: [pkg],
+            snapshotUrl: "https://stm-snapshot.lsports.eu",
+            customersUrl: "https://stm-api.lsports.eu",
+            recoveryMs: 300000,
+            staleMs: 90000,
+          },
+          state,
+          async () => {
+            if (
+              state.connections.inplay.diagnostic?.reason ===
+              "provider_interrupted"
+            )
+              persisted = true;
+          },
+          abort.signal,
+          {
+            clientFactory: () => fake,
+            connect: (async () => connection) as unknown as typeof amqp.connect,
+          },
+        ),
+      OperationError,
+    );
+    assert.equal(acks, 1);
+    assert.equal(
+      state.connections.inplay.diagnostic?.reason,
+      "provider_interrupted",
+    );
+    assert.equal(state.connections.inplay.phase, "error");
+  },
+);

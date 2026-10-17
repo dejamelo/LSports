@@ -1,3 +1,4 @@
+import type { FeedMessageMetadata } from "@lsports/contracts";
 import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
 import { mkdir, open, readFile, rm } from "node:fs/promises";
@@ -66,17 +67,38 @@ export async function runConnected(signal: AbortSignal) {
           attempt = 0;
         } catch (error) {
           if (!signal.aborted) {
-            const diagnostic = describeFailure(error, "worker.start", "local");
-            const message = formatDiagnostic(diagnostic);
+            const original = describeFailure(error, "worker.start", "local");
+            const pause =
+              ["feed.decode", "feed.apply"].includes(original.operation) &&
+              original.reason !== "provider_interrupted";
+            const diagnostic = {
+              ...original,
+              ...(pause ? { retryPolicy: "restart_required" as const } : {}),
+            };
+            const message =
+              formatDiagnostic(diagnostic) +
+              (pause
+                ? " Mensaje no confirmado como procesado. Corregí la incompatibilidad y reiniciá el worker."
+                : "");
             state.set(pkg.lane, { phase: "error", message, diagnostic });
             console.error(
               JSON.stringify({
                 lane: pkg.lane,
-                status: "error",
+                status: pause ? "blocked_message" : "error",
                 ...diagnostic,
               }),
             );
             await save();
+            if (pause) {
+              await new Promise<void>((resolve) => {
+                if (signal.aborted) resolve();
+                else
+                  signal.addEventListener("abort", () => resolve(), {
+                    once: true,
+                  });
+              });
+              break;
+            }
           }
         }
         if (!signal.aborted)
@@ -144,6 +166,10 @@ export async function session(
       diagnostic: signal.aborted ? undefined : diagnostic,
     });
     void save().catch(() => {});
+    // Stop further deliveries immediately; unacknowledged messages return on close.
+    void Promise.resolve()
+      .then(() => connection.close())
+      .catch(() => {});
   };
   connection.on("error", fail);
   connection.on("close", () => fail(new Error("Connection closed")));
@@ -154,6 +180,7 @@ export async function session(
   let recovering = true;
   let lastReceived = Date.now();
   const seen = new Set<string>();
+  const reportedShapes = new Set<string>();
   try {
     const channel = await operation("amqp.channel", "amqp", () =>
       connection.createChannel(),
@@ -165,14 +192,46 @@ export async function session(
     await operation("amqp.prefetch", "amqp", () => channel.prefetch(100));
     const processMessage = async (msg: ConsumeMessage) => {
       if (closed) return;
+      let messageMetadata: FeedMessageMetadata | undefined;
       try {
         const decoded = decodeMessage(
           msg.content,
           msg.properties.headers || {},
+          msg.properties,
+          msg.fields?.redelivered,
         );
-        if (decoded.interrupted) throw new Error("Provider feed interrupted");
+        messageMetadata = decoded.metadata;
+        if (decoded.interrupted) {
+          const diagnostic = {
+            operation: "feed.decode" as const,
+            protocol: "amqp" as const,
+            category: "supplier_error" as const,
+            reason: "provider_interrupted" as const,
+            message:
+              "El heartbeat señala interrupción del proveedor; cuotas bloqueadas y recuperación requerida.",
+            messageMetadata: decoded.metadata,
+          };
+          state.set(lane, {
+            phase: "error",
+            message: formatDiagnostic(diagnostic),
+            diagnostic,
+          });
+          await save();
+          await operation("amqp.ack", "amqp", async () => channel.ack(msg));
+          console.warn(
+            JSON.stringify({
+              lane,
+              status: "control_processed",
+              ...diagnostic,
+            }),
+          );
+          fail(new OperationError(diagnostic));
+          return;
+        }
         if (!seen.has(decoded.guid)) {
-          state.apply(lane, decoded.events, decoded.at);
+          await operation("feed.apply", "local", async () =>
+            state.apply(lane, decoded.events, decoded.at),
+          );
           seen.add(decoded.guid);
           if (seen.size > 10000) seen.delete(seen.values().next().value!);
         }
@@ -180,14 +239,39 @@ export async function session(
           lastMessageAt: new Date(lastReceived).toISOString(),
         });
         await save();
-        channel.ack(msg);
+        await operation("amqp.ack", "amqp", async () => channel.ack(msg));
+        const shape = JSON.stringify([
+          decoded.type,
+          decoded.metadata.compression,
+          decoded.metadata.timestampSource,
+          decoded.metadata.warnings,
+        ]);
+        if (!reportedShapes.has(shape)) {
+          if (reportedShapes.size >= 128)
+            reportedShapes.delete(reportedShapes.values().next().value!);
+          reportedShapes.add(shape);
+          console.info(
+            JSON.stringify({
+              lane,
+              operation: "feed.decode",
+              status: "ok",
+              messageMetadata: decoded.metadata,
+            }),
+          );
+        }
       } catch (error) {
+        const diagnostic = {
+          ...describeFailure(error, "feed.decode", "amqp"),
+          ...(messageMetadata ? { messageMetadata } : {}),
+        };
+        let deliveryDisposition:
+          "requeue_requested" | "unacknowledged_until_close" =
+          "unacknowledged_until_close";
         try {
-          channel.nack(msg, false, false);
+          channel.nack(msg, false, true);
+          deliveryDisposition = "requeue_requested";
         } catch {}
-        fail(
-          new OperationError(describeFailure(error, "feed.decode", "local")),
-        );
+        fail(new OperationError({ ...diagnostic, deliveryDisposition }));
       }
     };
     await operation("amqp.consume", "amqp", () =>

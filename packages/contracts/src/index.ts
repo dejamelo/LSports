@@ -46,6 +46,8 @@ export interface IntegrationDiagnostic {
     | "amqp.consume"
     | "amqp.connection"
     | "feed.decode"
+    | "feed.apply"
+    | "amqp.ack"
     | "feed.stale"
     | "file.persist"
     | "worker.start";
@@ -66,6 +68,8 @@ export interface IntegrationDiagnostic {
     | "response_limit"
     | "redirect"
     | "sdk_error"
+    | "invalid_message"
+    | "unsupported_message"
     | "unexpected";
   message: string;
   reason?:
@@ -80,7 +84,20 @@ export interface IntegrationDiagnostic {
     | "sdk_conversion"
     | "sdk_validation"
     | "invalid_snapshot"
-    | "unknown_exception";
+    | "unknown_exception"
+    | "unsupported_content_type"
+    | "unsupported_content_encoding"
+    | "decompression_failed"
+    | "message_too_large"
+    | "invalid_utf8"
+    | "invalid_json"
+    | "invalid_envelope"
+    | "invalid_message_headers"
+    | "missing_timestamp"
+    | "invalid_event_body"
+    | "entity_conversion"
+    | "unsupported_message_type"
+    | "provider_interrupted";
   stage?: "request" | "response" | "sdk" | "validation";
   errorType?:
     | "axios"
@@ -100,6 +117,39 @@ export interface IntegrationDiagnostic {
   amqpCode?: number;
   networkCode?: string;
   fields?: string[];
+  decodeStage?:
+    | "properties"
+    | "decompress"
+    | "text"
+    | "json"
+    | "envelope"
+    | "transport_headers"
+    | "entity";
+  messageMetadata?: FeedMessageMetadata;
+  retryPolicy?: "restart_required";
+  deliveryDisposition?: "requeue_requested" | "unacknowledged_until_close";
+}
+export interface FeedMessageMetadata {
+  wireBytes: number;
+  decodedBytes?: number;
+  contentType: string;
+  contentEncoding: string;
+  compression?: "none" | "gzip" | "deflate" | "br";
+  signature: "empty" | "gzip" | "zlib" | "json_object" | "json_array" | "other";
+  amqpHeadersPresent: string[];
+  messageType?: number;
+  messageTypeName?: string;
+  timestampSource?:
+    | "timestamp_in_ms"
+    | "amqp_timestamp"
+    | "server_timestamp"
+    | "creation_date"
+    | "received_control";
+  guidSource?: "envelope" | "transport" | "control_fingerprint";
+  rootShape?: "object" | "array" | "string" | "number" | "boolean" | "null";
+  eventCount?: number;
+  redelivered?: boolean;
+  warnings?: string[];
 }
 export interface ConnectionState {
   diagnostic?: IntegrationDiagnostic;

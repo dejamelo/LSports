@@ -189,3 +189,54 @@ Uma falha anterior a uma resposta completa não necessariamente tem código HTTP
 Exemplo: `category: "response_limit"`, `reason: "response_size_limit"`, `clientCode: "ERR_BAD_RESPONSE"`, `responseLimitBytes: 52428800` identifica uma resposta maior que o limite local de 50 MiB, não uma senha incorreta. `reason: "timeout"` informa a expiração do timeout configurado. `reason: "sdk_conversion"` identifica falha de conversão da resposta pelo SDK. Os testes reproduzem esses casos contra um servidor local, preservando a sanitização. Se continuar `unexpected`, o diagnóstico explicita `unknown_exception`/tipo seguro sem expor a mensagem arbitrária; será necessária investigação adicional da resposta real.
 
 Não se presume que alguma dessas causas seja a falha do seu PreMatch até repetir o teste autenticado. Não foram alterados limites, filtros do snapshot nem credenciais com base apenas nessa captura. InPlay `events: 0` continua sendo uma resposta vazia válida — não prova disponibilidade de eventos nem permite inserir dados fictícios.
+
+## Mensagens: `feed.decode` após AMQP conectado
+
+O decoder foi comparado com `MessageConsumer`, `WrappedMessage`, `MessageHeader`, `TransportMessageHeaders`, `BodyHandler` e as entidades do SDK oficial. O portal de documentação permanece bloqueado pelo proxy deste ambiente; o código oficial consultado não mudou de commit durante esta revisão. O SDK Node converte os bytes diretamente para texto JSON; não há tratamento de `contentType`, `contentEncoding` ou compressão nessa implementação upstream. O adaptador local acrescenta interpretação explícita das propriedades de transporte e diagnóstico por etapa, sem afirmar que seu pacote esteja usando compressão.
+
+### Formatos e metadados
+
+- Envelope oficial: objeto JSON `Header`/`Body`, com `Header.Type`, `Header.MsgGuid`, `Header.CreationDate` e `Header.ServerTimestamp`; atualizações usam `Body.Events`. O parser de IDs grandes e as conversões de entidades continuam sendo os do SDK.
+- Mensagens de evento: fixture 1, livescore 2, mercados 3 e liquidação 35. Mensagens de controle: keepalive 31 e heartbeat 32. Os nomes dos tipos são obtidos do registro oficial `knownEntityKeys`.
+- UTF-8 estrito, com suporte a BOM. MIME JSON e `+json` são reconhecidos; MIME ausente ou desconhecido não invalida JSON por si só, como no SDK, mas MIME desconhecido gera aviso sanitizado. Não se tenta interpretar XML/Protobuf como JSON válido.
+- `contentEncoding`: UTF-8/identity, gzip/x-gzip, deflate com wrapper zlib e Brotli (`br`). Gzip e zlib também podem ser detectados por assinatura binária quando a declaração não informa compressão; isso é registrado como aviso. Não há tentativa cega de vários codecs nem base64 automático.
+- Os limites locais são 50 MiB para mensagem recebida e 50 MiB depois de descomprimir. Compressão inválida, expansão acima do limite, UTF-8 inválido e JSON malformado geram causas distintas. Um charset declarado diferente de UTF-8 não é reinterpretado silenciosamente.
+- GUID: usa `Header.MsgGuid`, ou o campo oficial de transporte `MessageGuid` quando necessário. Eventos sem identificador estável são rejeitados com diagnóstico explícito.
+- Timestamp de eventos: usa `timestamp_in_ms`; na ausência/invalidez, tenta `properties.timestamp` AMQP (segundos), `Header.ServerTimestamp` (Date/epoch em milissegundos conforme o SDK) e `Header.CreationDate`. Não usa relógio local para inventar tempo de odds. Headers de transporte ausentes deixam de causar erro genérico quando o envelope contém metadados válidos.
+- Heartbeat/keepalive podem não ter `Body`, GUID ou timestamp. Só para esses controles, um fingerprint local interno serve para deduplicação e o horário local marca recebimento; ambos têm origem explicitamente identificada. Não criam eventos ou odds. `FeedInterrupted` causa bloqueio e recuperação; como é um controle processado, recebe ACK após registrar o estado e não é recolocado infinitamente na fila.
+
+### Diagnóstico seguro
+
+Falhas incluem `decodeStage` (`properties`, `decompress`, `text`, `json`, `envelope`, `transport_headers` ou `entity`) e `reason`, como `invalid_json`, `missing_timestamp`, `entity_conversion` ou `unsupported_message_type`. `messageMetadata` contém somente:
+
+- tamanhos recebidos/decodificados;
+- classificação allowlisted de MIME/encoding e codec escolhido;
+- classificação da assinatura binária, sem bytes brutos;
+- presença dos nomes de headers oficiais, sem seus valores;
+- tipo numérico/nome oficial, quantidade de eventos e flag de redelivery;
+- origem do GUID/timestamp e avisos controlados.
+
+GUIDs, IDs de bets/fixtures, participantes, payload, bytes iniciais, headers arbitrários, credenciais e stacks não são registrados. MIME/encoding desconhecidos aparecem como `other`; seu valor arbitrário não é copiado. A primeira mensagem processada de cada combinação de tipo/codec/metadados gera um registro `feed.decode` com `status: "ok"`; logs equivalentes são limitados por sessão. O diagnóstico da falha também fica disponível em `/api/health` e na projeção local lida pela interface.
+
+### ACK/NACK e preservação
+
+Foi corrigido o NACK anterior com `requeue=false`. Mensagem com erro de decode/aplicação/persistência não recebe ACK: o worker solicita `nack(msg, false, true)`, registra `deliveryDisposition: "requeue_requested"`, bloqueia cuotas e fecha a conexão. Falhas de decode/aplicação pausam somente esse feed com `status: "blocked_message"` e `retryPolicy: "restart_required"` até reiniciar o worker após a correção, evitando redelivery ilimitado da mesma mensagem. Falhas transitórias de rede continuam usando backoff e snapshot. Se não conseguir enviar NACK, registra `unacknowledged_until_close` e deixa a conexão fechar com a entrega não confirmada. Não cria filas nem configura dead-letter queues no fornecedor.
+
+ACK de eventos só ocorre depois da aplicação e publicação local. Tipos desconhecidos ou conhecidos sem handler (incluindo outrights ainda não implementados) **não são reconhecidos e descartados**: ficam sujeitos a requeue com um erro explícito. Uma mensagem incompatível pode bloquear esse feed até ser suportada ou corrigida pelo fornecedor; não se afirma que reconexão por si só resolva um payload inválido. A retenção final também depende das políticas de TTL/delivery-limit do broker, que este código não modifica.
+
+### Atualizar no Mac e observar processamento
+
+Pare os processos antigos. Não substitua seu `.env`; nenhuma variável nova é exigida nesta correção.
+
+```sh
+git switch feat/sportsbook-demo
+git pull --ff-only origin feat/sportsbook-demo
+npm ci
+npm run build
+npm test
+npm run dev
+```
+
+Para observar apenas o worker com menos ruído, mantenha API e frontend em seus terminais e rode `npm run dev:worker` em outro, evitando executar um segundo worker ao mesmo tempo. `npm run diagnose:trade` continua sendo uma prova passiva de HTTP/AMQP/filas: **não consome mensagens**, portanto não testa decode. A validação do processamento exige `npm run dev` ou `npm run dev:worker` com o pacote real. Veja `reason`, `decodeStage` e `messageMetadata` no log; não publique payloads ou `.env`.
+
+Os testes locais cobrem entidades SDK, tipos de controle, BOM, compressão/limites, fallback de metadados do envelope, códigos desconhecidos e requeue sem ACK em falhas. Não se declara decodificação do seu feed real validada sem esse teste autenticado no Mac.
