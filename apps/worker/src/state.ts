@@ -1,5 +1,7 @@
 import type {
   ConnectionState,
+  CoverageStats,
+  SnapshotAudit,
   EventFeed,
   EventMarket,
   Lane,
@@ -59,6 +61,51 @@ export class TradeState {
     prematch: new Map(),
     inplay: new Map(),
   };
+  metrics: Record<
+    Lane,
+    {
+      snapshot?: SnapshotAudit;
+      messages: number;
+      messagesByType: Record<string, number>;
+      eventUpdatesReceived: number;
+      duplicateMessages: number;
+      keepAliveActiveEvents?: number;
+      marketsWithoutId: number;
+      staleUpdatesIgnored: number;
+    }
+  > = {
+    prematch: {
+      messages: 0,
+      messagesByType: {},
+      eventUpdatesReceived: 0,
+      duplicateMessages: 0,
+      marketsWithoutId: 0,
+      staleUpdatesIgnored: 0,
+    },
+    inplay: {
+      messages: 0,
+      messagesByType: {},
+      eventUpdatesReceived: 0,
+      duplicateMessages: 0,
+      marketsWithoutId: 0,
+      staleUpdatesIgnored: 0,
+    },
+  };
+  recordMessage(
+    lane: Lane,
+    type: number,
+    events: number,
+    duplicate: boolean,
+    keepAliveActiveEvents?: number,
+  ) {
+    const m = this.metrics[lane];
+    m.messages++;
+    m.messagesByType[String(type)] = (m.messagesByType[String(type)] || 0) + 1;
+    m.eventUpdatesReceived += events;
+    if (duplicate) m.duplicateMessages++;
+    if (keepAliveActiveEvents !== undefined)
+      m.keepAliveActiveEvents = keepAliveActiveEvents;
+  }
   connections: Record<Lane, ConnectionState> = {
     prematch: { phase: "starting", message: "Esperando conexión PreMatch" },
     inplay: { phase: "starting", message: "Esperando conexión InPlay" },
@@ -82,14 +129,19 @@ export class TradeState {
             value: { ...row.fixture?.value, ...defined(event.fixture) },
             at: t,
           };
+        else this.metrics[lane].staleUpdatesIgnored++;
       }
       if (event.livescore && (!row.livescore || at >= row.livescore.at))
         row.livescore = {
           value: { ...row.livescore?.value, ...defined(event.livescore) },
           at,
         };
+      else if (event.livescore) this.metrics[lane].staleUpdatesIgnored++;
       for (const market of event.markets || []) {
-        if (market.id === undefined) continue;
+        if (market.id === undefined) {
+          this.metrics[lane].marketsWithoutId++;
+          continue;
+        }
         const key = String(market.id);
         const old = row.markets.get(key);
         const marketTime = row.marketAt.get(key) || 0;
@@ -105,7 +157,7 @@ export class TradeState {
               ...defined(bet),
             } as typeof bet);
             row.betAt.set(betKey, t);
-          }
+          } else this.metrics[lane].staleUpdatesIgnored++;
         }
         merged.bets = [...bets.values()];
         row.markets.set(key, merged);
@@ -113,7 +165,8 @@ export class TradeState {
       }
     }
   }
-  replace(lane: Lane, events: TradeEvent[], at: number) {
+  replace(lane: Lane, events: TradeEvent[], at: number, audit?: SnapshotAudit) {
+    this.metrics[lane].snapshot = audit;
     this.rows[lane] = new Map();
     this.apply(lane, events, at);
     this.set(lane, {
@@ -211,6 +264,30 @@ export class TradeState {
         .filter((e) => e.source === "inplay" && e.live)
         .map((e) => e.id.split(":")[1]),
     );
+    const visible = events.filter(
+      (e) => !(e.source === "prematch" && inplayIds.has(e.id.split(":")[1])),
+    );
+    const coverage = {} as Record<Lane, CoverageStats>;
+    for (const lane of ["prematch", "inplay"] as const) {
+      const published = visible.filter((e) => e.source === lane);
+      coverage[lane] = {
+        ...structuredClone(this.metrics[lane]),
+        rowsStored: this.rows[lane].size,
+        rowsWithoutFixture: [...this.rows[lane].values()].filter(
+          (r) => !r.fixture,
+        ).length,
+        rowsPublished: published.length,
+        rowsHiddenAsDuplicate:
+          events.filter((e) => e.source === lane).length - published.length,
+        eventsWithMarkets: published.filter((e) => e.markets?.length).length,
+        eventsWithSelections: published.filter((e) =>
+          e.markets?.some((m) => m.selections.length),
+        ).length,
+        eventsWithSelectableOdds: published.filter((e) =>
+          e.markets?.some((m) => m.selections.some((s) => s.available)),
+        ).length,
+      };
+    }
     const phases = Object.values(this.connections).map((c) => c.phase);
     const health = phases.every((p) => p === "connected")
       ? "ok"
@@ -229,9 +306,8 @@ export class TradeState {
           : "Integración con fallas o en recuperación. Las cuotas afectadas están bloqueadas.",
       updatedAt: new Date(now).toISOString(),
       connections: structuredClone(this.connections),
-      events: events.filter(
-        (e) => !(e.source === "prematch" && inplayIds.has(e.id.split(":")[1])),
-      ),
+      events: visible,
+      coverage,
       horseRacing: {
         status: observed.size
           ? "observed"

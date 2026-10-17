@@ -13,6 +13,9 @@ export type Operation = IntegrationDiagnostic["operation"];
 export type Protocol = IntegrationDiagnostic["protocol"];
 type Observation = {
   startedAt?: number;
+  bodyShape?: "array" | "single_event" | "events_wrapper" | "other" | "missing";
+  providerRows?: number;
+  fixturesCount?: number;
   reason?: IntegrationDiagnostic["reason"];
   clientCode?: string;
   timeoutMs?: number;
@@ -44,6 +47,37 @@ function observe(
   }
   if (typeof data === "string" && data.trim())
     observation.reason = "non_json_response";
+  const body =
+    data && typeof data === "object" && "Body" in data
+      ? (data as Record<string, unknown>).Body
+      : undefined;
+  observation.bodyShape =
+    body === undefined
+      ? "missing"
+      : Array.isArray(body)
+        ? "array"
+        : body && typeof body === "object" && "FixtureId" in body
+          ? "single_event"
+          : body &&
+              typeof body === "object" &&
+              "Events" in body &&
+              Array.isArray(body.Events)
+            ? "events_wrapper"
+            : "other";
+  observation.providerRows = Array.isArray(body)
+    ? body.length
+    : observation.bodyShape === "single_event"
+      ? 1
+      : observation.bodyShape === "events_wrapper"
+        ? (body as { Events: unknown[] }).Events.length
+        : undefined;
+  observation.fixturesCount =
+    body &&
+    typeof body === "object" &&
+    "Fixtures" in body &&
+    Array.isArray(body.Fixtures)
+      ? body.Fixtures.length
+      : undefined;
   const header =
     data && typeof data === "object" && "Header" in data
       ? (data.Header as Record<string, unknown>)
@@ -367,4 +401,13 @@ export function configError(
     fields,
     message,
   });
+}
+
+export function responseEvidence() {
+  const o = observations.getStore();
+  return {
+    bodyShape: o?.bodyShape || ("missing" as const),
+    providerRows: o?.providerRows,
+    fixturesCount: o?.fixturesCount,
+  };
 }

@@ -30,6 +30,7 @@ export interface Decoded {
   interrupted: boolean;
   type: number;
   metadata: FeedMessageMetadata;
+  keepAliveActiveEvents?: number;
 }
 const object = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
@@ -366,6 +367,7 @@ export function decodeMessage(
     );
   let events: TradeEvent[] = [];
   let interrupted = false;
+  let keepAliveActiveEvents: number | undefined;
   try {
     const value = (body || {}) as Record<string, unknown>;
     if (type === 1)
@@ -381,7 +383,14 @@ export function decodeMessage(
     if (type === 32)
       interrupted = !!TransformerUtil.transform(value, HeartbeatUpdate)
         .feedInterrupted?.length;
-    if (type === 31) TransformerUtil.transform(value, KeepAliveUpdate);
+    if (type === 31) {
+      const keepAlive = TransformerUtil.transform(
+        value,
+        KeepAliveUpdate,
+      ).keepAlive;
+      if (Array.isArray(keepAlive?.activeEvents))
+        keepAliveActiveEvents = keepAlive.activeEvents.length;
+    }
   } catch {
     fail(
       "entity_conversion",
@@ -405,5 +414,13 @@ export function decodeMessage(
       "La entidad contiene un evento sin ID seguro o sin los campos requeridos para su tipo.",
     );
   metadata.eventCount = events.length;
-  return { guid: guid!, at: at!, events, interrupted, type, metadata };
+  return {
+    guid: guid!,
+    at: at!,
+    events,
+    interrupted,
+    type,
+    metadata,
+    keepAliveActiveEvents,
+  };
 }

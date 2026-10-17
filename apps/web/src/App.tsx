@@ -150,8 +150,13 @@ export default function App() {
     <>
       <header className="header">
         <div className="brand" aria-label="Apuesta DEPORTIVA LAT">
-          <span className="brand-icon" aria-hidden="true">ADL</span>
-          <span className="brand-name"><span>Apuesta</span><strong>DEPORTIVA LAT</strong></span>
+          <span className="brand-icon" aria-hidden="true">
+            ADL
+          </span>
+          <span className="brand-name">
+            <span>Apuesta</span>
+            <strong>DEPORTIVA LAT</strong>
+          </span>
         </div>
         <nav>
           <a className="active" href="/sportsbook">
@@ -346,6 +351,24 @@ export default function App() {
                     ? "Conexión parcial"
                     : "Sin conexión confirmada"}
               </strong>
+              <p>
+                API: {feed.events.length} eventos · Visibles con
+                deporte/aba/búsqueda actuales: {events.length}. Sin eventos
+                ficticios de respaldo.
+              </p>
+              {Object.entries(feed.coverage || {}).map(([lane, c]) => (
+                <p key={`coverage-${lane}`}>
+                  {lane === "prematch" ? "PreMatch" : "InPlay"}: snapshot
+                  proveedor {c.snapshot?.providerRows ?? "sin auditar"} → SDK{" "}
+                  {c.snapshot?.sdkRows ?? "—"} · actualizaciones de eventos{" "}
+                  {c.eventUpdatesReceived} · registros sin fixture{" "}
+                  {c.rowsWithoutFixture} · publicados {c.rowsPublished} · con
+                  cuotas seleccionables {c.eventsWithSelectableOdds}
+                  {c.keepAliveActiveEvents !== undefined
+                    ? ` · último KeepAlive ActiveEvents: ${c.keepAliveActiveEvents}`
+                    : ""}
+                </p>
+              ))}
               {Object.entries(feed.connections || {}).map(([lane, state]) => (
                 <p key={lane}>
                   {lane === "prematch" ? "PreMatch" : "InPlay"}: {state.message}

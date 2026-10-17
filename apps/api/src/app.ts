@@ -18,14 +18,14 @@ export function createApp(source?: EventSource) {
   });
   app.get("/api/health", async (_req, res) => {
     const data = await feed.getEvents();
-    res
-      .status(data.health === "unavailable" ? 503 : 200)
-      .json({
-        status: data.health || "ok",
-        mode: data.mode,
-        connections: data.connections,
-        horseRacing: data.horseRacing,
-      });
+    res.status(data.health === "unavailable" ? 503 : 200).json({
+      status: data.health || "ok",
+      mode: data.mode,
+      connections: data.connections,
+      apiEventCount: data.events.length,
+      coverage: data.coverage,
+      horseRacing: data.horseRacing,
+    });
   });
   app.get("/api/events", async (_req, res) => res.json(await feed.getEvents()));
   app.use("/api", (_req, res) =>

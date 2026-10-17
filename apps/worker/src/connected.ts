@@ -47,7 +47,17 @@ export async function runConnected(signal: AbortSignal) {
   const save = () =>
     operation("file.persist", "local", () => publish(state.feed()));
   let writing: Promise<void> | undefined;
+  let lastCoverageLog = 0;
   const heartbeat = setInterval(() => {
+    if (Date.now() - lastCoverageLog >= 60000) {
+      lastCoverageLog = Date.now();
+      console.info(
+        JSON.stringify({
+          operation: "feed.coverage",
+          coverage: state.feed().coverage,
+        }),
+      );
+    }
     if (!writing)
       writing = save()
         .catch(() =>
@@ -201,6 +211,13 @@ export async function session(
           msg.fields?.redelivered,
         );
         messageMetadata = decoded.metadata;
+        state.recordMessage(
+          lane,
+          decoded.type,
+          decoded.events.length,
+          seen.has(decoded.guid),
+          decoded.keepAliveActiveEvents,
+        );
         if (decoded.interrupted) {
           const diagnostic = {
             operation: "feed.decode" as const,
@@ -301,7 +318,7 @@ export async function session(
       const rows = await api.snapshot();
       if (closed || signal.aborted)
         throw failure || new Error("Disconnected during recovery");
-      state.replace(lane, rows, started);
+      state.replace(lane, rows, started, api.snapshotAudit?.());
       seen.clear();
       // Messages remain unacknowledged while HTTP recovery runs; replay deltas over snapshot.
       while (buffered.length && !closed) {
@@ -314,7 +331,9 @@ export async function session(
       state.set(lane, {
         phase: "connected",
         diagnostic: undefined,
-        message: "Feed conectado; snapshot recuperado.",
+        message: rows.length
+          ? "Feed conectado; snapshot recuperado."
+          : "Feed conectado; snapshot vacío (0 fixtures). Esperando eventos del proveedor.",
       });
       await save();
       console.log(
@@ -322,6 +341,8 @@ export async function session(
           lane,
           status: "snapshot_recovered",
           events: rows.length,
+          snapshotAudit: api.snapshotAudit?.(),
+          coverage: state.feed().coverage?.[lane],
         }),
       );
     };

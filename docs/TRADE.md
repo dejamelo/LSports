@@ -240,3 +240,61 @@ npm run dev
 Para observar apenas o worker com menos ruído, mantenha API e frontend em seus terminais e rode `npm run dev:worker` em outro, evitando executar um segundo worker ao mesmo tempo. `npm run diagnose:trade` continua sendo uma prova passiva de HTTP/AMQP/filas: **não consome mensagens**, portanto não testa decode. A validação do processamento exige `npm run dev` ou `npm run dev:worker` com o pacote real. Veja `reason`, `decodeStage` e `messageMetadata` no log; não publique payloads ou `.env`.
 
 Os testes locais cobrem entidades SDK, tipos de controle, BOM, compressão/limites, fallback de metadados do envelope, códigos desconhecidos e requeue sem ACK em falhas. Não se declara decodificação do seu feed real validada sem esse teste autenticado no Mac.
+
+## Canal saudável com zero eventos: prova de cobertura
+
+`Feed conectado` significa conexão/consumer abertos e snapshot validado, **não** existência de fixtures. Um snapshot vazio agora é identificado como `snapshot vacío (0 fixtures)`. Heartbeat 32 e keepalive 31 mantêm o canal ativo, mas não geram eventos ou odds. `KeepAlive.ActiveEvents`, quando presente, é contado separadamente; trata-se da última lista recebida, possivelmente limitada ao provedor daquela mensagem, não de uma contagem global garantida do pacote.
+
+### Onde verificar as contagens
+
+O worker publica `coverage` por pacote no arquivo local, em `/api/events`, em `/api/health` e a cada minuto no log `feed.coverage`. A interface mostra o total da API e o total visível após esporte, aba e busca. Contadores iniciam quando o worker inicia; snapshots referem-se à última recuperação bem-sucedida.
+
+- `snapshot.providerRows`, `bodyShape`: quantidade/estrutura observada em `Body` da resposta HTTP, antes da conversão do SDK. Não contém payload ou IDs.
+- `snapshot.sdkRows`, `acceptedRows`: quantidade convertida pelo SDK e validada pelo adaptador. `filters: "none"` confirma que não enviamos filtros opcionais de esporte, liga, localização, fixture ou datas no `GetEvents`.
+- `messagesByType`, `eventUpdatesReceived`: mensagens decodificadas com sucesso e quantidade de eventos nos updates. Controles não incrementam o segundo contador. Mensagens inválidas continuam gerando erro explícito e não são contadas como fixtures ausentes.
+- `rowsStored`, `rowsWithoutFixture`: estado retido e registros aguardando metadados `Fixture`. Mercados/livescores que chegam primeiro são retidos, mas não viram uma fixture fictícia.
+- `rowsPublished`, `rowsHiddenAsDuplicate`: eventos publicados e duplicatas PreMatch suprimidas quando a mesma fixture está em progresso no InPlay. Não há exclusão por falta de mercados, status encerrado ou esporte desconhecido; estes últimos aparecem em “Otros deportes”.
+- `eventsWithMarkets`, `eventsWithSelections`, `eventsWithSelectableOdds`: distinguem fixture, mercado, seleção e cuota atualmente selecionável. Falta de odds não remove o evento da API.
+- `duplicateMessages`, `staleUpdatesIgnored`, `marketsWithoutId`: mostram deduplicação de mensagens, atualizações antigas não aplicadas e mercados sem ID ignorados pelo modelo. Não equivalem automaticamente a fixtures perdidas.
+- `/api/health.apiEventCount`: total efetivamente retornado pela API. Arquivo ausente/desatualizado retorna estado indisponível, não uma confirmação de ausência do fornecedor.
+
+O SDK oficial define o snapshot como `Header`/`Body`, com `Body` array de elementos `GetEventsResultElement` (`FixtureId`, `Fixture`, `Livescore`, `Markets`) ou um elemento único. O teste de integração percorre resposta HTTP não vazia → SDK → estado → arquivo atômico → API, incluindo um evento sem mercados e um esporte não mapeado, sem perder essas fixtures. Formato incompatível não é reinterpretado como lista vazia.
+
+### Consultas de assinaturas e quota, somente leitura
+
+Pare o worker e rode `npm run diagnose:trade`. Além das sondagens anteriores, agora usa os métodos oficiais `CustomersApiFactory.createSubscriptionHttpClient`:
+
+| Operação do diagnóstico                   | Método e rota oficiais                                                                       | O que retorna no log                                     |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `subscriptions.list`                      | `getSubscriptions(new GetSubscriptionsRequestDto({}))`, POST `/Fixtures/Get`                 | `subscribedFixtures`, sem IDs e sem filtros opcionais    |
+| `subscriptions.quota`                     | `getPackageQuota()`, POST `/package/GetPackageQuota`                                         | `creditLimit`, `creditRemaining`, `usedCredit`           |
+| `subscriptions.schedule` (somente InPlay) | `getFixturesSchedule(new GetFixtureScheduleRequestDto({}))`, POST `/Fixtures/InPlaySchedule` | `scheduledFixtures`, agenda InPlay sem filtros opcionais |
+
+As rotas e os nomes/casing vêm do SDK oficial, não de navegação presumida no painel. Se a operação retornar erro ou uma estrutura não reconhecida, o diagnóstico informa falha e **não** transforma isso em zero assinaturas. Respostas sem `Fixtures` não são aceitas apenas porque o DTO tem array vazio default.
+
+O comando não executa `/Fixtures/Subscribe`, `/Leagues/Subscribe`, unsubscribe ou mudanças em mercados. O worker também não assina automaticamente fixtures/ligas. `DistributionOn=true` habilita distribuição, mas não comprova assinatura de fixtures ou cobertura comercial. Os 68 esportes do catálogo, por exemplo, não comprovam habilitação desses esportes no pacote. Quota zero deve ser interpretada conforme a política do contrato/Test; o código não compra créditos nem presume uma cobrança específica.
+
+### Como interpretar sem culpar o fornecedor ou a interface indevidamente
+
+| Evidência observada                                                                     | Interpretação e próximo passo                                                                                                                                                                                |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `providerRows=0`, `sdkRows=0`, `eventUpdatesReceived=0`, só tipos 31/32, `rowsStored=0` | Nas respostas e mensagens processadas não vieram fixtures. Não é filtro da interface; investigar assinaturas/cobertura Test e período com eventos. Não prova que o fornecedor não tenha eventos globalmente. |
+| `providerRows>0` e `sdkRows/acceptedRows` divergentes                                   | Erro de conversão/validação, não ausência legítima. O worker deve reportar falha, sem fallback.                                                                                                              |
+| `rowsWithoutFixture>0`                                                                  | Houve updates sem metadados da fixture. Confirmar entrega de tipo 1 e inclusão da fixture no snapshot; os registros permanecem retidos localmente.                                                           |
+| `rowsPublished>0`, mas API vazia/indisponível                                           | Verificar API e worker na mesma cópia e com o mesmo `LSPORTS_STATE_FILE`, além da freshness.                                                                                                                 |
+| `apiEventCount>0`, mas zero visível                                                     | Filtro de esporte/aba/busca. Conferir “Otros deportes”, En vivo/Prepartido e limpar busca.                                                                                                                   |
+| Fixtures publicadas, mas `eventsWithSelectableOdds=0`                                   | Questão de mercados/preços/status, não de ausência de eventos. Conferir `Bets` agregados versus `ProviderMarkets`, suspensões e cobertura do pacote.                                                         |
+| Assinaturas zero e agenda InPlay não vazia                                              | Há candidatos na agenda, mas a consulta não encontrou assinaturas de fixtures. Confirmar estratégia de assinatura e elegibilidade com LSports; agenda não garante entitlement.                               |
+
+### O que verificar no painel ou solicitar ao suporte LSports
+
+Não inventamos nomes de menus do painel, cuja interface não está disponível aqui. Peça confirmação objetiva destes pontos para **PreMatch Test 4511** e **InPlay Test 4510**, separadamente:
+
+1. Pacotes ativos e associados às credenciais/ambiente Test corretos; distribuição ligada e cobertura de esportes, ligas, fixtures e mercados habilitada contratualmente. Confirmar Hípica explicitamente, pois catálogo não é prova de cobertura.
+2. Estratégia de assinatura: distribuição automática de todo o conteúdo contratado ou necessidade de assinar fixtures/ligas; quais assinaturas estão ativas, pendentes, expiradas ou removidas. O SDK diferencia `Subscribed=1`, `Pending=2`, `Unsubscribed=3`, `Deleted=4` nos metadados de assinatura; a consulta `/Fixtures/Get` fornece a lista atual, não uma auditoria de todos os estados.
+3. Quota/crédito e período do pacote Test: saldo/limite e se alguma restrição está impedindo ativação de fixtures. Confirmar a interpretação dos números no contrato antes de mudar assinaturas.
+4. Um `FixtureId` autorizado de PreMatch com início futuro e um InPlay realmente em progresso no horário do teste. Informar o horário com fuso e pedir a resposta esperada de `/Prematch/GetEvents` e `/Inplay/GetEvents`, inclusive se snapshots são limitados às fixtures assinadas ou a uma janela padrão do serviço.
+5. Se afirmarem que há conteúdo ativo, pedir confirmação de envio dos tipos 1/2/3 (fixtures, livescore e mercados) para `_4511_` em `StmPreMatch` e `_4510_` em `StmInPlay`, e se existe outro consumidor dividindo as mensagens dessas filas. Heartbeat/keepalive sozinhos não comprovam entrega dos tipos de evento.
+6. Confirmar se há filtros no lado do fornecedor (esportes/ligas/fixtures/mercados, exclusões, distribuição Test por replay/agenda específica) e se o produto fornece odds agregadas em `Bets` ou apenas `ProviderMarkets`. Não usamos filtros opcionais locais no snapshot nem criamos assinaturas automaticamente.
+
+Envie ao suporte somente os IDs dos pacotes, horário/fuso, contagens/estados sanitizados e os FixtureIds que eles autorizarem. Nunca envie `.env`, senha ou tokens. Após a confirmação, repita o diagnóstico e mantenha o worker ativo por um intervalo informado pelo fornecedor; compare os contadores, não apenas a mensagem “conectado”. Não houve validação com suas credenciais neste ambiente.

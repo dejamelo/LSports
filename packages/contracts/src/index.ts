@@ -39,6 +39,9 @@ export interface IntegrationDiagnostic {
     | "distribution.start"
     | "snapshot.events"
     | "metadata.sports"
+    | "subscriptions.list"
+    | "subscriptions.quota"
+    | "subscriptions.schedule"
     | "amqp.connect"
     | "amqp.channel"
     | "amqp.prefetch"
@@ -160,6 +163,30 @@ export interface ConnectionState {
   snapshotEvents?: number;
   catalogHorseRacing?: boolean;
 }
+export interface SnapshotAudit {
+  bodyShape: "array" | "single_event" | "events_wrapper" | "other" | "missing";
+  providerRows?: number;
+  sdkRows: number;
+  acceptedRows: number;
+  filters: "none";
+}
+export interface CoverageStats {
+  snapshot?: SnapshotAudit;
+  messages: number;
+  messagesByType: Record<string, number>;
+  eventUpdatesReceived: number;
+  duplicateMessages: number;
+  keepAliveActiveEvents?: number;
+  rowsStored: number;
+  rowsWithoutFixture: number;
+  rowsPublished: number;
+  rowsHiddenAsDuplicate: number;
+  eventsWithMarkets: number;
+  eventsWithSelections: number;
+  eventsWithSelectableOdds: number;
+  marketsWithoutId: number;
+  staleUpdatesIgnored: number;
+}
 export interface EventFeed {
   mode: "demo" | "connected";
   notice: string;
@@ -167,6 +194,7 @@ export interface EventFeed {
   updatedAt?: string;
   health?: "ok" | "degraded" | "unavailable";
   connections?: Record<Lane, ConnectionState>;
+  coverage?: Record<Lane, CoverageStats>;
   horseRacing?: {
     status: "observed" | "not_observed" | "unknown";
     message: string;

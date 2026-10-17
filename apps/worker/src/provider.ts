@@ -4,6 +4,7 @@ import {
   describeFailure,
   formatDiagnostic,
   OperationError,
+  responseEvidence,
 } from "./diagnostics.js";
 import {
   CustomersApiFactory,
@@ -12,7 +13,10 @@ import {
   GetInPlayEventRequestDto,
   StatusResponseBody,
   StartResponseBody,
+  GetSubscriptionsRequestDto,
+  GetFixtureScheduleRequestDto,
 } from "trade360-nodejs-sdk";
+import type { SnapshotAudit } from "@lsports/contracts";
 import type { ILogger } from "trade360-nodejs-sdk";
 import type { PackageConfig } from "./config.js";
 import type { TradeEvent } from "./state.js";
@@ -27,10 +31,29 @@ export const silentLogger: ILogger = {
 axios.defaults.timeout = 20000;
 axios.defaults.maxContentLength = 50 * 1024 * 1024;
 axios.defaults.maxRedirects = 0;
+export interface ProviderClients {
+  snapshot(): Promise<TradeEvent[]>;
+  catalog(): Promise<{ id?: number; name?: string }[]>;
+  distributionStatus(): Promise<{
+    isDistributionOn: boolean;
+    consumers: string[];
+    numberMessagesInQueue: number;
+    messagesPerSecond: number;
+  }>;
+  startDistribution(): Promise<void>;
+  snapshotAudit?: () => SnapshotAudit | undefined;
+  subscriptions?: () => Promise<{ fixtures: number }>;
+  quota?: () => Promise<{
+    creditLimit: number;
+    creditRemaining: number;
+    usedCredit: number;
+  }>;
+  schedule?: () => Promise<{ fixtures: number }>;
+}
 export function clients(
   config: PackageConfig,
   urls: { snapshotUrl: string; customersUrl: string },
-) {
+): ProviderClients {
   const credentials = {
     packageId: config.packageId,
     username: config.username,
@@ -57,7 +80,60 @@ export function clients(
     ...options,
     restApiBaseUrl: urls.customersUrl,
   });
+  const subscription = factory.createSubscriptionHttpClient({
+    ...options,
+    restApiBaseUrl: urls.customersUrl,
+  });
+  let audit: SnapshotAudit | undefined;
   return {
+    snapshotAudit: () => audit,
+    async subscriptions() {
+      return operation("subscriptions.list", "http", async () => {
+        const response = await subscription.getSubscriptions(
+          new GetSubscriptionsRequestDto({}),
+        );
+        if (
+          !response ||
+          !Array.isArray(response.fixtures) ||
+          responseEvidence().fixturesCount === undefined
+        )
+          throw new Error("Invalid subscriptions response");
+        return { fixtures: response.fixtures.length };
+      });
+    },
+    async quota() {
+      return operation("subscriptions.quota", "http", async () => {
+        const response = await subscription.getPackageQuota();
+        if (
+          !response ||
+          ![
+            response.creditLimit,
+            response.creditRemaining,
+            response.usedCredit,
+          ].every(Number.isFinite)
+        )
+          throw new Error("Invalid quota response");
+        return {
+          creditLimit: response.creditLimit,
+          creditRemaining: response.creditRemaining,
+          usedCredit: response.usedCredit,
+        };
+      });
+    },
+    async schedule() {
+      return operation("subscriptions.schedule", "http", async () => {
+        const response = await subscription.getFixturesSchedule(
+          new GetFixtureScheduleRequestDto({}),
+        );
+        if (
+          !response ||
+          !Array.isArray(response.fixtures) ||
+          responseEvidence().fixturesCount === undefined
+        )
+          throw new Error("Invalid schedule response");
+        return { fixtures: response.fixtures.length };
+      });
+    },
     async snapshot(): Promise<TradeEvent[]> {
       return operation("snapshot.events", "http", async () => {
         const response =
@@ -67,8 +143,26 @@ export function clients(
         if (response === undefined || response === null)
           throw new Error("Invalid snapshot response");
         const rows = Array.isArray(response) ? response : [response];
-        if (rows.some((e) => !Number.isSafeInteger(e.fixtureId) || !e.fixture))
+        if (
+          rows.some(
+            (e) =>
+              !Number.isSafeInteger(e.fixtureId) ||
+              !e.fixture ||
+              typeof e.fixture !== "object" ||
+              Array.isArray(e.fixture),
+          )
+        )
           throw new Error("Invalid snapshot event");
+        const evidence = responseEvidence();
+        audit = {
+          bodyShape: evidence.bodyShape,
+          providerRows: evidence.providerRows,
+          sdkRows: rows.length,
+          acceptedRows: rows.length,
+          filters: "none",
+        };
+        if (evidence.providerRows !== rows.length)
+          throw new Error("Invalid snapshot response: row count mismatch");
         return rows;
       });
     },

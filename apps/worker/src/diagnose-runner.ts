@@ -96,7 +96,10 @@ export async function diagnosePackage(
     "snapshot.events",
     "http",
     () => api.snapshot(),
-    (result) => ({ events: result.length }),
+    (result) => ({
+      events: result.length,
+      snapshotAudit: api.snapshotAudit?.(),
+    }),
   );
   await check(
     "metadata.sports",
@@ -104,6 +107,30 @@ export async function diagnosePackage(
     () => api.catalog(),
     (result) => ({ sports: result.length }),
   );
+  if (api.subscriptions)
+    await check(
+      "subscriptions.list",
+      "http",
+      () => api.subscriptions!(),
+      (result) => ({ subscribedFixtures: result.fixtures }),
+    );
+  if (api.quota)
+    await check(
+      "subscriptions.quota",
+      "http",
+      () => api.quota!(),
+      (result) => ({ ...result }),
+    );
+  if (pkg.lane === "inplay" && api.schedule)
+    await check(
+      "subscriptions.schedule",
+      "http",
+      () => api.schedule!(),
+      (result) => ({
+        scheduledFixtures: result.fixtures,
+        scope: "InPlaySchedule",
+      }),
+    );
   const connection = await check("amqp.connect", "amqp", () =>
     connectMq(pkg, deps.connect),
   );
