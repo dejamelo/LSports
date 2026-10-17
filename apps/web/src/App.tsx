@@ -149,12 +149,9 @@ export default function App() {
   return (
     <>
       <header className="header">
-        <div className="brand">
-          <span className="brand-icon">
-            L<span>↗</span>
-          </span>
-          LS<span>ports</span>
-          <small>SPORTSBOOK</small>
+        <div className="brand" aria-label="Apuesta DEPORTIVA LAT">
+          <span className="brand-icon" aria-hidden="true">ADL</span>
+          <span className="brand-name"><span>Apuesta</span><strong>DEPORTIVA LAT</strong></span>
         </div>
         <nav>
           <a className="active" href="/sportsbook">
@@ -342,7 +339,7 @@ export default function App() {
               role="status"
             >
               <strong>
-                LSports TRADE · Test ·{" "}
+                Proveedor: LSports TRADE · Test ·{" "}
                 {feed.health === "ok"
                   ? "Feed conectado"
                   : feed.health === "degraded"
@@ -423,7 +420,7 @@ export default function App() {
           </div>
           <footer>
             <span>
-              © {new Date().getFullYear()} LSports ·{" "}
+              © {new Date().getFullYear()} Apuesta DEPORTIVA LAT ·{" "}
               {connected ? "TRADE Test" : "Experiencia demo"}
             </span>
             <span>Jugá con responsabilidad. 18+</span>

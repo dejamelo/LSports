@@ -1,4 +1,4 @@
-# LSports — sportsbook independente
+# Apuesta DEPORTIVA LAT — sportsbook independente
 
 React + TypeScript, API Node.js e worker persistente para LSports TRADE, com interface em espanhol argentino preparada para iframe. **O bilhete é sempre uma simulação com pontos fictícios. Não aceita apostas, depósitos, pagamentos ou retiros.**
 
@@ -45,7 +45,7 @@ O build gera `apps/web/dist` e verifica os tipos dos serviços Node, que são ex
 ```html
 <iframe
   src="https://sportsbook.example.com/sportsbook"
-  title="LSports — simulador deportivo"
+  title="Apuesta DEPORTIVA LAT — simulador deportivo"
   width="100%"
   height="900"
   style="border:0"

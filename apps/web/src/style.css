@@ -54,36 +54,24 @@ a {
 .brand {
   display: flex;
   align-items: center;
-  font-size: 27px;
-  font-weight: 700;
-  letter-spacing: -1px;
-  position: relative;
+  gap: 10px;
+  flex-shrink: 0;
 }
-.brand > span:not(.brand-icon) {
-  font-weight: 400;
-}
-.brand small {
-  position: absolute;
-  font-size: 8px;
-  letter-spacing: 3px;
-  bottom: -11px;
-  left: 47px;
-  color: #8d9a9e;
-}
+.brand-name { display: flex; flex-direction: column; gap: 3px; }
+.brand-name > span { font-size: 14px; color: #c8d3d6; letter-spacing: .5px; }
+.brand-name strong { font-size: 17px; line-height: 1.1; letter-spacing: 1px; }
 .brand-icon {
   background: #caf16c;
   color: #111b10;
-  width: 34px;
-  height: 34px;
-  transform: skew(-10deg);
-  margin-right: 10px;
-  font-size: 26px;
+  width: 46px;
+  height: 42px;
+  border-radius: 6px 2px;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -1px;
   display: flex;
   align-items: center;
   justify-content: center;
-}
-.brand-icon span {
-  font-size: 17px;
 }
 .header nav {
   height: 100%;
@@ -1267,4 +1255,12 @@ footer {
 .odds-row button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+@media(max-width:620px){
+ .header { gap: 12px; }
+ .brand { gap: 8px; }
+ .brand-icon { width: 36px; height: 36px; font-size: 14px; }
+ .brand-name > span { font-size: 11px; }
+ .brand-name strong { font-size: 12px; letter-spacing: .5px; }
 }
