@@ -8,7 +8,11 @@ export interface Selection {
   line?: string;
   participantId?: number;
   settlement?: number;
+  settlementLabel?: string;
+  unavailableReasons?: string[];
 }
+export const marketStatusLabel = (status?: number) => ({ 0: "Sin estado", 1: "Abierto", 2: "Suspendido", 3: "Liquidado", 4: "Cerrado" } as Record<number, string>)[status ?? -1] || "Estado desconocido";
+export const settlementLabel = (status?: number) => ({ [-1]: "Cancelada", 0: "Sin liquidar", 1: "Perdedora", 2: "Ganadora", 3: "Reembolso", 4: "Media pérdida", 5: "Media ganancia" } as Record<number, string>)[status ?? -2] || "Liquidación no informada";
 export interface EventMarket {
   id: string;
   name: string;
@@ -33,6 +37,8 @@ export interface OutrightMarketDiagnostic {
   competitionId: number;
   fixtureId: number;
   hasFixture: boolean;
+  fixtureStatus?: number;
+  fixtureStatusLabel?: string;
   restored?: boolean;
   participantCount?: number;
   messagesByType: Record<string, number>;
@@ -47,7 +53,7 @@ export interface OutrightMarketDiagnostic {
   storedMarkets: number;
   storedSelections: number;
   selectableSelections: number;
-  market160?: { status?: number; selections: number; pricedSelections: number; selectableSelections: number };
+  market160?: { status?: number; statusLabel?: string; selections: number; pricedSelections: number; selectableSelections: number; selectionStatusCounts?: Record<string, number>; settlementCounts?: Record<string, number>; blockedReasonCounts?: Record<string, number> };
 }
 export interface SportEvent {
   kind?: "fixture" | "outright";

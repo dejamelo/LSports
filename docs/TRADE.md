@@ -785,3 +785,75 @@ sin producir requests al proveedor, lea `/api/health` y
 formato corregido produce mercados reales, el significado del Header/Body:null
 si persiste, cobertura y publicación de odds, y un reenvío si corresponde. No se
 crean ni cancelan suscripciones, incluidas suscripciones pagas.
+
+### Mercado 160 con status 3 y nueve cuotas almacenadas
+
+El enum oficial `MarketStatus` define `Open=1`, `Suspended=2`, `Settled=3`,
+`Closed=4`. Por tanto, `market160.status: 3` significa **mercado liquidado**.
+Nueve selecciones con precio válido y cero habilitadas son coherentes con ese
+estado: `Market.Status` debe ser 1 para permitir seleccionar. Conservar precios
+históricos no autoriza volver a abrir el mercado.
+
+Los contadores de tipos 41/42 y `pricedSelections: 9` demuestran recepción de
+mensajes y precios; no indican que el mercado siga abierto. El tipo 42 representa
+liquidaciones. `snapshotMarketUpdates` acumula entradas de mercado recuperadas,
+no necesariamente cantidad de requests ni carreras distintas.
+
+**No confundir dominios:**
+- `MarketStatus=3`: mercado liquidado.
+- `BetStatusId=3`: selección liquidada.
+- `SettlementType=3`: reembolso, no un estado de apertura.
+- `FixtureStatus=3`: evento finalizado.
+
+Un mercado liquidado no prueba por sí solo que hayamos recibido Fixture.Status=3.
+El diagnóstico por fixture agrega `fixtureStatus` / `fixtureStatusLabel` y, para
+el mercado 160, `statusLabel`, `selectionStatusCounts`, `settlementCounts` y
+`blockedReasonCounts`. `market_settled: 9` identifica el bloqueo de las nueve
+selecciones por el mercado. Otros motivos distinguen selección no abierta,
+liquidación, evento inactivo, precio inválido, conexión y espera de actualización
+tras restaurar. Las razones son acumulables; no se deduce un ganador del precio.
+
+La interfaz muestra `Mercado liquidado`, conserva las selecciones deshabilitadas
+y bloquea un billete que ya las contenía. El tooltip indica liquidación, en lugar
+de sugerir únicamente suspensión. La prueba de navegador verifica el cambio
+abierto → tipo 42 → liquidado y que no pueda simularse el billete previo.
+No se fuerza Status=1 ni se elimina el estado de liquidación.
+
+Fuentes oficiales:
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/entities/core-entities/market/market-status.ts
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/entities/core-entities/enums/fixture-status.ts
+- https://github.com/lsportsltd/trade360-nodejs-sdk/blob/ece873dfc9040e431662bc27e7c2bf8cbd519811/src/entities/core-entities/enums/settlement-type.ts
+
+### Buscar un evento abierto con los datos ya recibidos
+
+El endpoint siguiente lee únicamente la proyección local. No genera HTTP a LSports,
+no consume la cola, no altera suscripciones y no afecta retryAt:
+
+```bash
+curl -sS 'http://localhost:3001/api/diagnostics/open-events?sport=hipica'
+# Si no hay Hípica abierta, revisar otros deportes ya recibidos:
+curl -sS 'http://localhost:3001/api/diagnostics/open-events?sport=all'
+```
+
+Solo devuelve candidatos del modo conectado, con fixture activo (1/2/9), evento
+habilitado, mercado abierto (1) y selecciones con `available: true` y precio válido.
+Excluye liquidaciones, suspensiones, fixtures finalizados, precios no confirmados
+tras restaurar y datos demo. La protección de caducidad de la API sigue vigente.
+`candidates_available` identifica candidatos en la proyección actual;
+`no_selectable_events_in_current_projection` no afirma que no existan eventos
+abiertos en el proveedor. La disponibilidad puede cambiar entre la consulta y el clic.
+
+Para validar en el Mac, elija un candidato, abra `/sportsbook`, seleccione su
+ deporte/pestaña y búsquelo por título. Seleccione una cuota y compruebe el billete
+simulado. Si cambia el precio, acepte la actualización; si cambia el estado, el
+billete debe bloquearse. No se requiere movimiento de dinero ni nueva suscripción.
+El diagnóstico `/api/diagnostics/outright/20540377` permite confirmar por separado
+si llegó el estado final del fixture ya liquidado.
+
+Este workspace no tiene el checkpoint ni las credenciales del Mac: no se afirma
+haber localizado o seleccionado aquí un evento abierto real. La validación real
+pendiente debe usar un candidato de esas lecturas locales. Si no hay ninguno,
+conserve el feed activo y respete el próximo retryAt; solicite en el ticket 217525
+un fixture **aún activo** con mercado 160 abierto y cuotas publicadas dentro de
+las suscripciones actuales, sin crear una suscripción paga ni reabrir una carrera
+liquidada. Las pruebas automatizadas son sintéticas y permanecen aisladas.

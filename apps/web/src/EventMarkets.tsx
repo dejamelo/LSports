@@ -1,3 +1,4 @@
+import { marketStatusLabel } from "@lsports/contracts";
 import { useState } from "react";
 import type { SportEvent, Selection } from "@lsports/contracts";
 export function EventMarkets({
@@ -16,6 +17,7 @@ export function EventMarkets({
     { id: "demo", name: event.market, selections: event.selections },
   ];
   const market = markets.find((m) => m.id === marketId) || markets[0];
+  const stateLabel = market?.status === undefined ? "" : marketStatusLabel(market.status);
   return (
     <div className="markets">
       {event.restored && <p className="market-empty">Evento recuperado del almacenamiento local. Las cuotas sin actualizar permanecen bloqueadas.</p>}
@@ -42,7 +44,7 @@ export function EventMarkets({
             <option key={m.id} value={m.id}>
               {m.name}
               {m.status !== undefined && m.status !== 1
-                ? " · No disponible"
+                ? ` · ${marketStatusLabel(m.status)}`
                 : ""}
             </option>
           ))}
@@ -50,13 +52,18 @@ export function EventMarkets({
       ) : (
         <span>{market?.name || "Sin mercados disponibles"}</span>
       )}
+      {stateLabel && <p className="market-empty" role="status">Mercado {stateLabel.toLocaleLowerCase("es-AR")}</p>}
       <div className="odds-row">
         {market?.selections.map((selection) => (
           <button
             disabled={blocked || selection.available === false}
             title={
               selection.available === false
-                ? "Cuota suspendida o no disponible"
+                ? market?.status !== undefined && market.status !== 1
+                  ? `Mercado ${stateLabel.toLocaleLowerCase("es-AR")}`
+                  : selection.settlement !== undefined && selection.settlement !== 0
+                    ? `Selección liquidada · ${selection.settlementLabel || "Liquidada"}`
+                    : "Cuota suspendida o no disponible"
                 : selection.label
             }
             aria-pressed={selected.includes(selection.id)}

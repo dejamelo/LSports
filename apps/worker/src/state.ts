@@ -1,3 +1,4 @@
+import { marketStatusLabel, settlementLabel } from "@lsports/contracts";
 import type {
   ConnectionState,
   OutrightMarketDiagnostic,
@@ -259,29 +260,40 @@ export class TradeState {
           id: `${prefix}:${m.id}`,
           name: m.name || `Mercado ${m.id}`,
           status: m.status,
-          selections: (m.bets || []).map((b) => ({
+          selections: (m.bets || []).map((b) => {
+            const unavailableReasons = [
+              ...(this.connections[lane].phase !== "connected" ? ["feed_disconnected"] : []),
+              ...(![1, 2, 9].includes(status ?? 0) ? ["event_inactive"] : []),
+              ...(m.status !== 1 ? [m.status === 3 ? "market_settled" : "market_not_open"] : []),
+              ...((b.betStatusId ?? b.status) !== 1 ? ["selection_not_open"] : []),
+              ...(b.settlement !== undefined && b.settlement !== 0 ? ["selection_settled"] : []),
+              ...(!(Number(b.price) > 1 && Number.isFinite(Number(b.price))) ? ["invalid_price"] : []),
+              ...(row.restored && !row.freshBets?.has(`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
+            ];
+            return ({
             id: `${prefix}:${m.id}:${b.id}`,
             label: `${b.name || (row.outright && b.participantId !== undefined ? fixture.participants?.find((p) => p.id === b.participantId)?.name : undefined) || "Selección"}${b.line ? ` (${b.line})` : ""}`,
             line: b.line,
             participantId: b.participantId,
             settlement: b.settlement,
+            settlementLabel: b.settlement === undefined ? undefined : settlementLabel(b.settlement),
+            unavailableReasons,
             odds: Number(b.price) || 0,
             status: b.betStatusId ?? b.status,
-            available:
-              (!row.restored || !!row.freshBets?.has(`${m.id}:${b.id}`)) &&
-              available &&
-              m.status === 1 &&
-              (b.settlement === undefined || b.settlement === 0) &&
-              (b.betStatusId ?? b.status) === 1 &&
-              Number(b.price) > 1 &&
-              Number.isFinite(Number(b.price)),
-          })),
+            available: unavailableReasons.length === 0,
+          }); }),
         }));
         const marketDiagnostic = diagnosticByKey.get(prefix);
         if (marketDiagnostic) {
+          marketDiagnostic.fixtureStatus = status;
+          marketDiagnostic.fixtureStatusLabel = statusLabels[status ?? 0] || "Estado desconocido";
           marketDiagnostic.selectableSelections = markets.reduce((n, m) => n + m.selections.filter((s) => s.available).length, 0);
           const winner = markets.find((m) => m.id === `${prefix}:160`);
-          if (winner) marketDiagnostic.market160 = { status: winner.status, selections: winner.selections.length,
+          if (winner) marketDiagnostic.market160 = { status: winner.status, statusLabel: marketStatusLabel(winner.status),
+            selectionStatusCounts: winner.selections.reduce<Record<string, number>>((counts, s) => { const key = s.status === undefined ? "unknown" : String(s.status); counts[key] = (counts[key] || 0) + 1; return counts; }, {}),
+            settlementCounts: winner.selections.reduce<Record<string, number>>((counts, s) => { const key = s.settlement === undefined ? "unknown" : String(s.settlement); counts[key] = (counts[key] || 0) + 1; return counts; }, {}),
+            blockedReasonCounts: winner.selections.reduce<Record<string, number>>((counts, s) => { for (const reason of s.unavailableReasons || []) counts[reason] = (counts[reason] || 0) + 1; return counts; }, {}),
+            selections: winner.selections.length,
             pricedSelections: winner.selections.filter((s) => s.odds > 1 && Number.isFinite(s.odds)).length,
             selectableSelections: winner.selections.filter((s) => s.available).length };
         }

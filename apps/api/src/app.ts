@@ -41,6 +41,30 @@ export function createApp(source?: EventSource) {
       matches, connections: data.connections,
     });
   });
+  // Local projection only: this route never calls the supplier or changes subscriptions.
+  app.get("/api/diagnostics/open-events", async (req, res) => {
+    const sport = req.query.sport ?? "hipica";
+    if (typeof sport !== "string" || !["hipica", "futbol", "tenis", "basquet", "otros", "all"].includes(sport)) {
+      res.status(400).json({ error: "Deporte inválido" }); return;
+    }
+    const data = await feed.getEvents();
+    const connected = data.mode === "connected";
+    const events = connected ? data.events.filter(e => sport === "all" || e.sport === sport) : [];
+    const candidates = events.flatMap(event => {
+      if (event.available !== true || ![1, 2, 9].includes(event.status ?? 0)) return [];
+      const markets = (event.markets || []).filter(m => m.status === 1).map(m => ({ ...m,
+        selections: m.selections.filter(s => s.available === true && Number.isFinite(s.odds) && s.odds > 1),
+      })).filter(m => m.selections.length > 0);
+      return markets.length ? [{ eventId: event.id, fixtureId: Number(event.id.split(":").at(-1)),
+        competitionId: event.competition?.id, source: event.source, sport: event.sport,
+        title: [event.home, event.away].filter(Boolean).join(" · "), status: event.status,
+        statusLabel: event.statusLabel, time: event.time, live: event.live, markets }] : [];
+    });
+    res.json({ mode: data.mode, health: data.health, updatedAt: data.updatedAt,
+      observation: !connected ? "connected_feed_required" : candidates.length ? "candidates_available" : "no_selectable_events_in_current_projection",
+      observedEvents: events.length, candidates, connections: data.connections,
+    });
+  });
   app.get("/api/events", async (_req, res) => res.json(await feed.getEvents()));
   app.use("/api", (_req, res) =>
     res.status(404).json({ error: "Ruta no encontrada" }),

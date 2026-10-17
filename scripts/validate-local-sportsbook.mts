@@ -64,13 +64,21 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Simular billete', exact: true }).isEnabled(), true);
   await page.getByRole('button', { name: 'Simular billete', exact: true }).click();
   await page.getByText(/Simulación lista/).waitFor();
+  // Provider settlement must disable the existing pick, without opening the market.
+  receive(42, { Competition: { Id: 900001, Events: [{ FixtureId: 900002, Markets: [{ Id: 160, Status: 3,
+    Bets: [{ Id: '900003', Status: 3, Settlement: 2 }] }] }] } });
+  await save();
+  await page.getByText('Mercado liquidado', { exact: true }).waitFor({ timeout: 10000 });
+  assert.equal(await page.getByRole('button', { name: 'Simular billete', exact: true }).isDisabled(), true);
+  assert.equal(await page.locator('.odds-row button').first().isDisabled(), true);
+  assert.equal(await page.locator('.odds-row button').first().getAttribute('title'), 'Mercado liquidado');
   const restored = new TradeState(); await restore(restored, path);
   assert.equal(restored.feed().events.find(e => e.kind === 'outright')?.participants?.length, 9);
   assert.equal(restored.feed().events.find(e => e.kind === 'outright')?.selections[0].odds, 3.25);
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   assert.deepEqual(errors, []); assert.deepEqual(forbidden, []);
-  console.log('PASS ISOLATED SYNTHETIC: gzip AMQP 37/41 + 1/3 -> SDK parser -> atomic checkpoint -> real API -> real React sportsbook -> participants -> betslip simulation -> restart preservation -> mobile width. No supplier calls, subscriptions, queue consumption or payment requests.');
+  console.log('PASS ISOLATED SYNTHETIC: gzip AMQP 37/41 + 1/3 -> SDK parser -> atomic checkpoint -> real API -> real React sportsbook -> participants -> betslip simulation -> restart preservation -> mobile width, settled-market label and blocked existing pick. No supplier calls, subscriptions, queue consumption or payment requests.');
 } finally {
   clearInterval(heartbeat); await browser?.close(); await vite.close();
   await new Promise<void>(r => api.close(() => r())); await rm(dir, { recursive: true, force: true });

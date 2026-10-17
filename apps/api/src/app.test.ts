@@ -81,3 +81,27 @@ test('fixture diagnostic route exposes actual projected outright market counters
     assert.equal((await fetch(`${base}/api/diagnostics/outright/invalid`)).status, 400);
   } finally { await new Promise<void>(r => server.close(() => r())); }
 });
+
+test('local open-event search excludes settled, suspended, restored and inactive candidates without supplier calls', async () => {
+  const { TradeState } = await import('../../worker/src/state.js');
+  const state = new TradeState();
+  state.set('prematch', { phase: 'connected' });
+  for (const [fixtureId, marketStatus, fixtureStatus] of [[101, 1, 1], [102, 3, 1], [103, 2, 1], [104, 1, 3], [105, 1, 1]]) {
+    state.apply('prematch', [{ fixtureId, outright: { competitionId: 90, fixture: { sport: { name: 'Horse Racing' }, status: fixtureStatus } },
+      markets: [{ id: 160, status: marketStatus, bets: [{ id: '1', status: 1, price: '3.25', isChanged: 0 }] }] }], Date.now());
+  }
+  state.rows.prematch.get('outright:90:105')!.restored = true;
+  const server = createApp({ async getEvents() { return state.feed(); } }).listen(0, '127.0.0.1');
+  await new Promise<void>(r => server.once('listening', r));
+  try {
+    const address = server.address(); assert(address && typeof address !== 'string');
+    const base = `http://127.0.0.1:${address.port}`;
+    const report = await (await fetch(`${base}/api/diagnostics/open-events`)).json();
+    assert.equal(report.observation, 'candidates_available');
+    assert.deepEqual(report.candidates.map((e: {fixtureId: number}) => e.fixtureId), [101]);
+    assert.equal(report.candidates[0].markets[0].selections[0].odds, 3.25);
+    assert.equal((await fetch(`${base}/api/diagnostics/open-events?sport=invalid`)).status, 400);
+    state.set('prematch', { phase: 'error' });
+    assert.equal((await (await fetch(`${base}/api/diagnostics/open-events?sport=all`)).json()).observation, 'no_selectable_events_in_current_projection');
+  } finally { await new Promise<void>(r => server.close(() => r())); }
+});
