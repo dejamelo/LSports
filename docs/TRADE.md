@@ -389,3 +389,57 @@ reenvío o recuperación oficial del estado de mercados. Activar Offered en el p
 no demuestra que esta cola haya recibido una actualización. Adjunte hora UTC,
 paquete, fixture, contadores y diagnóstico sanitizado, nunca credenciales ni
 payloads completos. No se modifica `.env` ni se crean colas o suscripciones nuevas.
+
+### Recuperación Outright tras reiniciar el worker
+
+Se corrigió un defecto de arranque: el worker creaba `TradeState` vacío y publicaba
+antes de leer el estado existente. Esa primera escritura eliminaba los Outright
+persistidos; el snapshot regular no los reconstruye. El reemplazo del snapshot
+ya preservaba las filas Outright presentes en memoria. La búsqueda diagnóstica
+usa el fixture ID numérico del proveedor, no el ID compuesto de la interfaz,
+y devuelve coincidencias de ambas competiciones/feeds cuando corresponda.
+
+Ahora el worker toma el lock y restaura antes de habilitar cualquier escritura,
+heartbeat o recuperación HTTP. El mismo archivo configurado por `LSPORTS_STATE_FILE`
+(por defecto `.runtime/trade-feed.json`) contiene una proyección pública y un
+`workerCheckpoint` privado con versión. El checkpoint conserva todas las filas
+Outright, incluso mercados aún sin metadatos, participantes completos, mercados,
+selecciones, datos de proveedores y timestamps de ordenación. No contiene credenciales.
+La API elimina el checkpoint privado de sus respuestas. El snapshot de fútbol
+sigue siendo autoritativo para los fixtures regulares; no borra las filas Outright.
+
+Un archivo de la versión anterior, sin checkpoint, se migra desde su proyección:
+se recuperan participantes y mercados expuestos y se guarda el original como
+`<archivo>.pre-checkpoint.bak`, sin sobrescribir un backup existente. Los campos
+que no estaban en la proyección anterior (por ejemplo, mercados huérfanos o
+metadatos exclusivos del proveedor) no pueden reconstruirse desde ese formato.
+Un archivo inválido o de versión desconocida detiene el arranque sin sobrescribirlo.
+La caducidad de 20 segundos aplicada por la API no impide restaurar después de una
+parada larga. No se reutiliza el estado `connected` del archivo: debe reconectarse.
+
+El log `file.restore` informa `source` (`missing`, `legacy_projection` o `checkpoint`)
+y `rows`, sin payloads. El diagnóstico por fixture agrega `restored` y
+`participantCount`. Los contadores por carrera conservados en el checkpoint son
+acumulados y pueden abarcar reinicios; los contadores globales de cobertura siguen
+siendo del proceso actual. Las odds restauradas se conservan como datos históricos
+y quedan bloqueadas hasta una actualización de selección posterior a su timestamp
+persistido. No se necesita una actualización para recuperar el evento y sus datos.
+
+Para validar en el Mac:
+
+1. No borre `.runtime` ni el archivo configurado. Con la aplicación activa, consulte
+   `curl -sS http://localhost:3001/api/diagnostics/outright/20540377` y
+   `curl -sS http://localhost:3001/api/events`.
+2. Detenga con Ctrl+C y vuelva a ejecutar `npm run dev` sin eliminar archivos.
+3. Compruebe `file.restore` con `source: checkpoint`, `rows` mayor que cero y la
+   misma carrera/participantes/mercados en la API, aunque no lleguen mensajes 37/41.
+   Las filas restauradas indican `restored: true`; las odds guardadas esperan
+   actualización. La prueba automatizada hace este ciclo con snapshot regular
+   vacío y sin recibir ninguna actualización del proveedor.
+
+Si un reinicio con la versión defectuosa ya sobrescribió el archivo y el fixture
+no figura en él, esta corrección no puede inventar los datos eliminados. Para
+recuperarlos sin esperar al proveedor se necesita una copia anterior de ese archivo
+(por ejemplo, de Time Machine). Con los procesos detenidos, conserve el archivo
+actual aparte y restaure la copia en la ruta configurada antes de arrancar.
+`.env` no requiere cambios y no debe reemplazarse.

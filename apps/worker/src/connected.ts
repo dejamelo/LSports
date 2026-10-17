@@ -15,6 +15,7 @@ import {
   formatDiagnostic,
   OperationError,
 } from "./diagnostics.js";
+import { checkpoint, restore } from "./persistence.js";
 import { connectMq } from "./mq.js";
 
 export async function runConnected(signal: AbortSignal) {
@@ -43,9 +44,16 @@ export async function runConnected(signal: AbortSignal) {
     return runConnected(signal);
   }
   const state = new TradeState();
+  try {
+    const recovery = await restore(state, path);
+    console.info(JSON.stringify({ operation: "file.restore", status: "ok", ...recovery }));
+  } catch {
+    await rm(lockPath, { force: true });
+    throw new Error("No se pudo restaurar el estado TRADE. Archivo original conservado; no se inicia la escritura.");
+  }
   const publish = createPublisher(path);
   const save = () =>
-    operation("file.persist", "local", () => publish(state.feed()));
+    operation("file.persist", "local", () => publish(state.feed(), checkpoint(state)));
   let writing: Promise<void> | undefined;
   let lastCoverageLog = 0;
   const heartbeat = setInterval(() => {

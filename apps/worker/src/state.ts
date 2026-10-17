@@ -22,7 +22,8 @@ interface Versioned<T> {
   value: T;
   at: number;
 }
-interface Row {
+export interface Row {
+  restored?: boolean;
   fixture?: Versioned<Fixture>;
   outright?: TradeEvent["outright"];
   marketReceipt?: { messagesByType: Record<string, number>; marketUpdates: number; betUpdates: number; providerMarketUpdates: number; providerBetUpdates: number; staleBetUpdates: number; lastMarketMessageAt?: string };
@@ -30,6 +31,7 @@ interface Row {
   markets: Map<string, Market>;
   marketAt: Map<string, number>;
   betAt: Map<string, number>;
+  freshBets?: Set<string>;
 }
 const statusLabels: Record<number, string> = {
   0: "Sin estado",
@@ -182,6 +184,7 @@ export class TradeState {
               ...bets.get(bet.id),
               ...defined(bet),
             } as typeof bet);
+            if (row.restored && t > (row.betAt.get(betKey) || 0)) (row.freshBets ||= new Set()).add(betKey);
             row.betAt.set(betKey, t);
           } else {
             this.metrics[lane].staleUpdatesIgnored++;
@@ -213,6 +216,7 @@ export class TradeState {
         if (!row.outright) continue;
         const diagnostic: OutrightMarketDiagnostic = { lane, competitionId: row.outright.competitionId,
           fixtureId: Number(String(key).split(":").at(-1)), hasFixture: !!row.fixture,
+          restored: row.restored || undefined, participantCount: row.fixture?.value.participants?.length || 0,
           messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0,
           ...structuredClone(row.marketReceipt),
           storedMarkets: row.markets.size,
@@ -254,6 +258,7 @@ export class TradeState {
             odds: Number(b.price) || 0,
             status: b.betStatusId ?? b.status,
             available:
+              (!row.restored || !!row.freshBets?.has(`${m.id}:${b.id}`)) &&
               available &&
               m.status === 1 &&
               (b.settlement === undefined || b.settlement === 0) &&
@@ -282,6 +287,7 @@ export class TradeState {
           sport,
           source: lane,
           marketDiagnostic,
+          restored: row.restored || undefined,
           kind: row.outright ? "outright" : "fixture",
           competition: row.outright ? { id: row.outright.competitionId, name: row.outright.competitionName, type: row.outright.competitionType } : undefined,
           participants: structuredClone(participants),

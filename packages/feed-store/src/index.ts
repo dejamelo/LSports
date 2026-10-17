@@ -41,7 +41,8 @@ export async function readConnectedFeed(
       return unavailable(
         "Worker sin señal reciente. No se muestran cuotas almacenadas.",
       );
-    return feed;
+    const { workerCheckpoint: _checkpoint, ...publicFeed } = feed as EventFeed & { workerCheckpoint?: unknown };
+    return publicFeed;
   } catch {
     return unavailable(
       "Sin datos del worker. Verificá la configuración y el proceso de integración.",
@@ -51,8 +52,8 @@ export async function readConnectedFeed(
 // One local worker writes a single atomic projection; API only reads. Never store credentials here.
 export function createPublisher(path = statePath()) {
   let tail = Promise.resolve();
-  return (feed: EventFeed) => {
-    const body = JSON.stringify(feed);
+  return (feed: EventFeed, workerCheckpoint?: unknown) => {
+    const body = JSON.stringify({ ...feed, ...(workerCheckpoint === undefined ? {} : { workerCheckpoint }) });
     const operation = tail.then(async () => {
       await mkdir(dirname(path), { recursive: true });
       const temp = `${path}.${process.pid}.tmp`;

@@ -1,0 +1,152 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
+import amqp from 'amqplib';
+import { createPublisher, readConnectedFeed } from '@lsports/feed-store';
+import { TradeState } from './state.js';
+import { checkpoint, restore } from './persistence.js';
+import { session } from './connected.js';
+import { createApp } from '../../api/src/app.js';
+import type { PackageConfig } from './config.js';
+
+const fixtureId = 20540377;
+function seed() {
+  const state = new TradeState();
+  for (const lane of ['prematch', 'inplay'] as const) {
+    state.apply(lane, [{ fixtureId, outright: { competitionId: 90,
+      fixture: { fixtureName: 'Synthetic San Isidro restart fixture', sport: { name: 'Horse Racing' }, status: 1,
+        participants: Array.from({ length: 9 }, (_, i) => ({ id: i + 1, name: `Test runner ${i + 1}`, position: String(i + 1) })) } },
+      marketMessageType: 41,
+      markets: [{ id: 160, name: 'Race Winner', status: 1, bets: [{ id: '9223372036854775807', participantId: 1, price: '3.25', status: 1, isChanged: 0 }] }],
+    }, { fixtureId: 777, outright: { competitionId: 90 }, markets: [{ id: 160, bets: [{ id: 'orphan', price: '5', isChanged: 0 }] }] }], 1700000000000);
+    state.set(lane, { phase: 'connected' });
+  }
+  return state;
+}
+test('restart restores old outright checkpoint before initial empty snapshot, persists again and finds provider fixture ID through HTTP', { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'adl-restart-'));
+  const path = join(dir, 'feed.json');
+  try {
+    const original = seed();
+    await createPublisher(path)(original.feed(1700000000000), checkpoint(original));
+    // API expiry is deliberately independent of worker recovery after downtime.
+    assert.equal((await readConnectedFeed(path)).events.length, 0);
+    const restarted = new TradeState();
+    assert.deepEqual(await restore(restarted, path), { source: 'checkpoint', rows: 4 });
+    assert.equal(restarted.connections.prematch.phase, 'starting');
+    const publish = createPublisher(path);
+    const abort = new AbortController();
+    const pkg: PackageConfig = { lane: 'prematch', packageId: 4511, username: 'test', password: '',
+      hostname: 'stm-prematch.lsports.eu', vhost: 'StmPreMatch', queue: '_4511_', port: 5672, tls: false };
+    const channel = Object.assign(new EventEmitter(), {
+      async prefetch() {}, async consume() { return { consumerTag: 'test' }; },
+      ack() { assert.fail('Restart must need no supplier message'); },
+    });
+    const connection = Object.assign(new EventEmitter(), { async createChannel() { return channel; }, async close() { connection.emit('close'); } });
+    await session(pkg, { packages: [pkg], snapshotUrl: 'https://stm-snapshot.lsports.eu', customersUrl: 'https://stm-api.lsports.eu', recoveryMs: 300000, staleMs: 90000 },
+      restarted, async () => {
+        await publish(restarted.feed(), checkpoint(restarted));
+        if (restarted.connections.prematch.phase === 'connected') abort.abort();
+      }, abort.signal, { connect: (async () => connection) as unknown as typeof amqp.connect,
+        clientFactory: () => ({ async startDistribution() {},
+          async distributionStatus() { return { isDistributionOn: true, consumers: [], numberMessagesInQueue: 0, messagesPerSecond: 0 }; },
+          async snapshot() { return []; }, async catalog() { return []; } }) });
+    // Regular soccer snapshot remains authoritative; it cannot clear restored outrights.
+    restarted.replace('inplay', [{ fixtureId: 123, fixture: { sport: { name: 'Football' }, status: 1 } }], Date.now());
+    restarted.set('prematch', { phase: 'connected' });
+    restarted.set('inplay', { phase: 'connected' });
+    await publish(restarted.feed(), checkpoint(restarted));
+    const source = { getEvents: () => readConnectedFeed(path) };
+    const server = createApp(source).listen(0, '127.0.0.1');
+    await new Promise<void>(r => server.once('listening', r));
+    try {
+      const address = server.address(); assert(address && typeof address !== 'string');
+      const base = `http://127.0.0.1:${address.port}`;
+      const diagnostic = await (await fetch(`${base}/api/diagnostics/outright/${fixtureId}`)).json();
+      assert.equal(diagnostic.observation, 'observed');
+      assert.equal(diagnostic.matches.length, 2);
+      assert(diagnostic.matches.every((m: {participantCount: number; restored: boolean}) => m.participantCount === 9 && m.restored));
+      const feed = await (await fetch(`${base}/api/events`)).json();
+      assert.equal(feed.workerCheckpoint, undefined); // private raw SDK state never leaks through API
+      assert.equal(feed.events.filter((e: {kind: string}) => e.kind === 'outright').length, 2);
+      const race = feed.events.find((e: {source: string; kind: string}) => e.source === 'prematch' && e.kind === 'outright');
+      assert.equal(race.selections[0].odds, 3.25);
+      assert.equal(race.selections[0].available, false); // old price is preserved, not freshly validated
+      assert.equal(feed.events.find((e: {sport: string}) => e.sport === 'futbol').id, 'inplay:123');
+    } finally { await new Promise<void>(r => server.close(() => r())); }
+    const twice = new TradeState();
+    await restore(twice, path);
+    assert.equal(twice.rows.prematch.get('outright:90:777')?.markets.size, 1);
+    // Ordering survives restart: delayed messages cannot replace a newer price.
+    twice.apply('prematch', [{ fixtureId, outright: { competitionId: 90 }, markets: [{ id: 160, bets: [{ id: '9223372036854775807', price: '9', isChanged: 0 }] }] }], 1699999999999);
+    assert.equal(twice.feed().events[0].selections[0].odds, 3.25);
+    twice.set('prematch', { phase: 'connected' });
+    twice.apply('prematch', [{ fixtureId, outright: { competitionId: 90 }, marketMessageType: 41, markets: [{ id: 160, bets: [{ id: '9223372036854775807', price: '3.5', status: 1, isChanged: 0 }] }] }], Date.now());
+    assert.equal(twice.feed().events[0].selections[0].available, true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('legacy projection migrates all nine participants and exposed markets with original backup, even when stale', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'adl-migrate-')); const path = join(dir, 'feed.json');
+  try {
+    const legacy = JSON.stringify(seed().feed(1700000000000));
+    await writeFile(path, legacy);
+    const state = new TradeState();
+    assert.deepEqual(await restore(state, path), { source: 'legacy_projection', rows: 2 });
+    assert.equal(state.feed().events[0].participants?.length, 9);
+    assert.equal(state.feed().events[0].selections[0].odds, 3.25);
+    assert.equal(state.feed().events[0].marketDiagnostic?.messagesByType['41'], 1);
+    assert.equal(await readFile(`${path}.pre-checkpoint.bak`, 'utf8'), legacy);
+    await createPublisher(path)(state.feed(), checkpoint(state));
+    const next = new TradeState(); await restore(next, path);
+    assert.equal(next.feed().events[0].participants?.length, 9);
+    assert.equal(await readFile(`${path}.pre-checkpoint.bak`, 'utf8'), legacy);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('invalid or unsupported saved state aborts restoration without changing original file or partially restoring rows', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'adl-corrupt-')); const path = join(dir, 'feed.json');
+  try {
+    for (const body of ['invalid JSON', JSON.stringify({ mode: 'connected', events: [], workerCheckpoint: { version: 99, outright: [] } }),
+      JSON.stringify({ ...seed().feed(), workerCheckpoint: { ...checkpoint(seed()), outright: [...checkpoint(seed()).outright, { lane: 'prematch' }] } })]) {
+      await writeFile(path, body);
+      const state = new TradeState();
+      await assert.rejects(() => restore(state, path));
+      assert.equal(state.rows.prematch.size, 0);
+      assert.equal(await readFile(path, 'utf8'), body);
+    }
+    await rm(path);
+    assert.deepEqual(await restore(new TradeState(), path), { source: 'missing', rows: 0 });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('real worker bootstrap restores before its first write and shutdown, without contacting supplier', async () => {
+  const { runConnected } = await import('./connected.js');
+  const dir = await mkdtemp(join(tmpdir(), 'adl-bootstrap-')); const path = join(dir, 'feed.json');
+  const bindings = { LSPORTS_STATE_FILE: path, LSPORTS_PREMATCH_USERNAME: 'synthetic-test', LSPORTS_PREMATCH_PASSWORD: 'synthetic-test',
+    LSPORTS_INPLAY_USERNAME: 'synthetic-test', LSPORTS_INPLAY_PASSWORD: 'synthetic-test' };
+  const prior = Object.fromEntries(Object.keys(bindings).map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, bindings);
+    const original = seed();
+    await createPublisher(path)(original.feed(1700000000000), checkpoint(original));
+    const signal = new AbortController(); signal.abort();
+    // Already-aborted signal skips all network sessions, but runs actual init/persistence/shutdown.
+    await runConnected(signal.signal);
+    await runConnected(signal.signal);
+    const result = new TradeState();
+    assert.equal((await restore(result, path)).rows, 4);
+    assert.equal(result.feed().events[0].participants?.length, 9);
+    assert.equal(result.feed().events[0].selections[0].odds, 3.25);
+    assert.equal(result.connections.prematch.phase, 'starting');
+    await assert.rejects(() => readFile(`${path}.lock`), { code: 'ENOENT' });
+  } finally {
+    for (const key of Object.keys(bindings)) {
+      if (prior[key] === undefined) delete process.env[key]; else process.env[key] = prior[key];
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+});

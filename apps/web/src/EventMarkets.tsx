@@ -18,6 +18,7 @@ export function EventMarkets({
   const market = markets.find((m) => m.id === marketId) || markets[0];
   return (
     <div className="markets">
+      {event.restored && <p className="market-empty">Evento recuperado del almacenamiento local. Las cuotas sin actualizar permanecen bloqueadas.</p>}
       {event.marketDiagnostic && (
         <p className="market-empty" role="status">
           {!event.marketDiagnostic.lastMarketMessageAt

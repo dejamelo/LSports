@@ -33,6 +33,8 @@ export interface OutrightMarketDiagnostic {
   competitionId: number;
   fixtureId: number;
   hasFixture: boolean;
+  restored?: boolean;
+  participantCount?: number;
   messagesByType: Record<string, number>;
   marketUpdates: number;
   betUpdates: number;
@@ -47,6 +49,7 @@ export interface OutrightMarketDiagnostic {
 }
 export interface SportEvent {
   kind?: "fixture" | "outright";
+  restored?: boolean;
   marketDiagnostic?: OutrightMarketDiagnostic;
   competition?: { id: number; name?: string; type?: number };
   participants?: EventParticipant[];
