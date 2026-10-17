@@ -172,7 +172,7 @@ test("malformed JSON, UTF8, envelope, entity and unsupported type have distinct 
     [() => decodeMessage(Buffer.from([0xff, 0xfe]), headers), "invalid_utf8"],
     [() => decodeMessage(Buffer.from("[]"), headers), "invalid_envelope"],
     [() => decodeMessage(wire(3, {}), headers), "invalid_event_body"],
-    [() => decodeMessage(wire(37, {}), headers), "unsupported_message_type"],
+    [() => decodeMessage(wire(37, {}), headers), "invalid_event_body"],
     [() => decodeMessage(wire(999, {}), headers), "unsupported_message_type"],
     [
       () => decodeMessage(wire(), headers, { contentEncoding: secret }),

@@ -418,6 +418,18 @@ export default function App() {
                       </div>
                       <strong>{event.home}</strong>
                       <strong className="away">{event.away}</strong>
+                      {event.kind === "outright" && !!event.participants?.length && (
+                        <details className="race-participants">
+                          <summary>Ver participantes ({event.participants.length})</summary>
+                          <ul>{event.participants.map((participant, index) => (
+                            <li key={`${participant.id ?? index}:${index}`}>
+                              {participant.position ? `${participant.position}. ` : ""}
+                              {participant.name || "Nombre no informado"}
+                              {participant.isActive === 0 ? " · Inactivo" : ""}
+                            </li>
+                          ))}</ul>
+                        </details>
+                      )}
                       {event.score && (
                         <span className="score">{event.score}</span>
                       )}

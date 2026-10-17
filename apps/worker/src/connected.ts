@@ -249,13 +249,13 @@ export async function session(
           await operation("feed.apply", "local", async () =>
             state.apply(lane, decoded.events, decoded.at),
           );
-          seen.add(decoded.guid);
-          if (seen.size > 10000) seen.delete(seen.values().next().value!);
         }
         state.set(lane, {
           lastMessageAt: new Date(lastReceived).toISOString(),
         });
         await save();
+        seen.add(decoded.guid);
+        if (seen.size > 10000) seen.delete(seen.values().next().value!);
         await operation("amqp.ack", "amqp", async () => channel.ack(msg));
         const shape = JSON.stringify([
           decoded.type,

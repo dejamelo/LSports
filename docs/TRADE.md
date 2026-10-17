@@ -298,3 +298,31 @@ Não inventamos nomes de menus do painel, cuja interface não está disponível 
 6. Confirmar se há filtros no lado do fornecedor (esportes/ligas/fixtures/mercados, exclusões, distribuição Test por replay/agenda específica) e se o produto fornece odds agregadas em `Bets` ou apenas `ProviderMarkets`. Não usamos filtros opcionais locais no snapshot nem criamos assinaturas automaticamente.
 
 Envie ao suporte somente os IDs dos pacotes, horário/fuso, contagens/estados sanitizados e os FixtureIds que eles autorizarem. Nunca envie `.env`, senha ou tokens. Após a confirmação, repita o diagnóstico e mantenha o worker ativo por um intervalo informado pelo fornecedor; compare os contadores, não apenas a mensagem “conectado”. Não houve validação com suas credenciais neste ambiente.
+
+### Tipo 37: participantes de carreras y otros eventos outright
+
+Se procesa `OutrightFixtureUpdate` con el SDK oficial: `Body.Competition`
+contiene `Id`, `Name`, `Type` y `Events[].OutrightFixture`. No se interpreta
+como `Body.Events`. Cada evento conserva la lista completa de participantes
+(incluidos los inactivos y sus metadatos), sin reducirla a dos competidores.
+La API publica `kind: outright`, `competition` y `participants`; la interfaz
+permite desplegar la lista. El deporte se determina por el proveedor: el tipo
+37 por sí solo no implica Hípica. Este mensaje no proporciona cuotas y no se
+inventan mercados. Los demás tipos outright aún no implementados mantienen
+su diagnóstico explícito y no se confirman como procesados.
+
+Los IDs outright incluyen competición y un espacio separado de los fixtures
+regulares. Las recuperaciones del snapshot regular no borran estos eventos.
+Actualizaciones parciales que omiten participantes conservan la lista anterior;
+las actualizaciones anteriores en el tiempo no la reemplazan. Una lista vacía
+explícita y más reciente sí se respeta.
+
+El consumidor usa confirmación manual. Solo emite ACK después de procesar y
+publicar la proyección local. Un error de conversión, aplicación o escritura
+solicita NACK con requeue y cierra la sesión; si falla el NACK, el mensaje queda
+sin confirmar hasta cerrar la conexión. No crea ni purga colas del proveedor.
+El diagnóstico del tipo 37 incluye tipo, cantidad de eventos y propiedades del
+transporte, sin publicar participantes ni payloads completos en los logs.
+No requiere cambios en `.env`. No equivale a una validación con el proveedor:
+los tests automatizados utilizan mensajes sintéticos identificados como fixtures
+de prueba y un transporte simulado.

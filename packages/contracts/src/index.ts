@@ -13,7 +13,23 @@ export interface EventMarket {
   status?: number;
   selections: Selection[];
 }
+export interface EventParticipant {
+  id?: number;
+  name?: string;
+  position?: string;
+  rotationId?: number;
+  isActive?: number;
+  form?: string;
+  formation?: string;
+  gender?: number;
+  ageCategory?: number;
+  type?: number;
+  extraData?: { name?: string; value?: string }[];
+}
 export interface SportEvent {
+  kind?: "fixture" | "outright";
+  competition?: { id: number; name?: string; type?: number };
+  participants?: EventParticipant[];
   id: string;
   sport: Sport;
   league: string;

@@ -233,6 +233,7 @@ test("malformed and unsupported messages are not ACKed or discarded: NACK reques
   const { OperationError } = await import("./diagnostics.js");
   for (const [content, reason] of [
     [Buffer.from("invalid private payload"), "invalid_json"],
+    [Buffer.from(JSON.stringify({ Header: { Type: 37, MsgGuid: "bad-race" }, Body: { Competition: { Id: 90, Events: [{ FixtureId: 100 }] } } })), "invalid_event_body"],
     [
       Buffer.from(
         JSON.stringify({ Header: { Type: 999, MsgGuid: "test" }, Body: {} }),
@@ -446,3 +447,255 @@ test(
     assert.equal(state.connections.inplay.phase, "error");
   },
 );
+
+test("type 37 preserves every participant and persists before ACK, including duplicate delivery", async () => {
+  const state = new TradeState();
+  const abort = new AbortController();
+  let onMessage: (m: ConsumeMessage | null) => void = () => {};
+  let acks = 0;
+  let persistedOdds = 0;
+  let finalOdds = 0;
+  const channel = Object.assign(new EventEmitter(), {
+    async prefetch(n: number) {
+      assert.equal(n, 100);
+    },
+    async consume(
+      queue: string,
+      callback: typeof onMessage,
+      options: { noAck: boolean },
+    ) {
+      assert.equal(queue, "_4511_");
+      assert.equal(options.noAck, false);
+      onMessage = callback;
+      return { consumerTag: "test" };
+    },
+    ack() {
+      assert.equal(persistedOdds, 12);
+      acks++;
+    },
+    nack() {
+      assert.fail("Valid delta must not be rejected");
+    },
+  });
+  const conn = Object.assign(new EventEmitter(), {
+    async createChannel() {
+      return channel;
+    },
+    async close() {
+      conn.emit("close");
+    },
+  });
+  const pkg: PackageConfig = {
+    lane: "prematch",
+    packageId: 4511,
+    username: "test-only",
+    password: "",
+    hostname: "stm-prematch.lsports.eu",
+    vhost: "StmPreMatch",
+    port: 5672,
+    tls: false,
+    queue: "_4511_",
+  };
+  const fakeClients: ReturnType<typeof clients> = {
+    async distributionStatus() {
+      return {
+        isDistributionOn: true,
+        consumers: [],
+        numberMessagesInQueue: 0,
+        messagesPerSecond: 0,
+      };
+    },
+    async startDistribution() {},
+    async catalog() {
+      return [];
+    },
+    async snapshot() {
+      const msg = {
+        content: Buffer.from(JSON.stringify({
+          Header: { Type: 37, MsgGuid: "race" },
+          Body: { Competition: { Id: 90, Name: "Race meeting", Events: [{ FixtureId: 100,
+            OutrightFixture: { FixtureName: "Race 1", Sport: { Name: "Horse Racing" }, Status: 1,
+              Participants: Array.from({length: 12}, (_, i) => ({ Id: i + 1, Name: `Horse ${i + 1}`, Position: String(i + 1), IsActive: 1 })) }
+          }] } }
+        })),
+        properties: { headers: { timestamp_in_ms: Date.now() + 100 } },
+        fields: { redelivered: true },
+      } as unknown as ConsumeMessage;
+      onMessage(msg);
+      onMessage(msg);
+      return [
+        {
+          fixtureId: 100,
+          fixture: { sport: { name: "Football" }, status: 1 },
+          markets: [
+            {
+              id: 1,
+              name: "Winner",
+              status: 1,
+              bets: [{ id: "123", price: "2", status: 1, isChanged: 0 }],
+            },
+          ],
+        },
+      ];
+    },
+  };
+  await session(
+    pkg,
+    {
+      packages: [pkg],
+      snapshotUrl: "https://stm-snapshot.lsports.eu",
+      customersUrl: "https://stm-api.lsports.eu",
+      recoveryMs: 300000,
+      staleMs: 90000,
+    },
+    state,
+    async () => {
+      persistedOdds = state.feed().events.find(e => e.kind === "outright")?.participants?.length || 0;
+      if (state.connections.prematch.phase === "connected") {
+        finalOdds = persistedOdds;
+        abort.abort();
+      }
+    },
+    abort.signal,
+    {
+      connect: (async (options: amqp.Options.Connect) => {
+        assert.equal(options.vhost, "StmPreMatch");
+        assert.equal(options.hostname, pkg.hostname);
+        return conn;
+      }) as unknown as typeof amqp.connect,
+      clientFactory: () => fakeClients,
+    },
+  );
+  assert.equal(acks, 2);
+  assert.equal(finalOdds, 12);
+  assert.equal(state.connections.prematch.phase, "stopped");
+  assert.equal(state.feed().events.find(e => e.kind === "outright")?.participants?.[11].name, "Horse 12");
+});
+
+test("type 37 publication failure requests requeue without ACK", async () => {
+  const state = new TradeState();
+  const abort = new AbortController();
+  let onMessage: (m: ConsumeMessage | null) => void = () => {};
+  let acks = 0;
+  let persistedOdds = 0;
+  let finalOdds = 0;
+  const channel = Object.assign(new EventEmitter(), {
+    async prefetch(n: number) {
+      assert.equal(n, 100);
+    },
+    async consume(
+      queue: string,
+      callback: typeof onMessage,
+      options: { noAck: boolean },
+    ) {
+      assert.equal(queue, "_4511_");
+      assert.equal(options.noAck, false);
+      onMessage = callback;
+      return { consumerTag: "test" };
+    },
+    ack() {
+      assert.fail("Unpersisted race must not be ACKed");
+    },
+    nack(_msg: ConsumeMessage, all: boolean, requeue: boolean) {
+      assert.equal(all, false);
+      assert.equal(requeue, true);
+      acks++;
+    },
+  });
+  const conn = Object.assign(new EventEmitter(), {
+    async createChannel() {
+      return channel;
+    },
+    async close() {
+      conn.emit("close");
+    },
+  });
+  const pkg: PackageConfig = {
+    lane: "prematch",
+    packageId: 4511,
+    username: "test-only",
+    password: "",
+    hostname: "stm-prematch.lsports.eu",
+    vhost: "StmPreMatch",
+    port: 5672,
+    tls: false,
+    queue: "_4511_",
+  };
+  const fakeClients: ReturnType<typeof clients> = {
+    async distributionStatus() {
+      return {
+        isDistributionOn: true,
+        consumers: [],
+        numberMessagesInQueue: 0,
+        messagesPerSecond: 0,
+      };
+    },
+    async startDistribution() {},
+    async catalog() {
+      return [];
+    },
+    async snapshot() {
+      const msg = {
+        content: Buffer.from(JSON.stringify({
+          Header: { Type: 37, MsgGuid: "race" },
+          Body: { Competition: { Id: 90, Name: "Race meeting", Events: [{ FixtureId: 100,
+            OutrightFixture: { FixtureName: "Race 1", Sport: { Name: "Horse Racing" }, Status: 1,
+              Participants: Array.from({length: 12}, (_, i) => ({ Id: i + 1, Name: `Horse ${i + 1}`, Position: String(i + 1), IsActive: 1 })) }
+          }] } }
+        })),
+        properties: { headers: { timestamp_in_ms: Date.now() + 100 } },
+        fields: { redelivered: true },
+      } as unknown as ConsumeMessage;
+      onMessage(msg);
+      onMessage(msg);
+      return [
+        {
+          fixtureId: 100,
+          fixture: { sport: { name: "Football" }, status: 1 },
+          markets: [
+            {
+              id: 1,
+              name: "Winner",
+              status: 1,
+              bets: [{ id: "123", price: "2", status: 1, isChanged: 0 }],
+            },
+          ],
+        },
+      ];
+    },
+  };
+  await assert.rejects(() => session(
+    pkg,
+    {
+      packages: [pkg],
+      snapshotUrl: "https://stm-snapshot.lsports.eu",
+      customersUrl: "https://stm-api.lsports.eu",
+      recoveryMs: 300000,
+      staleMs: 90000,
+    },
+    state,
+    async () => {
+      persistedOdds = state.feed().events.find(e => e.kind === "outright")?.participants?.length || 0;
+      if (persistedOdds === 12 && !state.connections.prematch.diagnostic) {
+        throw new Error("test persistence failure");
+      }
+      if (state.connections.prematch.phase === "connected") {
+        finalOdds = persistedOdds;
+        abort.abort();
+      }
+    },
+    abort.signal,
+    {
+      connect: (async (options: amqp.Options.Connect) => {
+        assert.equal(options.vhost, "StmPreMatch");
+        assert.equal(options.hostname, pkg.hostname);
+        return conn;
+      }) as unknown as typeof amqp.connect,
+      clientFactory: () => fakeClients,
+    },
+  ));
+  assert.equal(acks, 1);
+
+  assert.equal(state.connections.prematch.diagnostic?.deliveryDisposition, "requeue_requested");
+  assert.equal(state.feed().events.find(e => e.kind === "outright")?.participants?.[11].name, "Horse 12");
+});

@@ -1264,3 +1264,8 @@ footer {
  .brand-name > span { font-size: 11px; }
  .brand-name strong { font-size: 12px; letter-spacing: .5px; }
 }
+
+.race-participants { font-size: .8rem; max-width: 100%; }
+.race-participants summary { cursor: pointer; padding: .4rem 0; }
+.race-participants ul { margin: .25rem 0; padding-left: 1.25rem; overflow-wrap: anywhere; }
+.race-participants li { padding: .15rem 0; }

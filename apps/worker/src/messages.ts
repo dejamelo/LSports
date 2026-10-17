@@ -3,6 +3,7 @@ import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
 import { TextDecoder } from "node:util";
 import {
   FixtureMetadataUpdate,
+  OutrightFixtureUpdate,
   LivescoreUpdate,
   MarketUpdate,
   SettlementUpdate,
@@ -290,7 +291,7 @@ export function decodeMessage(
     );
   metadata.guidSource ??= envelopeGuid ? "envelope" : "transport";
   if (!headers.MessageGuid) metadata.warnings!.push("transport_guid_absent");
-  if (![1, 2, 3, 31, 32, 35].includes(type))
+  if (![1, 2, 3, 31, 32, 35, 37].includes(type))
     fail(
       "unsupported_message_type",
       "entity",
@@ -337,6 +338,7 @@ export function decodeMessage(
   if (
     type !== 31 &&
     type !== 32 &&
+    type !== 37 &&
     (!object(body) || !Array.isArray(body.Events))
   )
     fail(
@@ -345,6 +347,13 @@ export function decodeMessage(
       "El tipo de actualización requiere Body.Events como array.",
       ["Body.Events"],
     );
+  if (type === 37 && (!object(body) || !object(body.Competition) ||
+      !Number.isSafeInteger(body.Competition.Id) || Number(body.Competition.Id) <= 0 ||
+      !Array.isArray(body.Competition.Events) || body.Competition.Events.some((event: unknown) =>
+        !object(event) || !object(event.OutrightFixture) ||
+        (event.OutrightFixture.Participants !== undefined &&
+          (!Array.isArray(event.OutrightFixture.Participants) || event.OutrightFixture.Participants.some((p: unknown) => !object(p)))))))
+    fail("invalid_event_body", "entity", "Tipo 37 requiere Competition con ID, Events y OutrightFixture válidos.", ["Body.Competition"]);
   if ((type === 31 || type === 32) && body != null && !object(body))
     fail(
       "invalid_event_body",
@@ -370,6 +379,17 @@ export function decodeMessage(
   let keepAliveActiveEvents: number | undefined;
   try {
     const value = (body || {}) as Record<string, unknown>;
+    if (type === 37) {
+      const competition = TransformerUtil.transform(value, OutrightFixtureUpdate).competition;
+      if (!competition || !Array.isArray(competition.events)) throw new Error("Invalid competition");
+      events = competition.events.map((event) => ({
+        fixtureId: event.fixtureId,
+        outright: { competitionId: competition.id!, competitionName: competition.name,
+          competitionType: competition.type, fixture: event.outrightFixture! },
+      }));
+      if (events.length !== ((value.Competition as Record<string, unknown>).Events as unknown[]).length)
+        throw new Error("Conversion lost events");
+    }
     if (type === 1)
       events =
         TransformerUtil.transform(value, FixtureMetadataUpdate).events || [];
@@ -404,6 +424,7 @@ export function decodeMessage(
         !Number.isSafeInteger(e.fixtureId) ||
         e.fixtureId <= 0 ||
         (type === 1 && !e.fixture) ||
+        (type === 37 && !e.outright?.fixture) ||
         ([3, 35].includes(type) && !Array.isArray(e.markets)) ||
         (type === 2 && !e.livescore && !e.fixture),
     )

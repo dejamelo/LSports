@@ -8,9 +8,10 @@ import type {
   Sport,
   SportEvent,
 } from "@lsports/contracts";
-import type { Fixture, Livescore, Market } from "trade360-nodejs-sdk";
+import type { Fixture, Livescore, Market, OutrightFixtureEvent } from "trade360-nodejs-sdk";
 export interface TradeEvent {
   fixtureId: number;
+  outright?: { competitionId: number; competitionName?: string; competitionType?: number; fixture: NonNullable<OutrightFixtureEvent["outrightFixture"]> };
   fixture?: Fixture;
   livescore?: Livescore;
   markets?: Market[];
@@ -21,6 +22,7 @@ interface Versioned<T> {
 }
 interface Row {
   fixture?: Versioned<Fixture>;
+  outright?: TradeEvent["outright"];
   livescore?: Versioned<Livescore>;
   markets: Map<string, Market>;
   marketAt: Map<string, number>;
@@ -57,7 +59,7 @@ const defined = <T extends object>(value: T) =>
     Object.entries(value).filter(([, v]) => v !== undefined),
   ) as Partial<T>;
 export class TradeState {
-  rows: Record<Lane, Map<number, Row>> = {
+  rows: Record<Lane, Map<number | string, Row>> = {
     prematch: new Map(),
     inplay: new Map(),
   };
@@ -117,10 +119,18 @@ export class TradeState {
     for (const event of events) {
       if (!Number.isSafeInteger(event.fixtureId) || event.fixtureId <= 0)
         throw new Error("Invalid provider fixture ID");
-      let row = this.rows[lane].get(event.fixtureId);
+      const key = event.outright ? `outright:${event.outright.competitionId}:${event.fixtureId}` : event.fixtureId;
+      let row = this.rows[lane].get(key);
       if (!row) {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
-        this.rows[lane].set(event.fixtureId, row);
+        this.rows[lane].set(key, row);
+      }
+      if (event.outright) {
+        const t = timestamp(event.outright.fixture.lastUpdate, at);
+        if (!row.fixture || t >= row.fixture.at) {
+          row.outright = { ...row.outright, ...event.outright, competitionName: event.outright.competitionName ?? row.outright?.competitionName };
+          row.fixture = { value: { ...row.fixture?.value, ...defined(event.outright.fixture) } as Fixture, at: t };
+        } else this.metrics[lane].staleUpdatesIgnored++;
       }
       if (event.fixture) {
         const t = timestamp(event.fixture.lastUpdate, at);
@@ -167,7 +177,7 @@ export class TradeState {
   }
   replace(lane: Lane, events: TradeEvent[], at: number, audit?: SnapshotAudit) {
     this.metrics[lane].snapshot = audit;
-    this.rows[lane] = new Map();
+    this.rows[lane] = new Map([...this.rows[lane]].filter(([, row]) => !!row.outright));
     this.apply(lane, events, at);
     this.set(lane, {
       lastSnapshotAt: new Date().toISOString(),
@@ -222,16 +232,19 @@ export class TradeState {
           id: prefix,
           sport,
           source: lane,
+          kind: row.outright ? "outright" : "fixture",
+          competition: row.outright ? { id: row.outright.competitionId, name: row.outright.competitionName, type: row.outright.competitionType } : undefined,
+          participants: structuredClone(participants),
           status,
           statusLabel: statusLabels[status ?? 0] || "Estado desconocido",
           available,
           league:
-            [fixture.location?.name, fixture.league?.name]
+            [fixture.location?.name, fixture.league?.name || row.outright?.competitionName]
               .filter(Boolean)
               .join(" · ") || "Competición sin nombre",
-          home: participants[0]?.name || fixture.fixtureName || `Evento ${id}`,
+          home: row.outright ? fixture.fixtureName || `Evento ${id}` : participants[0]?.name || fixture.fixtureName || `Evento ${id}`,
           away:
-            participants[1]?.name ||
+            (row.outright ? `${participants.length} participantes` : participants[1]?.name) ||
             (sport === "hipica" ? `${participants.length} participantes` : ""),
           time:
             start && Number.isFinite(+start)
@@ -262,10 +275,10 @@ export class TradeState {
     const inplayIds = new Set(
       events
         .filter((e) => e.source === "inplay" && e.live)
-        .map((e) => e.id.split(":")[1]),
+        .map((e) => e.id.substring(e.id.indexOf(":") + 1)),
     );
     const visible = events.filter(
-      (e) => !(e.source === "prematch" && inplayIds.has(e.id.split(":")[1])),
+      (e) => !(e.source === "prematch" && inplayIds.has(e.id.substring(e.id.indexOf(":") + 1))),
     );
     const coverage = {} as Record<Lane, CoverageStats>;
     for (const lane of ["prematch", "inplay"] as const) {
