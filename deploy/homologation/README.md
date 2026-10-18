@@ -65,3 +65,12 @@ Usar `config --quiet` com arquivos reais; imprimir config completa ou `docker in
 **Recursos pagos novos propostos nesta etapa: nenhum.** Se couber no host e nos volumes já provisionados, não se propõe custo fixo incremental de EC2/EBS, ALB, NAT, novo IP público ou nova instância. Isso não garante fatura adicional zero: tráfego de saída, DNS e backups/monitoramento eventualmente contratados dependem da região, franquias e serviços existentes. Instâncias burstable (por exemplo T3/T4g) em modo Unlimited também podem cobrar créditos excedentes de CPU, mesmo sem resize; confirmar família/política de créditos antes de aprovar a carga. Caddy/Compose não exigem licença paga; certificados ACME não têm tarifa do Caddy. Nenhum CloudWatch/S3/EBS snapshot ou recurso novo foi criado. Antes de qualquer recurso pago, apresentar preço e obter autorização.
 
 Pendente: inventário AWS real, folga sobre picos POSNET, região/arquitetura, egress/allowlists atuais, domínio/CIDRs, estratégia de backup no armazenamento existente, orçamento de retenção e autorização de deploy. O fechamento AMQP 320 do Mac e `distribution_still_off` são questões separadas: pedir ao fornecedor o motivo sanitizado nos horários UTC documentados, sem atribuir ao orçamento de memória ou alegar que mudar de host resolve. O objetivo permanece feed real **Test** e bilhetes simulados; carteira real não está habilitada.
+
+### Revisión del servidor recibido (2026-10-18)
+
+El c7i-flex.large de 3,72 GiB utilizables y 1,92 GiB disponibles no admite el
+presupuesto del worker con snapshot de 256 MiB. No desplegar en esa capacidad.
+Ver [CAPACITY-REVIEW.md](CAPACITY-REVIEW.md) para evidencia, diagnóstico Docker
+complementario sólo lectura, opciones de ampliación/servidor separado, cálculo
+de costos pendiente de región y estimación de indisponibilidad. Ningún cambio
+remoto ni compra está autorizado hasta aprobar importe y ventana.
