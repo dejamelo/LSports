@@ -28,10 +28,12 @@ Caddy/originfix ni consulta de precios/IP para la preparación documental.
 - Backup privado de configuración duradero: `prepare-posnet-resize-backup.sh`.
   Guarda Compose/Caddy/overrides temporales, inventario privado y manifest con
   hashes/lectura de verificación. No toca políticas, servicios o datos de aplicación.
-- Backup **consistente de datos** del POSNET: confirmar banco/servicio, fecha,
-  ubicación, responsable y método probado de restore. No confundir backup de
-  inspect/config con backup de base. No inventar comandos SQL ni copiar ficheros
-  SQLite/volúmenes activos como si fueran consistentes. No crear snapshots pagos.
+- Supabase `posnet-lottery-production`: operador confirmó backups diarios
+  11–18/10/2026, último 18/10 a las 12:47:58 UTC (09:47:58 Brasilia), PITR
+  deshabilitado y buckets vacíos. Restore no probado/confirmado; no repetir consulta.
+  No confundir backup de inspect/config con backup de base. No inventar comandos
+  SQL ni copiar SQLite/volúmenes activos como si fueran consistentes. Revisar
+  datos locales con la rutina preparada; no crear snapshots pagos.
 - Retorno de los otros siete containers activos: procedimiento dirigido manual
   documentado en RESIZE-APPROVAL.md; no borrar ninguno ni arrancar los dos que
   ya estaban detenidos. No es necesario cambiar sus políticas en esta etapa.

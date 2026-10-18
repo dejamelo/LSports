@@ -159,9 +159,23 @@ até a evidência de backup consistente e a conclusão do backup de configuraç�
 
 ## Informação posterior: POSNET usa Supabase
 
-O operador confirmou Supabase, mas não conhece a data/local do último backup
-recuperável nem teste de restauração. Portanto não declarar backup de dados
-concluído, nem liberar a parada. Não é necessário repetir preço/IP/Caddy/originfix.
+Evidências informadas pelo operador em 18/10/2026, consultadas no projeto
+**posnet-lottery-production**:
+
+- Backups diários listados de **11 a 18/10/2026**.
+- Backup mais recente: **18/10/2026, 12:47:58 UTC / 09:47:58 America/Sao_Paulo**.
+- **PITR desabilitado**: não presumir recuperação para qualquer instante após o backup.
+- **Storage → Files → Buckets vazio** na consulta; nenhum bucket a proteger foi
+  observado nesse projeto. Isso não cobre dados locais da EC2 ou outros serviços.
+- **Teste de restauração não confirmado**: existência de backups listados não
+  equivale a recuperação testada. Nenhuma restauração foi executada.
+
+A evidência foi fornecida pelo operador; não houve acesso direto deste workspace
+ao Supabase. Não repetir essas consultas, preço/IP/Caddy/originfix. Conservar o
+risco de recuperação não testada e a diferença temporal entre último backup e
+momento da futura mudança na aprovação operacional. Não habilitar PITR/plano pago.
+A próxima ação é a preparação de configuração/levantamento local da EC2, ainda
+sem autorização de parada ou redimensionamento.
 
 A rotina de preparação agora também informa por container: famílias de configuração
 presentes (ex.: supabase, sem valores), mounts e contagem de possíveis arquivos de
@@ -176,8 +190,8 @@ Supabase. Se houver estado adicional em camada gravável, não recriar container
 identificar tratamento/backup apropriado. Stop/start EC2 mantém EBS/camadas dos
 containers existentes, mas isso não substitui uma proteção recuperável.
 
-No painel do Supabase, abrir o projeto realmente usado pelo POSNET e procurar
-**Database → Backups** (o rótulo/local pode variar na versão do painel):
+Referência para eventual revisão futura, **sem repetir agora a conferência já
+concluída**: painel Supabase, **Database → Backups** (local pode variar):
 
 1. Confirmar projeto, plano, data/hora UTC do último backup bem-sucedido e retenção.
 2. Verificar se PITR está habilitado e qual intervalo recuperável já existe. Não
@@ -196,3 +210,11 @@ Compartilhar somente: projeto identificado (nome/identificador público), plano,
 data/hora/status do backup, retenção/PITR e existência de Storage. Sem credenciais,
 dump, URLs de conexão ou conteúdo de tabelas. Esse é o último bloqueio de dados
 conhecido; outras pendências que a coleta local revelar devem ser tratadas.
+
+
+A saída da rotina EC2 mantém `databaseBackup=not_verified` porque ela não consulta
+nem testa o Supabase; esse campo não invalida as evidências manuais acima.
+`stage=complete/status=ok` confirma somente backup de configuração/levantamento
+local e leitura de verificação. Os volumes/dados locais não são copiados de forma
+consistente por essa rotina. Preservar backups antigos e compartilhar apenas a
+saída sanitizada, nunca arquivos `.private`/inspect ou manifests privados.
