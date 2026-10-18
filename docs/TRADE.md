@@ -1540,3 +1540,30 @@ npm run --silent diagnose:feed:local -- --connections > diagnostico-snapshot-vol
 ```
 
 Confirmar `snapshot.lastSuccessAt`, contagem e `snapshot.audit.transport`, conclusão do handoff e ausência de novo erro. Se o limite ainda for excedido, preservar `responseLimitBytes` e a categoria; HTTP 200 sozinho não é sucesso. Se houver erro de margem de memória, verificar capacidade disponível antes de ajustar o teto. Não executar `diagnose:trade` para antecipar a consulta.
+
+### Teto 256 MiB e reinício de sessão InPlay (captura de 2026-10-18)
+
+`diagnostico-snapshot-volume-2.json`, captura **21:28:07.616Z**, confirma que o snapshot PreMatch excedeu 128 MiB: reserva de 21:26:31.291Z, falha 21:26:44.049Z, HTTP 200, `response_size_limit`, PID 11758. O handoff concluiu 100/100; não é evidência de novo travamento. O tamanho completo permanece desconhecido: 256 MiB é uma tentativa limitada suportada, não garantia de que a resposta caberá ou terminará dentro dos 20 segundos existentes.
+
+Com `LSPORTS_SNAPSHOT_MAX_RESPONSE_MB=256`, o teto é **268.435.456 bytes** e a margem exigida é **2.112 MiB / 2.214.592.512 bytes (2,0625 GiB)**. Antes de cada HTTP, o worker verifica o menor valor entre heap restante e memória disponível ao processo. Se insuficiente, registra `memory_budget_exceeded`, orçamento e margem observada, sem enviar HTTP. O teste cobre aceitação exatamente no limiar e rejeição um byte abaixo. Essa margem é preventiva, não um limite rígido de RSS. Não se aumentou o máximo aceito, removeu a checagem ou alterou timeout, cooldown, locks, assinaturas ou dados.
+
+Parar a aplicação com Ctrl+C e executar (o prefixo só vale para essa execução; não grava `.env`):
+
+```bash
+cd ~/LSports
+git pull --ff-only origin feat/sportsbook-demo
+npm run build
+LSPORTS_SNAPSHOT_MAX_RESPONSE_MB=256 npm run dev:embed
+```
+
+Após o retryAt vigente e o processamento, em outro terminal:
+
+```bash
+npm run --silent diagnose:feed:local -- --connections > diagnostico-sessoes-256.json
+```
+
+**InPlay:** snapshot válido em 21:25:13.920Z, 442.024 bytes, 11 eventos e 339 mercados status 3. Nova tentativa em 21:25:39.685Z; `regularSnapshotReady=false`. No código, uma recuperação periódica na mesma sessão mantém essa flag verdadeira; ela só é inicializada falsa ao entrar em `session()`. Portanto houve **outra sessão**, não apenas a aplicação de cooldown à sessão saudável. O cooldown posterior protege a reserva de 21:25:11.042Z e não demonstra o gatilho anterior. Também não há odds abertas nesses 339 mercados, mesmo que a conexão seja recuperada.
+
+O anexo não preserva o erro terminal anterior. Não há evidência suficiente para afirmar timeout, heartbeat, erro do broker, carga do PreMatch ou processo duplicado. Encontrou-se uma perda concreta de diagnóstico no código: o callback de conexão ignorava o argumento `close(error)` da amqplib; além disso, `Connection.toClosed()` fecha os canais **antes** de emitir o fechamento da conexão. Nosso callback genérico de canal podia mascarar esse erro/código. Agora o fechamento genérico do canal aguarda uma microtask para permitir a causa da conexão no mesmo turno; um fechamento isolado de canal continua levando a erro/reconexão, sem ACK de mensagens não persistidas. Isso não mantém uma conexão encerrada como disponível.
+
+A projeção e o diagnóstico local agora expõem `session.{id,startedAt}` e `sessionEnds` (máximo oito términos nesta execução). Conservam o primeiro diagnóstico terminal de cada sessão mesmo após cleanup e cooldown, com horários e códigos sanitizados. Os testes cobrem fechamento isolado de canal e fechamento de conexão com código AMQP 320 após os canais, sem interpretar esse código como a causa da captura real. Ambos reiniciam a sessão com baseline pendente; o cooldown continua respeitado. Erros antes da instalação da conexão também são registrados pelo loop externo do worker. O histórico não recupera retroativamente o erro perdido nessa captura, não é restaurado como estado de conexão após reiniciar o processo e não contém payloads ou texto bruto do broker.

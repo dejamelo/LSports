@@ -9,6 +9,11 @@ test("capacity has a finite default, rejects unlimited/invalid caps and requires
   assert.equal(snapshotCapacity({}, 2 * 1024 * MiB).limitBytes, 128 * MiB);
   assert.equal(snapshotCapacity({}, 2 * 1024 * MiB).allowed, true);
   assert.equal(snapshotCapacity({}, 128 * MiB).allowed, false);
+  const maximum={LSPORTS_SNAPSHOT_MAX_RESPONSE_MB:"256"};
+  assert.equal(snapshotCapacity(maximum,2112*MiB).budgetBytes,2112*MiB);
+  assert.equal(snapshotCapacity(maximum,2112*MiB).allowed,true);
+  assert.equal(snapshotCapacity(maximum,2112*MiB-1).allowed,false);
+  assert.equal(snapshotCapacity(maximum,2112*MiB).limitBytes,268435456);
   for (const value of ["-1", "0", "257", "1.5", "NaN", "Infinity"])
     assert.throws(() =>
       snapshotCapacity({ LSPORTS_SNAPSHOT_MAX_RESPONSE_MB: value }),

@@ -39,6 +39,7 @@ export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
             : undefined,
         httpStatus: diagnostic.httpStatus,
         amqpCode: diagnostic.amqpCode,
+        networkCode:safeCode(diagnostic.networkCode),errorType:safeLabel(diagnostic.errorType),stage:safeLabel(diagnostic.stage),
         deferred: diagnostic.deferred === true,
         retryAt: iso(diagnostic.retryAt),
         retryAfterMs: diagnostic.retryAfterMs,
@@ -95,6 +96,8 @@ export function feedEvidence(feed: EventFeed, now = Date.now()) {
       packageId: lane === "prematch" ? 4511 : 4510,
       phase: connection?.phase ?? "unknown",
       diagnostic: safeFeedDiagnostic(connection?.diagnostic),
+      session:connection?.session ? {id:id(connection.session.id),startedAt:iso(connection.session.startedAt)} : null,
+      sessionEnds:(connection?.sessionEnds || []).slice(-8).map(e=>({id:id(e.id),startedAt:iso(e.startedAt),endedAt:iso(e.endedAt),diagnostic:safeFeedDiagnostic(e.diagnostic)})),
       recoveryProgress:connection?.recoveryProgress?{
         stage:connection.recoveryProgress.stage,
         startedAt:iso(connection.recoveryProgress.startedAt),completedAt:iso(connection.recoveryProgress.completedAt),

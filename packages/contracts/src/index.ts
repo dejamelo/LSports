@@ -268,6 +268,10 @@ export interface IntegrationDiagnostic {
     | "invalid_snapshot"
     | "ambiguous_timestamp"
     | "invalid_timestamp"
+    | "connection_closed"
+    | "channel_closed"
+    | "consumer_cancelled"
+    | "worker_stopped"
     | "unknown_exception"
     | "unsupported_content_type"
     | "unsupported_content_encoding"
@@ -351,6 +355,8 @@ export interface FeedMessageMetadata {
   warnings?: string[];
 }
 export interface ConnectionState {
+  session?: {id:string;startedAt:string};
+  sessionEnds?: {id:string;startedAt:string;endedAt:string;diagnostic:IntegrationDiagnostic}[];
   lastSnapshotDiagnostic?: IntegrationDiagnostic;
   recoveryProgress?:{stage:"snapshot"|"handoff"|"waiting_retry"|"idle";startedAt:string;completedAt?:string;queuedAtHandoff?:number;processedAtHandoff?:number;lastProgressAt?:string;regularSnapshotReady:boolean;nextRegularAttemptAt?:string};
   diagnostic?: IntegrationDiagnostic;

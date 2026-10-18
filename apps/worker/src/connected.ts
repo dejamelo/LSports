@@ -1,3 +1,4 @@
+import {randomUUID} from "node:crypto";
 import { platformEnabled, PlatformStore } from "@lsports/feed-store/platform";
 import { TenantTickets } from "@lsports/feed-store/tenant-tickets";
 import { TicketStore } from "@lsports/feed-store/tickets";
@@ -19,6 +20,17 @@ import {
 } from "./diagnostics.js";
 import { checkpoint, restore } from "./persistence.js";
 import { connectMq } from "./mq.js";
+
+// Retain the first terminal cause, even when close/cleanup and retry replace phase/diagnostic.
+function recordSessionEnd(state:TradeState,lane:import("@lsports/contracts").Lane,diagnostic:import("@lsports/contracts").IntegrationDiagnostic){
+ const current=state.connections[lane].session;
+ if(!current || state.connections[lane].sessionEnds?.some(e=>e.id===current.id))return;
+ state.set(lane,{sessionEnds:[...(state.connections[lane].sessionEnds || []),{...current,endedAt:new Date().toISOString(),diagnostic}].slice(-8)});
+}
+const transportEnd=(reason:"connection_closed"|"channel_closed"|"consumer_cancelled"|"worker_stopped")=>new OperationError({
+ operation:reason==="channel_closed"?"amqp.channel":reason==="consumer_cancelled"?"amqp.consume":"amqp.connection",protocol:"amqp",category:"network",reason,
+ message:reason==="worker_stopped"?"Worker detenido por señal local.":"Transporte AMQP finalizado; el evento de cierre no informa la causa del broker.",
+});
 
 export async function runConnected(signal: AbortSignal, dependencies: {
   config?: ReturnType<typeof loadConfig>;
@@ -103,6 +115,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
                 (pause
                   ? " Mensaje no confirmado como procesado. Corregí la incompatibilidad y reiniciá el worker."
                   : "");
+              recordSessionEnd(state,pkg.lane,diagnostic);
               state.set(pkg.lane, { phase: "error", message, diagnostic });
               console.error(
                 JSON.stringify({
@@ -173,6 +186,7 @@ export async function session(
   const lane = pkg.lane;
   state.set(lane, {
     phase: "recovering",
+    session:{id:randomUUID(),startedAt:new Date().toISOString()},
     recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady:false},
     diagnostic: undefined,
     message: "Conectando y recuperando snapshot…",
@@ -192,6 +206,7 @@ export async function session(
     failure = error;
     closed = true;
     const diagnostic = describeFailure(error, "amqp.connection", "amqp");
+    recordSessionEnd(state,lane,diagnostic);
     state.set(lane, {
       phase: signal.aborted ? "stopped" : "error",
       message: signal.aborted
@@ -204,8 +219,11 @@ export async function session(
     void closeConnection();
   };
   connection.on("error", fail);
-  connection.on("close", () => fail(new Error("Connection closed")));
-  const abort = () => fail(new Error("Stopped"));
+  connection.on("close", (cause:unknown) => {
+    const diagnostic=cause instanceof Error?describeFailure(cause,"amqp.connection","amqp"):undefined;
+    fail(diagnostic?new OperationError({...diagnostic,...(!diagnostic.reason||diagnostic.reason==="unknown_exception"?{reason:"connection_closed" as const}:{})}):transportEnd("connection_closed"));
+  });
+  const abort = () => fail(transportEnd("worker_stopped"));
   signal.addEventListener("abort", abort, { once: true });
   let processing = Promise.resolve();
   let buffered: ConsumeMessage[] = [];
@@ -222,7 +240,9 @@ export async function session(
     channel.on("error", (error) =>
       fail(new OperationError(describeFailure(error, "amqp.channel", "amqp"))),
     );
-    channel.on("close", () => fail(new Error("Channel closed")));
+    // amqplib closes channels synchronously BEFORE emitting connection.close(error).
+    // Give that event its turn so a generic channel closure cannot hide broker codes.
+    channel.on("close", () => queueMicrotask(() => fail(transportEnd("channel_closed"))));
     await operation("amqp.prefetch", "amqp", () => channel.prefetch(100));
     const processMessage = async (msg: ConsumeMessage) => {
       if (closed) return;
@@ -320,7 +340,7 @@ export async function session(
         pkg.queue,
         (msg) => {
           if (!msg) {
-            fail(new Error("Consumer cancelled"));
+            fail(transportEnd("consumer_cancelled"));
             return;
           }
           lastReceived = Date.now();
