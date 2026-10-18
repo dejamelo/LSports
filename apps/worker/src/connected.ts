@@ -26,6 +26,11 @@ export async function runConnected(signal: AbortSignal) {
   const path = statePath();
   const lockPath = `${path}.lock`;
   await mkdir(dirname(path), { recursive: true });
+  // Shared guard prevents worker startup/reclaim during verified offline lock recovery.
+  const reclaim=await open(`${lockPath}.reclaim`, "wx", 0o600);
+  let retry=false;
+  try {
+    await reclaim.writeFile(String(process.pid));
   try {
     const lock = await open(lockPath, "wx", 0o600);
     await lock.writeFile(String(process.pid));
@@ -42,8 +47,10 @@ export async function runConnected(signal: AbortSignal) {
       if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
     }
     await rm(lockPath);
-    return runConnected(signal);
+    retry = true;
   }
+  } finally {await reclaim.close();await rm(`${lockPath}.reclaim`);}
+  if(retry)return runConnected(signal);
   const state = new TradeState();
   try {
     const recovery = await restore(state, path);

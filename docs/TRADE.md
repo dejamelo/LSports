@@ -1189,3 +1189,45 @@ Novos abortos exibem JSON sanitizado com `stage`, `reason`, `cause`, `writes`, e
 `writes.ticketBodiesWritten` é sempre false no migrador; a liquidação continua sendo responsabilidade da reconciliação normal. `checkpointReplaced:false` informa que esta tentativa não substituiu o original; backups/temporários podem existir. A limpeza libera apenas o lock criado pela própria execução, verificando inode/dispositivo; não remove lock substituído ou pré-existente. Uma falha na limpeza não mascara a causa original e aparece em `cleanupIssue`.
 
 Para o aborto já ocorrido no Mac, compartilhe apenas o JSON sanitizado de `--inspect`. Não é possível afirmar a causa exata com os dados atuais. O próximo passo de reparo depende desse resultado; nenhuma proteção foi contornada para tentar fazê-lo passar.
+
+### Recuperar um lock com PID comprovadamente encerrado
+
+Um `.lock` existente aborta `--apply` em `worker.lock_check`, antes de qualquer backup; `owner:not_running` não autorizava remoção automática pelo migrador. Portanto, o caso informado (PID 96162 ausente, porta 3001 fechada, dois bilhetes legíveis e nenhum backup) é compatível com esse bloqueio inicial. Não é necessário nem recomendado executar `rm` manualmente.
+
+Com API e worker parados, atualize o código e execute a recuperação específica:
+
+```bash
+cd ~/LSports
+git switch feat/sportsbook-demo
+git pull --ff-only origin feat/sportsbook-demo
+npm run build
+npm run recover:timestamps -- --inspect
+npm run recover:timestamps -- --recover-lock --expected-pid 96162
+```
+
+Use `96162` somente se a inspeção atual ainda mostrar esse PID no lock e `owner:not_running`. O comando confirma o conteúdo/PID, verifica o processo com `kill(pid,0)` e recusa PID ativo/reutilizado, erro de permissão, conteúdo inválido, lock alterado ou porta ocupada/não verificável. Um guard exclusivo compartilhado com a inicialização do worker impede início/reclaim concorrente durante a recuperação. Um guard já existente é preservado, sem tentativa de apagá-lo.
+
+**Antes de alterar o lock original**, cria um diretório novo `timestamp-recovery-<UUID>` com:
+
+- `feed.before.json`, cópia verificada do checkpoint;
+- `tickets.before.sqlite`, backup consistente via SQLite `VACUUM INTO`, incluindo os dados do WAL; verifica fingerprint de todos os corpos de bilhetes e informa `ticketCount`;
+- `worker.lock.before`, cópia original do lock;
+- `audit.json`, com operação `archive_verified_dead_worker_lock`, PID esperado, hashes do checkpoint/lock e fingerprint dos bilhetes.
+
+Após o backup, reconfirma PID morto, inode/dispositivo e conteúdo do lock, hash do checkpoint e fingerprint dos bilhetes. Somente então move atomicamente o lock original para `worker.lock.archived` dentro desse mesmo backup. **Não altera checkpoint nem corpos de bilhetes** e não aplica settlements nesta etapa. Retorna `status:stale_lock_archived`, `checkpointModified:false`, `ticketsModified:false`, `writes.staleLockArchived:true` e caminho do backup. Falha em qualquer backup/verificação preserva o lock original e os artefatos criados, com diagnóstico de etapa sanitizado. Não modifica `.env` ou cooldowns.
+
+Confirme a conclusão e os backups:
+
+```bash
+npm run recover:timestamps -- --inspect
+npm run recover:timestamps -- --fixture 20540564 --market 160 --settlements
+```
+
+A inspeção deve mostrar o lock original ausente, dois bilhetes preservados, o backup e sua operação de arquivamento (isso não é uma migração já aplicada). Com candidatos validados no dry-run, mantenha API/worker parados e aplique:
+
+```bash
+npm run recover:timestamps -- --fixture 20540564 --market 160 --settlements --apply
+npm run dev
+```
+
+O `--apply` cria **outro backup completo**, próprio da migração, antes de modificar o checkpoint. Na inicialização, a rotina normal de liquidação reconcilia os resultados explícitos; não é preciso esperar novo envio do fornecedor. Verifique Green Hussar e o segundo bilhete conforme a seção anterior. Se a recuperação do lock falhar ou seu PID tiver mudado, pare nesse diagnóstico; não remova arquivos nem pule a proteção. A recuperação de cotações de Parislongchamp continua sendo um dry-run/aplicação separado, sem `--settlements` e sem liberação de preços salvos.

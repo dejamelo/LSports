@@ -1,4 +1,5 @@
 export interface RecoveryWrites {
+ reclaimGuardCreated?:boolean; reclaimGuardReleased?:boolean; staleLockArchived?:boolean;
  checkpointBackupStarted:boolean; auditWriteStarted:boolean; temporaryCheckpointStarted:boolean; lockCreated:boolean; lockReleased:boolean; backupDirectoryCreated:boolean; checkpointBackupComplete:boolean;
  sqliteBackupStarted:boolean; sqliteBackupComplete:boolean; auditWritten:boolean; temporaryCheckpointWritten:boolean; checkpointReplaced:boolean;
  ticketBodiesWritten:false;

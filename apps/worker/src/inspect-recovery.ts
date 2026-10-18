@@ -20,13 +20,13 @@ export async function inspectRecovery(path:string,dbPath:string){
  const backups=[];
  for(const {name}of dated.slice(0,20)){
   const location=join(directory,name);const before=await file(join(location,'feed.before.json'));const sqlite=await file(join(location,'tickets.before.sqlite'));const auditFile=await file(join(location,'audit.json'));let audit:Record<string,unknown>|undefined;
-  if(auditFile.exists){try{const raw=JSON.parse(await readFile(join(location,'audit.json'),'utf8'));audit={readable:true,mode:['quotes','settlements'].includes(raw.mode)?raw.mode:'unknown',fixtureId:Number.isSafeInteger(raw.fixtureId)?raw.fixtureId:null,marketId:Number.isSafeInteger(raw.marketId)?raw.marketId:null,candidates:Array.isArray(raw.candidates)?raw.candidates.length:null,
-    checkpointMatchesBefore:checkpoint.sha256===raw.beforeSha256,checkpointMatchesPrepared:checkpoint.sha256===raw.afterSha256,ticketsMatchRecordedFingerprint:live.ticketFingerprint===raw.ticketFingerprint};}catch(e){audit={readable:false,cause:sanitizedCause(e)};}}
+  if(auditFile.exists){try{const raw=JSON.parse(await readFile(join(location,'audit.json'),'utf8'));audit={operation:raw.operation==='archive_verified_dead_worker_lock'?'archive_verified_dead_worker_lock':'timestamp_migration',expectedPid:Number.isSafeInteger(raw.expectedPid)?raw.expectedPid:undefined,readable:true,mode:['quotes','settlements'].includes(raw.mode)?raw.mode:'unknown',fixtureId:Number.isSafeInteger(raw.fixtureId)?raw.fixtureId:null,marketId:Number.isSafeInteger(raw.marketId)?raw.marketId:null,candidates:Array.isArray(raw.candidates)?raw.candidates.length:null,
+    checkpointMatchesBefore:checkpoint.sha256===raw.beforeSha256,checkpointMatchesPrepared:raw.operation!=='archive_verified_dead_worker_lock'&&checkpoint.sha256===raw.afterSha256,ticketsMatchRecordedFingerprint:live.ticketFingerprint===raw.ticketFingerprint};}catch(e){audit={readable:false,cause:sanitizedCause(e)};}}
   const backed=sqlite.exists&&sqlite.bytes?database(join(location,'tickets.before.sqlite')):undefined;
   backups.push({directory:name,checkpointBackup:before,sqliteBackup:sqlite,sqliteInspection:backed,auditFile,audit,
    ticketsMatchBackup:!!live.ticketFingerprint&&live.ticketFingerprint===backed?.ticketFingerprint,checkpointMatchesBackup:!!checkpoint.sha256&&checkpoint.sha256===before.sha256});
  }
  let temporaryFiles:Record<string,unknown>[]=[];try{const names=await readdir(directory);temporaryFiles=await Promise.all(names.filter(n=>n.startsWith(`${basename(path)}.`)&&n.endsWith('.recovery.tmp')).map(async n=>({name:n,...await file(join(directory,n))})));}catch{}
- return {readOnly:true,nodeVersion:process.versions.node,checkpoint,lock,tickets:live,backups,backupCount:dated.length,backupsTruncated:dated.length>20,temporaryFiles,...(scanError?{scanError}:{}),
+ return {reclaimGuard:await file(`${path}.lock.reclaim`),readOnly:true,nodeVersion:process.versions.node,checkpoint,lock,tickets:live,backups,backupCount:dated.length,backupsTruncated:dated.length>20,temporaryFiles,...(scanError?{scanError}:{}),
   note:'No migration, VACUUM, lock removal, checkpoint write or ticket update was performed. Historical stages without audit cannot be reconstructed with certainty.'};
 }
