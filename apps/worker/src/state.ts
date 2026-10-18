@@ -31,6 +31,7 @@ interface Versioned<T> {
   at: number;
 }
 export interface Row {
+  observation?:import("@lsports/contracts").FeedObservation;
   restored?: boolean;
   fixture?: Versioned<Fixture>;
   outright?: TradeEvent["outright"];
@@ -80,6 +81,7 @@ const defined = <T extends object>(value: T) =>
     Object.entries(value).filter(([, v]) => v !== undefined),
   ) as Partial<T>;
 export class TradeState {
+  restoration?:import("@lsports/contracts").EventFeed["restoration"];
   rows: Record<Lane, Map<number | string, Row>> = {
     prematch: new Map(),
     inplay: new Map(),
@@ -88,6 +90,7 @@ export class TradeState {
     Lane,
     {
       snapshot?: SnapshotAudit;
+      activity?:import("@lsports/contracts").FeedActivity;
       messages: number;
       messagesByType: Record<string, number>;
       eventUpdatesReceived: number;
@@ -120,9 +123,20 @@ export class TradeState {
     events: number,
     duplicate: boolean,
     keepAliveActiveEvents?: number,
+    decodedAt = Date.now(),
   ) {
     const m = this.metrics[lane];
     m.messages++;
+    const now=new Date(decodedAt).toISOString(),activity=(m.activity ||= {});
+    activity.lastDecodedAt=now;
+    if(type===31||type===32)activity.lastControlDecodedAt=now;
+    else if(duplicate)activity.lastDuplicateDecodedAt=now;
+    else if(events>0){
+      activity.lastDataDecodedAt=now;
+      if([1,2,37,39].includes(type))activity.lastEventDecodedAt=now;
+      if([3,41].includes(type))activity.lastMarketDecodedAt=now;
+      if([35,42].includes(type))activity.lastSettlementDecodedAt=now;
+    }
     m.messagesByType[String(type)] = (m.messagesByType[String(type)] || 0) + 1;
     m.eventUpdatesReceived += events;
     if (duplicate) m.duplicateMessages++;
@@ -139,7 +153,7 @@ export class TradeState {
   set(lane: Lane, patch: Partial<ConnectionState>) {
     Object.assign(this.connections[lane], patch);
   }
-  apply(lane: Lane, events: TradeEvent[], at: number) {
+  apply(lane: Lane, events: TradeEvent[], at: number, observation?:{source:"amqp"|"snapshot";receivedAt:number}) {
     for (const event of events) {
       if (!Number.isSafeInteger(event.fixtureId) || event.fixtureId <= 0)
         throw new Error("Invalid provider fixture ID");
@@ -148,6 +162,15 @@ export class TradeState {
       if (!row) {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
         this.rows[lane].set(key, row);
+      }
+      if(observation){
+        const at=new Date(observation.receivedAt).toISOString();
+        const proof=(row.observation ||= {});
+        if(observation.source==='snapshot')proof.snapshotReceivedAt=at;
+        else {
+          proof.amqpEventReceivedAt=at;
+          if(event.markets?.length)proof.amqpMarketReceivedAt=at;
+        }
       }
       if (event.outright) {
         const incoming = event.outright;
@@ -289,7 +312,7 @@ export class TradeState {
   replace(lane: Lane, events: TradeEvent[], at: number, audit?: SnapshotAudit) {
     this.metrics[lane].snapshot = audit;
     this.rows[lane] = new Map([...this.rows[lane]].filter(([, row]) => !!row.outright));
-    this.apply(lane, events, at);
+    this.apply(lane, events, at,{source:"snapshot",receivedAt:Date.now()});
     this.set(lane, {
       lastSnapshotAt: new Date().toISOString(),
       snapshotEvents: events.length,
@@ -448,6 +471,8 @@ export class TradeState {
           marketDiagnostic,
           outrightScore: marketDiagnostic?.outrightScore,
           restored: row.restored || undefined,
+          observation:row.observation ? {...row.observation} : undefined,
+          startsAt:start && Number.isFinite(+start)?start.toISOString():undefined,
           kind: row.outright ? "outright" : "fixture",
           competition: row.outright ? { id: row.outright.competitionId, name: row.outright.competitionName, type: row.outright.competitionType } : undefined,
           participants: structuredClone(participants),
@@ -529,6 +554,7 @@ export class TradeState {
     );
     return {
       mode: "connected",
+      restoration:this.restoration,
       health,
       notice:
         health === "ok"

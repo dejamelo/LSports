@@ -26,7 +26,8 @@
     "dev:embed": "concurrently -k -n api,worker,demo \"npm run dev -w @lsports/api\" \"node --import tsx --env-file-if-exists=.env apps/worker/src/index.ts\" \"node --import tsx --env-file-if-exists=.env scripts/local-embed-demo.ts\"",
     "demo:synthetic": "node --import tsx scripts/synthetic-demo.ts",
     "diagnose:timestamps:utc": "node --import tsx --env-file-if-exists=.env scripts/diagnose-utc-contract.ts",
-    "validate:synthetic-ui": "node --import tsx scripts/validate-synthetic-demo.mts"
+    "validate:synthetic-ui": "node --import tsx scripts/validate-synthetic-demo.mts",
+    "diagnose:feed:local": "node --import tsx --env-file-if-exists=.env scripts/diagnose-feed.ts"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",

@@ -1,7 +1,8 @@
 import { createApp } from "./app.js";
-const port = Number(process.env.PORT || 3001);
+import {serverConfig} from "./server-config.js";
+const {port,host}=serverConfig();
 const app = createApp();
-const server = app.listen(port, process.env.HOST || "127.0.0.1", () =>
+const server = app.listen(port, host, () =>
   console.log(`API listening on ${port}`),
 );
 for (const signal of ["SIGINT", "SIGTERM"] as const)

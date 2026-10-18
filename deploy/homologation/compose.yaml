@@ -1,0 +1,91 @@
+name: adl-homologation
+services:
+  api:
+    image: adl-homologation:review
+    build:
+      context: ../..
+      dockerfile: Dockerfile.homologation
+    init: true
+    env_file: ${API_ENV_FILE:-./api.env}
+    environment:
+      NODE_ENV: production
+      DATA_MODE: connected
+      PLATFORM_ENABLED: "true"
+      HOST: 0.0.0.0
+      PORT: "3001"
+      LSPORTS_STATE_FILE: /app/.runtime/feed/trade-feed.json
+      PLATFORM_DATA_DIR: /app/.runtime/platform
+    command: [node, --import, tsx, apps/api/src/index.ts]
+    volumes:
+      - feed-data:/app/.runtime/feed:ro
+      - platform-data:/app/.runtime/platform
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3001/control').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+  worker:
+    image: adl-homologation:review
+    build:
+      context: ../..
+      dockerfile: Dockerfile.homologation
+    init: true
+    env_file: ${WORKER_ENV_FILE:-./worker.env}
+    environment:
+      NODE_ENV: production
+      DATA_MODE: connected
+      PLATFORM_ENABLED: "true"
+      PLATFORM_DATA_DIR: /app/.runtime/platform
+      LSPORTS_ENVIRONMENT: Test
+      LSPORTS_STATE_FILE: /app/.runtime/feed/trade-feed.json
+    command: [node, --import, tsx, apps/worker/src/index.ts]
+    volumes:
+      - feed-data:/app/.runtime/feed
+      - platform-data:/app/.runtime/platform
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+  proxy:
+    image: caddy:2-alpine
+    env_file: ${API_ENV_FILE:-./api.env}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+volumes:
+  feed-data:
+  platform-data:
+  caddy-data:
+  caddy-config:

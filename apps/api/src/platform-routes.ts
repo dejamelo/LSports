@@ -1,3 +1,4 @@
+import {feedEvidence} from "./feed-evidence.js";
 import { walletReadiness, assertSimulation } from "./wallet-port.js";
 import express from "express";
 import { readFile } from "node:fs/promises";
@@ -364,6 +365,10 @@ export function platformRoutes(
       req.params.operationId,
     );
     res.json(tickets.store(op.id).report());
+  });
+  router.get(`${opPath}/feed-evidence`, async (req,res)=>{
+    platform.authorizeOperation(admin(req),req.params.id,req.params.operationId);
+    res.json(feedEvidence(await source.getEvents()));
   });
   router.get(`${opPath}/diagnostics`, async (req, res) => {
     const op = platform.authorizeOperation(

@@ -40,6 +40,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const state = new TradeState();
     try {
       const recovery = await restore(state, path);
+      state.restoration={...recovery,at:new Date().toISOString()};
       console.info(JSON.stringify({ operation: "file.restore", status: "ok", ...recovery }));
     } catch {
       throw new Error("No se pudo restaurar el estado TRADE. Archivo original conservado; no se inicia la escritura.");
@@ -269,7 +270,7 @@ export async function session(
         }
         if (!seen.has(decoded.guid)) {
           await operation("feed.apply", "local", async () =>
-            state.apply(lane, decoded.events, decoded.at),
+            state.apply(lane, decoded.events, decoded.at,{source:"amqp",receivedAt:Date.now()}),
           );
         }
         state.set(lane, {
@@ -343,6 +344,7 @@ export async function session(
       let rows: import("./state.js").TradeEvent[] | undefined;
       if (Date.now() >= nextDue["snapshot.events"]) {
         const started = Date.now();
+        state.set(lane,{lastSnapshotAttemptAt:new Date(started).toISOString()});
         try {
           rows = await api.snapshot();
           if (closed || signal.aborted) throw failure || new Error("Disconnected during recovery");
@@ -351,6 +353,7 @@ export async function session(
           nextDue["snapshot.events"] = Date.now() + Math.max(300000, config.recoveryMs);
         } catch (error) {
           if (closed || signal.aborted) throw error;
+          state.set(lane,{lastSnapshotErrorAt:new Date().toISOString()});
           const diagnostic = describeFailure(error, "snapshot.events", "http");
           if (diagnostic.category !== "rate_limited") throw error;
           state.set(lane, { diagnostic });
@@ -369,17 +372,21 @@ export async function session(
         if (!action || Date.now() < nextDue[name]) continue;
         outrightRecovery.diagnostics = outrightRecovery.diagnostics?.filter(d => d.operation !== name);
         const startedOutright = Date.now();
+        const attempt=((outrightRecovery.operations ||= {})[counter] ||= {});
+        attempt.lastAttemptAt=new Date(startedOutright).toISOString();
         try {
           const recovered = await action();
           if (closed || signal.aborted) throw failure || new Error("Disconnected during outright recovery");
-          await operation("feed.apply", "local", async () => state.apply(lane, recovered, startedOutright));
+          await operation("feed.apply", "local", async () => state.apply(lane, recovered, startedOutright,{source:"snapshot",receivedAt:Date.now()}));
           outrightRecovery[counter] = recovered.length;
+          attempt.lastSuccessAt=new Date().toISOString();
           if(name === "snapshot.outright.markets") outrightRecovery.timestampRejections = api.outrightTimestampRejections?.() || [];
           outrightRecovery.responseInspections = api.outrightResponseInspections?.();
           nextDue[name] = Date.now() + Math.max(300000, config.recoveryMs);
           console.info(JSON.stringify({ lane, operation: name, status: name === "snapshot.outright.markets" && outrightRecovery.timestampRejections?.length ? "partial" : "ok", events: recovered.length, ...(name === "snapshot.outright.markets" ? {timestampRejected:outrightRecovery.timestampRejections?.length || 0} : {}) }));
         } catch (error) {
           if (closed || signal.aborted) throw error;
+          attempt.lastErrorAt=new Date().toISOString();
           const diagnostic = describeFailure(error, name, "http");
           nextDue[name] = diagnostic.category === "rate_limited" ? retryTime(diagnostic) : Date.now() + Math.max(300000, config.recoveryMs);
           (outrightRecovery.diagnostics ||= []).push(diagnostic);

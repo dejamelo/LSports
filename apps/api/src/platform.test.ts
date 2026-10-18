@@ -1610,3 +1610,19 @@ test('server enforces return ceiling and concurrent player/event amount, count a
   assert.equal(repeated.filter(r=>r.status===201).length,1);assert.equal(repeated.filter(r=>r.data.code==='REPEATED_EVENT_BLOCKED').length,1);
  }finally{await s.close();}
 });
+
+test('feed evidence is scoped to authorized administrators and never settles a pending ticket',async()=>{
+ const s=await setup();
+ try{
+  const a=await s.create('evidence-a'),b=await s.create('evidence-b'),key=await s.key(a.id),client=await s.login('evidence-a@test.example','isolated-client-password');
+  const path=(id:string,operationId:string)=>`/api/control/clients/${id}/operations/${operationId}/feed-evidence`;
+  assert.equal((await s.request(path(a.id,a.operation.id))).status,401);
+  assert.equal((await s.request(path(b.id,b.operation.id),'GET',undefined,client)).status,403);
+  const accepted=await s.request('/api/integration/v1/tickets','POST',{clientId:a.id,operationId:a.operation.id,currency:'ARS',playerId:'readonly-player',channel:'web',stakeMinor:'100',selections:[{eventId:'prematch:9001',marketId:'160',selectionId:'runner',expectedOdds:2.6233}]},undefined,key.value,{'Idempotency-Key':'readonly-evidence-ticket'});
+  assert.equal(accepted.status,201);
+  s.feed.ticketOutcomes=[{eventId:'prematch:9001',marketId:'160',selectionId:'runner',settlement:1,updatedAt:new Date().toISOString()}];
+  const evidence=await s.request(path(a.id,a.operation.id),'GET',undefined,client);
+  assert.equal(evidence.status,200);assert.equal(evidence.data.readOnly,true);assert.equal(evidence.data.supplierRequests,0);
+  const stores=new TenantTickets(s.platform);try{assert.equal(stores.store(a.operation.id).get(accepted.data.id)?.status,'PENDING');}finally{stores.close();}
+ }finally{await s.close();}
+});

@@ -85,3 +85,12 @@ A confirmação UTC da LSports #217525 está documentada em
 [docs/TRADE.md](docs/TRADE.md#contrato-utc-confirmado--ticket-217525).
 `npm run diagnose:timestamps:utc` inspeciona evidências históricas somente para
 leitura; não repete migrações nem modifica bilhetes.
+
+### Diagnóstico local e preparação de homologação
+
+`npm run diagnose:feed:local` coleta somente dados já salvos e distingue atividade
+de mercados, keepalives, snapshots, recuperação e filtros. Acrescente `-- --support`
+para gerar a mensagem do chamado #217525 sem consultar o fornecedor.
+Veja [evidências do feed](docs/TRADE.md#evidências-locais-de-feed-snapshots-e-eventos-abertos).
+Arquivos e pendências para publicar iframe/API por HTTPS, ainda sem deploy:
+[homologação](deploy/homologation/README.md).

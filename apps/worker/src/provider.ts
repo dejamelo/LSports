@@ -1,3 +1,4 @@
+import {snapshotEvidence} from "./snapshot-evidence.js";
 import {normalizeSdkTimestamps,attachTimestampPrecision} from './timestamp-contract.js';
 import { inspectSettlements } from "./settlement-evidence.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
@@ -207,7 +208,10 @@ export function clients(
         )
           throw new Error("Invalid snapshot event");
         const evidence = responseEvidence();
+        let rawSnapshot=snapshotResponsePayload();
+        if(typeof rawSnapshot==='string')rawSnapshot=IdSafeJsonParser.parse(rawSnapshot);
         audit = {
+          content:snapshotEvidence(rawSnapshot,rows),
           bodyShape: evidence.bodyShape,
           providerRows: evidence.providerRows,
           sdkRows: rows.length,

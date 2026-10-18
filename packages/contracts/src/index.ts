@@ -134,7 +134,19 @@ export interface OutrightMarketDiagnostic {
   selectableSelections: number;
   market160?: { status?: number; statusLabel?: string; selections: number; pricedSelections: number; selectableSelections: number; selectionStatusCounts?: Record<string, number>; settlementCounts?: Record<string, number>; blockedReasonCounts?: Record<string, number> };
 }
+export interface FeedObservation {
+  snapshotReceivedAt?: string;
+  amqpEventReceivedAt?: string;
+  amqpMarketReceivedAt?: string;
+}
+export interface FeedActivity {
+  lastDecodedAt?:string;lastControlDecodedAt?:string;lastDataDecodedAt?:string;
+  lastEventDecodedAt?:string;lastMarketDecodedAt?:string;lastSettlementDecodedAt?:string;
+  lastDuplicateDecodedAt?:string;
+}
 export interface SportEvent {
+  startsAt?:string;
+  observation?:FeedObservation;
   outrightScore?: OutrightScoreProjection;
   kind?: "fixture" | "outright";
   restored?: boolean;
@@ -337,11 +349,14 @@ export interface ConnectionState {
   message: string;
   lastMessageAt?: string;
   lastSnapshotAt?: string;
+  lastSnapshotAttemptAt?:string;
+  lastSnapshotErrorAt?:string;
   snapshotEvents?: number;
   catalogHorseRacing?: boolean;
-  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; timestampRejections?: TimestampInspection[]; checkedAt: string; responseInspections?: { fixtures?: HttpResponseInspection; markets?: HttpResponseInspection }; marketRequest?: SnapshotRequestInspection };
+  outrightRecovery?: { operations?:Partial<Record<"fixtures"|"marketEvents",{lastAttemptAt?:string;lastSuccessAt?:string;lastErrorAt?:string}>>; fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; timestampRejections?: TimestampInspection[]; checkedAt: string; responseInspections?: { fixtures?: HttpResponseInspection; markets?: HttpResponseInspection }; marketRequest?: SnapshotRequestInspection };
 }
 export interface SnapshotAudit {
+  content?: {rawStructureRecognized:boolean;providerFixtureStatusCounts:Record<string,number>|null;sdkFixtureStatusCounts:Record<string,number>;providerMarketStatusCounts:Record<string,number>|null;sdkMarketStatusCounts:Record<string,number>;providerMarkets:number|null;sdkMarkets:number;providerPricedSelections:number|null;sdkPricedSelections:number;examples:{fixtureId:number;status:number|null}[]};
   bodyShape: "array" | "single_event" | "events_wrapper" | "other" | "missing";
   providerRows?: number;
   sdkRows: number;
@@ -349,6 +364,7 @@ export interface SnapshotAudit {
   filters: "none";
 }
 export interface CoverageStats {
+  activity?:FeedActivity;
   snapshot?: SnapshotAudit;
   messages: number;
   messagesByType: Record<string, number>;
@@ -367,6 +383,7 @@ export interface CoverageStats {
   staleUpdatesIgnored: number;
 }
 export interface EventFeed {
+  restoration?:{at:string;source:string;rows:number};
   ticketVersionRecoveries?: {auditId:string;eventId:string;marketId:string;selectionId:string;previousVersion:string;baselineVersion:string}[];
   ticketOutcomes?: import("./tickets.js").TicketOutcome[];
   mode: "demo" | "connected";

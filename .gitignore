@@ -8,3 +8,7 @@ coverage/
 .runtime/
 
 .local-synthetic-demo/
+
+# Private staging environment files and credential transfer bundles.
+deploy/homologation/*.env
+deploy/homologation/secrets/

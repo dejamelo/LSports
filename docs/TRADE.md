@@ -1312,3 +1312,69 @@ TZ `UTC`, `America/Sao_Paulo` e `Europe/Berlin`: equivalência do exemplo, offse
 precisão submilissegundo, proteção contra versões antigas, persistência/reinício,
 rejeição de datas inválidas e manutenção do bloqueio de seleção liquidada.
 Nenhum teste desta entrega consulta a LSports ou modifica os bilhetes do Mac.
+
+## Evidências locais de feed, snapshots e eventos abertos
+
+`npm run diagnose:feed:local` lê somente a projeção configurada em
+`LSPORTS_STATE_FILE`. Não consulta LSports, não acessa bilhetes, não altera locks,
+checkpoint, assinaturas, datas ou odds, nem executa migrações.
+
+O relatório distingue:
+
+- `lanes[].phase`, diagnósticos por operação/código e falhas de recuperação
+  Outright. `degradedReasons` explica que “parcial” pode ser HTTP/Outright mesmo
+  com ambos os canais AMQP conectados; isso não prova que futebol esteja bloqueado.
+- `transport.lastMessageAt`: qualquer mensagem AMQP, inclusive controles.
+  `activity.lastControlDecodedAt`, `lastEventDecodedAt`, `lastMarketDecodedAt` e
+  `lastSettlementDecodedAt` separam keepalive/heartbeat, fixtures/placar, odds e
+  liquidações. Duplicatas têm horário separado e não renovam o marcador de dados.
+  “Decoded” é interpretação bem-sucedida do envelope, não aceitação de cada campo;
+  versões antigas podem ser rejeitadas normalmente pelo estado.
+- Snapshot regular: tentativa, último sucesso/erro, contagem e auditoria de
+  fixtures/mercados/preços **brutos versus SDK** (`snapshot.audit.content`), com
+  status e exemplos de IDs. Sem esses campos em uma captura antiga, a origem da
+  diferença continua desconhecida. Aguardar a próxima consulta agendada normal,
+  sem reiniciar repetidamente ou executar diagnose HTTP para forçar snapshots.
+- `restoration`: origem/quantidade restaurada ao iniciar o worker.
+  `events[].restoredLineage` registra histórico restaurado, mas pode coexistir com
+  confirmação nova. `observation` informa recepção no processo atual por snapshot
+  ou AMQP; não é restaurado como prova de frescor no reinício. Ausência de marcação
+  em versões antigas é “unknown”, não prova de que o fornecedor não enviou dados.
+- `ui`: divisão por esporte/aba. O frontend não filtra pela data; por isso eventos
+  finalizados continuam visíveis, bloqueados. 19 eventos na API e 12 na aba de
+  futebol podem ser apenas a divisão por esporte/live/busca. A projeção também
+  omite linhas sem fixture e prefere a cópia InPlay de um fixture ao vivo existente
+  nos dois feeds; essas contagens aparecem em `lanes[].projection`.
+- `events` e `exclusions`: IDs, status de fixture/mercado, datas absolutas quando
+  disponíveis, seleções habilitadas e motivos de bloqueio. `projectionPublishedAt`
+  indica escrita do worker, não recebimento de novo evento/odd. `LastUpdate`
+  continua sendo versão do preço; uma versão antiga pode estar inalterada em um
+  snapshot atual, e isso é diferente de reativar uma odd salva sem confirmação.
+
+O endpoint administrativo somente leitura é
+`GET /api/control/clients/:clientId/operations/:operationId/feed-evidence`.
+Exige autenticação administrativa e autorização da operação. Não reconcilia ou
+liquida bilhetes durante a coleta. A disponibilidade do feed é compartilhada pela
+integração da plataforma; nenhum dado de jogadores ou bilhetes de outro cliente
+é incluído.
+
+Para gerar uma mensagem de suporte pronta com as evidências atuais:
+
+```sh
+npm run diagnose:feed:local -- --support
+```
+
+Enviar somente a mensagem/captura sanitizada, não `.env`, bancos ou payloads
+completos. Ela referencia o ticket #217525 e pede exemplos **ainda abertos** de
+PreMatch 4511 / InPlay 4510 no ambiente Test, quotas recomendadas atualizadas e
+confirmação dos filtros/distribuição/assinaturas existentes, sem criar assinaturas
+pagas. Campo ausente deve permanecer desconhecido; conexão e keepalive não provam
+que haja conteúdo aberto.
+
+A observação do operador de eventos de 17/10, “1X2 · Liquidado”, 19 eventos e 12
+visíveis no futebol foi o ponto de partida, não uma captura nova deste ambiente.
+A causa específica no Mac exige o relatório acima. Os testes locais reproduzem
+esse cenário e demonstram que snapshot e projeção mantêm mercados liquidados
+fechados; um fixture aberto recebido do fornecedor simulado segue publicado.
+
+`outrightRecovery.operations` separa tentativa/sucesso/erro de fixtures e mercados; `checkedAt` é apenas a avaliação local da recuperação, não prova de uma chamada HTTP nova. `deferred:true` indica coordenação local sem nova requisição; HTTP 429 indica resposta do fornecedor. `projectionUsableByApi` aplica apenas a janela de publicação existente de 20 segundos, não habilita odds.
