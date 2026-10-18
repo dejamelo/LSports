@@ -1269,3 +1269,6 @@ footer {
 .race-participants summary { cursor: pointer; padding: .4rem 0; }
 .race-participants ul { margin: .25rem 0; padding-left: 1.25rem; overflow-wrap: anywhere; }
 .race-participants li { padding: .15rem 0; }
+
+.ticket-history { margin:24px 0; padding:22px; border:1px solid #28394d; border-radius:12px; background:#101c2b; overflow-wrap:anywhere; }
+.ticket-history h2 {font-size:20px}.ticket-history p,.ticket-history li {font-size:13px;line-height:1.7;color:#bac5d4}.ticket-history details{padding:14px 0;border-top:1px solid #29394c}.ticket-history summary{cursor:pointer;font-size:14px}.ticket-history a{color:#4ce5ad}.ticket-history button{padding:10px;margin:8px;border:1px solid #3d526a}

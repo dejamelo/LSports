@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { TicketHistory } from "./TicketHistory";
+import { useEffect, useState, useRef } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -41,6 +42,10 @@ export default function App() {
   const [picks, setPicks] = useState<Pick[]>([]);
   const [amount, setAmount] = useState("1000");
   const [message, setMessage] = useState("");
+  const [submitting,setSubmitting] = useState(false);
+  const [ticketRefresh,setTicketRefresh] = useState(0);
+  const submission = useRef<{payload:string;key:string} | undefined>(undefined);
+  const inFlight = useRef(false);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [mobileSlip, setMobileSlip] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -139,6 +144,28 @@ export default function App() {
   const odds = currentPicks.reduce((v, p) => v * p.selection.odds, 1);
   const stake = Number(amount);
   const valid = Number.isFinite(stake) && stake > 0 && stake <= 1000000;
+  const submitTicket = async () => {
+    if(inFlight.current) return;
+    const payload=JSON.stringify({stakeMinor:Math.round(stake*100),selections:currentPicks.map(p=>({eventId:p.event.id,
+      marketId:p.event.markets?.find(m=>m.selections.some(s=>s.id===p.selection.id))?.id || "demo",
+      selectionId:p.selection.id,expectedOdds:p.selection.odds}))});
+    if(!submission.current) {
+      try {const saved=JSON.parse(sessionStorage.getItem("adl-pending-test-ticket") || "null");
+        if(saved?.payload===payload && typeof saved.key==="string") submission.current=saved;
+      } catch { /* Storage is optional; API remains authoritative. */ }
+    }
+    if(submission.current?.payload!==payload) submission.current={payload,key:crypto.randomUUID()};
+    try {sessionStorage.setItem("adl-pending-test-ticket",JSON.stringify(submission.current));} catch {}
+    inFlight.current=true;setSubmitting(true);setMessage("");
+    try {
+      const r=await fetch("/api/tickets",{method:"POST",headers:{"Content-Type":"application/json","Idempotency-Key":submission.current.key},body:payload});
+      const result=await r.json();
+      if(!r.ok) {setMessage(result.error || "No se pudo aceptar el billete.");return;}
+      setMessage(`Billete de prueba registrado: ${result.id}. Sin dinero real.`);
+      setTicketRefresh(n=>n+1);
+    } catch {setMessage("Respuesta no confirmada. Reintentá sin cambiar el billete para evitar duplicados.");}
+    finally{inFlight.current=false;setSubmitting(false);}
+  };
   if (location.pathname !== "/sportsbook" && location.pathname !== "/")
     return (
       <div className="not-found">
@@ -453,6 +480,7 @@ export default function App() {
                 : "Eventos y cuotas ficticios. Modo demo separado de la integración real. Sin apuestas ni dinero real."}
             </p>
           </div>
+          <TicketHistory refresh={ticketRefresh}/>
           <footer>
             <span>
               © {new Date().getFullYear()} Apuesta DEPORTIVA LAT ·{" "}
@@ -602,15 +630,14 @@ export default function App() {
                 )}
                 <button
                   className="simulate"
-                  disabled={!valid || picksBlocked || pricesChanged}
-                  onClick={() =>
-                    setMessage(
-                      "¡Simulación lista! No se registró ninguna apuesta ni se movió dinero.",
-                    )
-                  }
+                  disabled={submitting || !valid || picksBlocked || pricesChanged}
+                  onClick={submitTicket}
                 >
-                  <Zap size={16} /> Simular billete
+                  <Zap size={16} /> {submitting ? "Validando…" : "Simular billete"}
                 </button>
+                {message.startsWith("Billete de prueba registrado:") && <button onClick={()=>{
+                  submission.current=undefined;try{sessionStorage.removeItem("adl-pending-test-ticket");}catch{}setPicks([]);setMessage("");
+                }}>Armar otro billete de prueba</button>}
                 <p className="slip-fine">
                   Puntos ficticios. Sin depósitos ni retiros.
                 </p>

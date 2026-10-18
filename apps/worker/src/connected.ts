@@ -1,3 +1,4 @@
+import { TicketStore } from "@lsports/feed-store/tickets";
 import type { FeedMessageMetadata } from "@lsports/contracts";
 import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
@@ -51,9 +52,15 @@ export async function runConnected(signal: AbortSignal) {
     await rm(lockPath, { force: true });
     throw new Error("No se pudo restaurar el estado TRADE. Archivo original conservado; no se inicia la escritura.");
   }
+  let tickets: TicketStore;
+  try { tickets = new TicketStore(); } catch (error) { await rm(lockPath, {force: true}); throw error; }
   const publish = createPublisher(path);
   const save = () =>
-    operation("file.persist", "local", () => publish(state.feed(), checkpoint(state)));
+    operation("file.persist", "local", async () => {
+      const feed = state.feed();
+      tickets.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
+      await publish(feed, checkpoint(state));
+    });
   let writing: Promise<void> | undefined;
   let lastCoverageLog = 0;
   const heartbeat = setInterval(() => {
@@ -145,6 +152,7 @@ export async function runConnected(signal: AbortSignal) {
     try {
       await save();
     } finally {
+      tickets.close();
       await rm(lockPath, { force: true });
     }
   }

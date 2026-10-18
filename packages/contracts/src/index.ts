@@ -303,6 +303,7 @@ export interface CoverageStats {
   staleUpdatesIgnored: number;
 }
 export interface EventFeed {
+  ticketOutcomes?: import("./tickets.js").TicketOutcome[];
   mode: "demo" | "connected";
   notice: string;
   events: SportEvent[];
@@ -319,3 +320,5 @@ export interface EventFeed {
 export interface EventSource {
   getEvents(): Promise<EventFeed>;
 }
+
+export type { TicketRequest, TicketLeg, TestTicket, TicketStatus, TicketOutcome } from './tickets.js';

@@ -219,6 +219,17 @@ export class TradeState {
     });
   }
   feed(now = Date.now()): EventFeed {
+    const ticketOutcomes: NonNullable<EventFeed["ticketOutcomes"]> = [];
+    for (const lane of ["prematch", "inplay"] as const) {
+      for (const [key, row] of this.rows[lane]) for (const market of row.markets.values()) {
+        for (const bet of market.bets || []) {
+          const at = row.betAt.get(`${market.id}:${bet.id}`);
+          if (bet.settlement === undefined || at === undefined) continue;
+          ticketOutcomes.push({eventId: `${lane}:${key}`, marketId: `${lane}:${key}:${market.id}`,
+            selectionId: `${lane}:${key}:${market.id}:${bet.id}`, settlement: bet.settlement, updatedAt: new Date(at).toISOString()});
+        }
+      }
+    }
     const events: SportEvent[] = [];
     const observed = new Set<string>();
     const outrightDiagnostics: OutrightMarketDiagnostic[] = [];
@@ -413,6 +424,7 @@ export class TradeState {
       updatedAt: new Date(now).toISOString(),
       connections: structuredClone(this.connections),
       events: visible,
+      ticketOutcomes,
       coverage,
       outrightDiagnostics,
       horseRacing: {

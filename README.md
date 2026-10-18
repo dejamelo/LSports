@@ -63,3 +63,5 @@ Em dev/preview, `FRAME_ANCESTORS` contém os orígenes exatos autorizados, separ
 Em produção, servir `apps/web/dist` com fallback SPA para `/sportsbook`, fazer reverse proxy de `/api` para Node e configurar no servidor HTTP `Content-Security-Policy: frame-ancestors 'self' https://seu-site-pai.example`. A variável Vite não configura headers no hosting estático. Não enviar `X-Frame-Options: DENY`/`SAMEORIGIN` se o pai for outro origen. Usar HTTPS. API permanece interna no mesmo origen; sem CORS aberto. Fontes externas são opcionais com fallback de sistema.
 
 Para produção, use supervisor com reinício para API/worker e monitore saúde/freshness. Processos não sobrevivem à publicação de um snapshot do ambiente. O frontend preserva a identidade visual atual; esta etapa não habilita operações com dinheiro real.
+
+[Bilhetes persistentes de teste, atualização no Mac, liquidação e contrato REST para POSNET](docs/TEST-TICKETS.md). Somente pontos fictícios; nenhuma movimentação financeira. O histórico e o comprovante ficam no próprio sportsbook.

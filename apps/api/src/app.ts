@@ -1,9 +1,11 @@
+import { ticketRoutes } from "./ticket-routes.js";
+import type { TicketStore } from "@lsports/feed-store/tickets";
 import { explainOpenEventExclusions } from "./open-event-diagnostics.js";
 import express from "express";
 import { demoSource } from "@lsports/demo";
 import { dataMode, readConnectedFeed } from "@lsports/feed-store";
 import type { EventSource } from "@lsports/contracts";
-export function createApp(source?: EventSource) {
+export function createApp(source?: EventSource, options: {ticketStore?: TicketStore} = {}) {
   const mode = dataMode();
   const feed =
     source ||
@@ -67,6 +69,9 @@ export function createApp(source?: EventSource) {
       exclusions: explainOpenEventExclusions(events, new Set(candidates.map(candidate => candidate.eventId))),
     });
   });
+  const tickets = ticketRoutes(feed, options.ticketStore);
+  app.locals.closeTickets = tickets.close;
+  app.use("/api", tickets.router);
   app.get("/api/events", async (_req, res) => res.json(await feed.getEvents()));
   app.use("/api", (_req, res) =>
     res.status(404).json({ error: "Ruta no encontrada" }),
