@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import {
   ShieldCheck,
+  Eye,
+  EyeOff,
   Users,
   KeyRound,
   Activity,
@@ -53,6 +55,8 @@ export default function ControlPanel() {
   const [admin, setAdmin] = useState<Admin>(),
     [csrf, setCsrf] = useState(""),
     [loading, setLoading] = useState(true);
+  const [showPassword, setShowPassword] = useState(false);
+  useEffect(() => setShowPassword(false), [admin]);
   const [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false);
@@ -267,13 +271,31 @@ export default function ControlPanel() {
             </label>
             <label>
               Contraseña
-              <input
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                maxLength={256}
-              />
+              <span className="control-password">
+                <input
+                  id="control-login-password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  required
+                  maxLength={256}
+                />
+                <button
+                  type="button"
+                  aria-label={
+                    showPassword ? "Ocultar contraseña" : "Mostrar contraseña"
+                  }
+                  aria-pressed={showPassword}
+                  aria-controls="control-login-password"
+                  onClick={() => setShowPassword((value) => !value)}
+                >
+                  {showPassword ? (
+                    <EyeOff size={19} aria-hidden="true" />
+                  ) : (
+                    <Eye size={19} aria-hidden="true" />
+                  )}
+                </button>
+              </span>
             </label>
             {error && (
               <p role="alert" className="control-error">

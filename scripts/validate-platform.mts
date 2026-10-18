@@ -234,6 +234,7 @@ try {
   const frame = casino.frameLocator("iframe");
   await frame.getByText("Equipo de prueba A", { exact: true }).waitFor();
   await frame.locator(".odds-row button").first().click();
+  await frame.getByLabel("Importe simulado (ARS)",{exact:true}).fill("10");
   await frame
     .getByRole("button", { name: "Simular billete", exact: true })
     .click();
@@ -291,6 +292,7 @@ try {
     .getByRole("button", { name: "Armar otro billete de prueba", exact: true })
     .click();
   await frame.locator(".odds-row button").first().click();
+  await frame.getByLabel("Importe simulado (ARS)",{exact:true}).fill("10");
   await frame
     .getByRole("button", { name: "Simular billete", exact: true })
     .click();

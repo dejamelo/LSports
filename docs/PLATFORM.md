@@ -375,3 +375,26 @@ Testes de API cobrem mínimo, máximo, retorno, quantidade, acumulado, repetiç�
 concorrência entre canais e isolamento. Um teste de reinício preserva o bilhete
 sintético e a odd aceita. Tudo usa amostras sintéticas; eventos/odds abertos,
 continuidade de cobertura e resultados reais continuam dependendo da LSports.
+
+### Feedback e limites no iframe
+
+O login inicia com senha oculta e oferece “Mostrar contraseña” / “Ocultar contraseña”
+sem submeter o formulário ou alterar o valor. Ao mudar a sessão administrativa,
+a senha volta a ficar oculta.
+
+O bilhete usa verde e ✓ somente após uma confirmação HTTP 201 com ID de registro.
+Recusas e respostas não confirmadas usam apresentação de erro, com `role=alert`;
+a ausência de confirmação não deve ser interpretada como aposta aceita.
+
+No iframe, os limites efetivos da operação mostram mínimo/máximo por bilhete,
+retorno potencial máximo, repetição permitida, quantidade e acumulado por
+jogador/evento e bloqueio de múltiplas correlacionadas. Atalhos usam unidades
+menores exatas da moeda, respeitam a faixa de valor e o teto de retorno das
+seleções atuais. No exemplo sintético de 1–100 ARS, a 2,10, são 1/10/50 ARS.
+Eles são sugestões; não representam saldo ou valor restante do jogador.
+
+O formulário antecipa erros de valor/retorno, mas todas as regras continuam
+obrigatórias no servidor, inclusive preço, feed, permissões, reservas e
+concorrência. As recusas da API informam os valores aplicáveis; no limite de
+acumulado, informam também o valor já acumulado desse jogador/evento. As mudanças
+não modificam bilhetes, auditoria, políticas ou dados já armazenados.

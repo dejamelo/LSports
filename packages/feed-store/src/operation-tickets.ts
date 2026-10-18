@@ -12,6 +12,7 @@ import {
 } from "./platform.js";
 import {
   minor,
+  formatMinor,
   returnMinor,
   currencyPrecision,
   type EventFeed,
@@ -169,13 +170,13 @@ export class OperationTickets {
           if (amount < minor(limits.minStakeMinor))
             throw new PlatformError(
               "STAKE_BELOW_MINIMUM",
-              "El importe es menor al mínimo de la operación.",
+              `El mínimo por billete es ${formatMinor(limits.minStakeMinor,op.currency)}.`,
               409,
             );
           if (amount > minor(limits.maxStakeMinor))
             throw new PlatformError(
               "STAKE_ABOVE_MAXIMUM",
-              "El importe supera el máximo por billete.",
+              `El máximo por billete es ${formatMinor(limits.maxStakeMinor,op.currency)}.`,
               409,
             );
           if (
@@ -188,7 +189,7 @@ export class OperationTickets {
           )
             throw new PlatformError(
               "RETURN_LIMIT",
-              "El retorno potencial supera el límite de la operación.",
+              `El retorno potencial supera el máximo de ${formatMinor(limits.maxReturnMinor,op.currency)}.`,
               409,
             );
           if (
@@ -224,7 +225,7 @@ export class OperationTickets {
             )
               throw new PlatformError(
                 "PLAYER_EVENT_TICKET_LIMIT",
-                "Alcanzaste la cantidad máxima de billetes para este evento.",
+                `Alcanzaste el máximo de ${limits.maxTicketsPerPlayerEvent} ${limits.maxTicketsPerPlayerEvent===1?"billete":"billetes"} por jugador/evento.`,
                 409,
               );
             const accumulated = rows.reduce(
@@ -237,7 +238,7 @@ export class OperationTickets {
             )
               throw new PlatformError(
                 "PLAYER_EVENT_AMOUNT_LIMIT",
-                "El importe acumulado del jugador supera el límite de este evento.",
+                `El acumulado máximo por jugador/evento es ${formatMinor(limits.maxStakePerPlayerEventMinor,op.currency)}. Ya acumulaste ${formatMinor(accumulated.toString(),op.currency)}.`,
                 409,
               );
           }

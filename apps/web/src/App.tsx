@@ -1,3 +1,4 @@
+import {minorInput,stakeShortcuts,type StakeLimits} from "./stake-limits";
 import {majorToMinor,formatMinor,minor,returnMinor} from '@lsports/contracts';
 import { sportsbookApi, embedded, getEmbedContext } from "./sportsbook-api";
 import { TicketHistory } from "./TicketHistory";
@@ -5,6 +6,7 @@ import { useEffect, useState, useRef } from "react";
 import {
   ArrowUpRight,
   Check,
+  CircleAlert,
   ChevronRight,
   Clock3,
   Flame,
@@ -37,14 +39,21 @@ const money = (v: number) =>
   new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(v);
 export default function App() {
   const embedScope=getEmbedContext();
-  const [feed, setFeed] = useState<EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:{minStakeMinor:string;maxStakeMinor:string}}>();
+  const [feed, setFeed] = useState<EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:StakeLimits}>();
   const [error, setError] = useState("");
   const [tab, setTab] = useState("Prepartido");
   const [sport, setSport] = useState<Sport>("futbol");
   const [query, setQuery] = useState("");
   const [picks, setPicks] = useState<Pick[]>([]);
-  const [amount, setAmount] = useState("1000");
+  const [amount, setAmount] = useState(embedded ? "" : "1000");
   const [message, setMessage] = useState("");
+  const [messageKind,setMessageKind] = useState<"success"|"error">("error");
+  const amountInitialized=useRef(false);
+  useEffect(()=>{
+    if(embedScope && feed?.effectiveLimits && !amountInitialized.current){
+      setAmount(minorInput(feed.effectiveLimits.minStakeMinor,embedScope.currency));amountInitialized.current=true;
+    }
+  },[feed?.effectiveLimits,embedScope]);
   const [submitting,setSubmitting] = useState(false);
   const [ticketRefresh,setTicketRefresh] = useState(0);
   const submission = useRef<{payload:string;key:string} | undefined>(undefined);
@@ -64,7 +73,7 @@ export default function App() {
           signal: controller.signal,
         });
         if (!response.ok) throw Error();
-        const next = (await response.json()) as EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:{minStakeMinor:string;maxStakeMinor:string}};
+        const next = (await response.json()) as EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:StakeLimits};
         if (
           !["demo", "connected"].includes(next.mode) ||
           !Array.isArray(next.events)
@@ -147,10 +156,23 @@ export default function App() {
   const odds = currentPicks.reduce((v, p) => v * p.selection.odds, 1);
   const stake = embedded ? 0 : Number(amount);
   let simulatedMinor='';
-  let valid=false;
-  if(embedScope){try{simulatedMinor=majorToMinor(amount,embedScope.currency);const n=minor(simulatedMinor);valid=n>=minor(feed?.effectiveLimits?.minStakeMinor||'1')&&n<=minor(feed?.effectiveLimits?.maxStakeMinor||'100000000');}catch{}}
-  else valid=Number.isFinite(stake)&&stake>0&&stake<=1000000;
-  const simulatedReturn=embedScope&&valid?formatMinor(returnMinor(simulatedMinor,currentPicks.map(p=>Math.round(p.selection.odds*1000000))),embedScope.currency):'';
+  let valid=false, amountError='';
+  const limits=feed?.effectiveLimits;
+  const oddsMicros=currentPicks.map(p=>Math.round(p.selection.odds*1000000));
+  let simulatedReturn='';
+  if(embedScope){
+    if(!limits)amountError='Cargando los límites de la operación…';
+    else try {
+      simulatedMinor=majorToMinor(amount,embedScope.currency);
+      const n=minor(simulatedMinor);
+      if(n<minor(limits.minStakeMinor))amountError=`El mínimo por billete es ${formatMinor(limits.minStakeMinor,embedScope.currency)}.`;
+      else if(n>minor(limits.maxStakeMinor))amountError=`El máximo por billete es ${formatMinor(limits.maxStakeMinor,embedScope.currency)}.`;
+      else if(minor(returnMinor(simulatedMinor,oddsMicros))>minor(limits.maxReturnMinor))amountError=`El retorno potencial supera el máximo de ${formatMinor(limits.maxReturnMinor,embedScope.currency)}.`;
+      else valid=true;
+      simulatedReturn=formatMinor(returnMinor(simulatedMinor,oddsMicros),embedScope.currency);
+    }catch(error){amountError=error instanceof Error?error.message:'Revisá el importe.';}
+  }else valid=Number.isFinite(stake)&&stake>0&&stake<=1000000;
+  const quickStakes=embedScope && limits ? stakeShortcuts(limits,oddsMicros).map(value=>({value:minorInput(value,embedScope.currency),label:formatMinor(value,embedScope.currency)})) : embedded ? [] : [500,1000,5000].map(value=>({value:String(value),label:money(value)}));
   const submitTicket = async () => {
     if(inFlight.current) return;
     const payload=JSON.stringify({...embedScope,stakeMinor:embedScope?simulatedMinor:Math.round(stake*100),selections:currentPicks.map(p=>({eventId:p.event.id,
@@ -163,11 +185,13 @@ export default function App() {
     }
     if(submission.current?.payload!==payload) submission.current={payload,key:crypto.randomUUID()};
     try {if(!embedded)sessionStorage.setItem("adl-pending-test-ticket",JSON.stringify(submission.current));} catch {}
-    inFlight.current=true;setSubmitting(true);setMessage("");
+    inFlight.current=true;setSubmitting(true);setMessage("");setMessageKind("error");
     try {
       const r=await sportsbookApi("/tickets",{method:"POST",headers:{"Content-Type":"application/json","Idempotency-Key":submission.current.key},body:payload});
       const result=await r.json();
       if(!r.ok) {setMessage(result.error || "No se pudo aceptar el billete.");return;}
+      if(r.status!==201 || typeof result.id!=='string' || !result.id){setMessage("Respuesta no confirmada. Revisá el historial antes de reintentar el mismo billete.");return;}
+      setMessageKind("success");
       setMessage(`Billete de prueba registrado: ${result.id}. Sin dinero real.`);
       setTicketRefresh(n=>n+1);
     } catch {setMessage("Respuesta no confirmada. Reintentá sin cambiar el billete para evitar duplicados.");}
@@ -512,6 +536,14 @@ export default function App() {
           <div className="slip-mode">
             SIMULADOR <span>Sin dinero real</span>
           </div>
+          {embedScope && limits && <section className="slip-limits" aria-label="Límites de la operación">
+            <strong>Límites · {embedScope.currency}</strong>
+            <p>Por billete: {formatMinor(limits.minStakeMinor,embedScope.currency)} a {formatMinor(limits.maxStakeMinor,embedScope.currency)}.</p>
+            <p>Retorno potencial máximo: {formatMinor(limits.maxReturnMinor,embedScope.currency)}.</p>
+            <p>{limits.allowRepeatedTickets ? 'Se permiten nuevos billetes del jugador en el mismo evento.' : 'Un solo billete del jugador por evento.'}</p>
+            <p>Máximo por jugador/evento: {limits.maxTicketsPerPlayerEvent === null ? 'sin límite de cantidad configurado' : `${limits.maxTicketsPerPlayerEvent} ${limits.maxTicketsPerPlayerEvent===1?"billete":"billetes"}`}; acumulado: {limits.maxStakePerPlayerEventMinor === null ? 'sin límite configurado' : formatMinor(limits.maxStakePerPlayerEventMinor,embedScope.currency)}.</p>
+            <p>Selecciones del mismo evento en una combinada: bloqueadas. El servidor verifica límites y acumulados actuales al confirmar.</p>
+          </section>}
           {picks.length === 0 ? (
             <div className="slip-empty">
               <div className="ticket-art">
@@ -594,31 +626,30 @@ export default function App() {
                   }}
                 />
                 {!valid && (
-                  <p className="invalid">{embedScope?"Revisá el importe y los límites de la operación.":"Ingresá entre 1 y 1.000.000 puntos."}</p>
+                  <p className="invalid" role="alert">{embedScope?amountError:"Ingresá entre 1 y 1.000.000 puntos."}</p>
                 )}
                 <div className="quick-stakes">
-                  {[500, 1000, 5000].map((n) => (
+                  {quickStakes.map((shortcut) => (
                     <button
-                      key={n}
+                      key={shortcut.value}
                       onClick={() => {
-                        setAmount(String(n));
+                        setAmount(shortcut.value);
                         setMessage("");
                       }}
                     >
-                      {money(n)}
+                      {shortcut.label}
                     </button>
                   ))}
                 </div>
                 <div className="return">
                   <span>Retorno simulado</span>
                   <strong>
-                    {valid ? embedScope?simulatedReturn:money(stake * odds) : "—"} <small>{embedScope?"simulados":"pts"}</small>
+                    {embedScope ? simulatedReturn || "—" : valid ? money(stake * odds) : "—"} <small>{embedScope?"simulados":"pts"}</small>
                   </strong>
                 </div>
                 {picksBlocked && (
                   <p className="invalid">
-                    Una selección no está disponible o se perdió la conexión.
-                    Revisá tu billete.
+                    {feed?.client?.acceptingTickets === false ? "Nuevos billetes suspendidos para esta operación. Los resultados pendientes siguen procesándose." : "Una selección no está habilitada o no se pudo verificar el feed. Revisá el estado y la conexión antes de confirmar."}
                   </p>
                 )}
                 {pricesChanged && (
@@ -642,15 +673,15 @@ export default function App() {
                 >
                   <Zap size={16} /> {submitting ? "Validando…" : "Simular billete"}
                 </button>
-                {message.startsWith("Billete de prueba registrado:") && <button onClick={()=>{
+                {messageKind==="success" && message.startsWith("Billete de prueba registrado:") && <button onClick={()=>{
                   submission.current=undefined;try{sessionStorage.removeItem("adl-pending-test-ticket");}catch{}setPicks([]);setMessage("");
                 }}>Armar otro billete de prueba</button>}
                 <p className="slip-fine">
                   {embedScope?`Simulación en ${embedScope.currency}. Sin dinero real, depósitos ni retiros.`:"Puntos ficticios. Sin depósitos ni retiros."}
                 </p>
                 {message && (
-                  <div className="success" role="status">
-                    <Check size={18} />
+                  <div className={messageKind === "success" ? "success" : "ticket-error"} role={messageKind === "success" ? "status" : "alert"}>
+                    {messageKind === "success" ? <Check size={18} aria-hidden="true" /> : <CircleAlert size={18} aria-hidden="true" />}
                     {message}
                   </div>
                 )}

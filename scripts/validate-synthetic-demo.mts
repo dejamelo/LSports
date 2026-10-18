@@ -25,6 +25,28 @@ try {
   await admin
     .getByLabel("Contraseña", { exact: true })
     .fill(syntheticLogin.password);
+  assert.equal(
+    await admin.getByLabel("Contraseña", { exact: true }).getAttribute("type"),
+    "password",
+  );
+  await admin
+    .getByRole("button", { name: "Mostrar contraseña", exact: true })
+    .click();
+  assert.equal(
+    await admin.getByLabel("Contraseña", { exact: true }).getAttribute("type"),
+    "text",
+  );
+  await admin
+    .getByRole("button", { name: "Ocultar contraseña", exact: true })
+    .click();
+  assert.equal(
+    await admin.getByLabel("Contraseña", { exact: true }).getAttribute("type"),
+    "password",
+  );
+  assert(
+    (await admin.getByLabel("Contraseña", { exact: true }).inputValue()) ===
+      syntheticLogin.password,
+  );
   await admin.getByRole("button", { name: "Ingresar", exact: true }).click();
   await admin.getByRole("button", { name: "Operaciones", exact: true }).click();
   const operation = admin.locator("form").filter({
@@ -130,7 +152,50 @@ try {
   const frame = casino.frameLocator("#sportsbook");
   await frame.getByText("TEST Equipo A", { exact: true }).waitFor();
   await frame.locator(".odds-row button").first().click();
-  await frame.getByLabel("Importe simulado (ARS)", { exact: true }).fill("10");
+  const limitText = await frame
+    .getByRole("region", { name: "Límites de la operación", exact: true })
+    .innerText();
+  assert.match(limitText, /1,00 ARS a 100,00 ARS/);
+  assert.match(limitText, /200,00 ARS/);
+  assert.match(limitText, /3 billetes/);
+  assert.match(limitText, /150,00 ARS/);
+  const stakeInput = frame.getByLabel("Importe simulado (ARS)", {
+    exact: true,
+  });
+  await stakeInput.fill("0.50");
+  await frame
+    .getByText("El mínimo por billete es 1,00 ARS.", { exact: true })
+    .waitFor();
+  assert(
+    await frame
+      .getByRole("button", { name: "Simular billete", exact: true })
+      .isDisabled(),
+  );
+  await stakeInput.fill("101");
+  await frame
+    .getByText("El máximo por billete es 100,00 ARS.", { exact: true })
+    .waitFor();
+  await stakeInput.fill("100");
+  await frame
+    .getByText("El retorno potencial supera el máximo de 200,00 ARS.", {
+      exact: true,
+    })
+    .waitFor();
+  assert(
+    await frame
+      .getByRole("button", { name: "Simular billete", exact: true })
+      .isDisabled(),
+  );
+  assert.deepEqual(
+    await frame.locator(".quick-stakes button").allTextContents(),
+    ["1,00 ARS", "10,00 ARS", "50,00 ARS"],
+  );
+  await frame
+    .locator(".quick-stakes")
+    .getByRole("button", { name: "50,00 ARS", exact: true })
+    .click();
+  assert.equal(await stakeInput.inputValue(), "50.00");
+  await stakeInput.fill("10");
   const requestPromise = casino.waitForRequest(
     (r) =>
       r.url().endsWith("/api/integration/v1/tickets") && r.method() === "POST",
@@ -148,6 +213,8 @@ try {
   assert.equal(accepted.status(), 201);
   const ticket = await accepted.json();
   await frame.getByText(/Billete de prueba registrado:/).waitFor();
+  assert.equal(await frame.locator('.success[role="status"]').count(), 1);
+  assert.equal(await frame.locator(".success .lucide-check").count(), 1);
   const iframe = casino
     .frames()
     .find((f) => f.url().startsWith(demo.apiOrigin + "/embed/"))!;
@@ -185,6 +252,52 @@ try {
     .getByRole("button", { name: "Imprimir comprobante", exact: true })
     .waitFor();
   await frame.getByRole("button", { name: "Cerrar", exact: true }).click();
+  const actor = (
+    await demo.platform.login(
+      syntheticLogin.email,
+      syntheticLogin.password,
+      "isolated-ux-check",
+    )
+  ).admin;
+  const originalLimits = demo.platform.operation(
+    demo.manifest.operationId,
+  )!.limits;
+  demo.platform.updateOperation(
+    actor,
+    demo.manifest.clientId,
+    demo.manifest.operationId,
+    { limits: { ...originalLimits, maxTicketsPerPlayerEvent: 1 } },
+  );
+  await frame
+    .getByRole("button", { name: "Armar otro billete de prueba", exact: true })
+    .click();
+  await frame.locator(".odds-row button").first().click();
+  await stakeInput.fill("10");
+  const refusal = casino.waitForResponse(
+    (r) =>
+      r.url().endsWith("/api/integration/v1/tickets") &&
+      r.request().method() === "POST",
+  );
+  await frame
+    .getByRole("button", { name: "Simular billete", exact: true })
+    .click();
+  assert.equal((await refusal).status(), 409);
+  await frame
+    .locator('.ticket-error[role="alert"]')
+    .getByText("Alcanzaste el máximo de 1 billete por jugador/evento.", {
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(await frame.locator(".success").count(), 0);
+  assert.equal(await frame.locator(".ticket-error .lucide-check").count(), 0);
+  assert.equal(await frame.locator(".ticket-history details").count(), 1);
+  demo.platform.updateOperation(
+    actor,
+    demo.manifest.clientId,
+    demo.manifest.operationId,
+    { limits: originalLimits },
+  );
+
   await admin.getByRole("button", { name: "Riesgo", exact: true }).click();
   const alert = admin
     .locator(".control-risk-alert")
@@ -304,6 +417,9 @@ try {
         "risk_alert_review_audit",
         "save_loading_error_success_preserves_inputs",
         "mobile",
+        "password_visibility_toggle",
+        "operation_limits_and_adaptive_shortcuts",
+        "real_server_refusal_red_without_success_check",
       ],
       supplierRequests: 0,
       realData: false,
