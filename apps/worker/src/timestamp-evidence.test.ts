@@ -28,8 +28,8 @@ function run(zone:string){
  const afterOldSnapshot=state.feed().events[0].selections[0].odds;
  amqp('2026-10-18T14:02:19.025Z','3.25');
  const beforeAmbiguous=state.feed().events[0].selections[0].odds;
- let blocked;
- try{snapshot('2026-10-18T14:02:17.025','8.88');}catch(error){blocked=error.diagnostic;}
+ snapshot('2026-10-18T14:02:17.025','8.88');
+ const blocked={reason:'ambiguous_timestamp',timestampInspection:state.feed().outrightDiagnostics[0].markets[0].timestampRejections[0]};
  const afterAmbiguous=state.feed().events[0].selections[0].odds;
  amqp('2026-10-18T14:02:20.025Z','3.50');
  const final=state.feed().events[0].selections[0];
@@ -54,15 +54,19 @@ test('timestamp inspection distinguishes fallback from explicit offsets, masks n
  const wrong=inspectTimestamp('2026-10-18T14:02:17.025Z',new Date('2026-10-18T17:02:17.025Z'));assert.equal(wrong.orderingSafe,false);assert.throws(()=>requireTimestamp(wrong,'snapshot'),e=>e instanceof OperationError&&e.diagnostic.reason==='invalid_timestamp');
  const invalid=inspectTimestamp('private-non-date-value',new Date(NaN));assert.equal(invalid.rawLastUpdate,null);assert(!JSON.stringify(invalid).includes('private-non-date-value'));assert.throws(()=>requireTimestamp(invalid,'amqp'));
 });
-test('real snapshot client exposes sanitized ambiguous raw timestamp and does not report successful recovery',async()=>{
+test('real snapshot client quarantines ambiguous items with their exact IDs',async()=>{
  const {createServer}=await import('node:http');const {clients}=await import('./provider.js');
  const http=createServer(async(req,res)=>{for await(const _chunk of req){}res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[{Id:900111,Events:[{FixtureId:900283,Markets:[{Id:160,Bets:[{Id:'1',Price:'2.63',LastUpdate:'2026-10-18T14:02:17.025'}]}]}]}]}));});
  await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));const a=http.address();assert(a&&typeof a!=='string');const url=`http://127.0.0.1:${a.port}`;
  try{
   const api=clients({lane:'prematch',packageId:4511,username:'isolated',password:'isolated-not-a-credential',hostname:'unused',port:5672,tls:false,vhost:'StmPreMatch',queue:'_4511_'},{snapshotUrl:url,customersUrl:url},{run:async(_op,action)=>action()});
-  await assert.rejects(()=>api.outrightMarkets!([900283]),e=>{
-   assert(e instanceof OperationError);assert.equal(e.diagnostic.reason,'ambiguous_timestamp');assert.equal(e.diagnostic.httpStatus,200);assert.equal(e.diagnostic.timestampInspection?.rawLastUpdate,'2026-10-18T14:02:17.025');assert.equal(e.diagnostic.timestampInspection?.orderingSafe,false);assert(!JSON.stringify(e.diagnostic).includes('isolated-not-a-credential'));return true;
-  });
+  const result=await api.outrightMarkets!([900283]);
+  assert.equal(result[0].markets![0].bets!.length,0);
+  const rejected=api.outrightTimestampRejections!();assert.equal(rejected.length,1);
+  assert.equal(rejected[0].rawLastUpdate,'2026-10-18T14:02:17.025');assert.equal(rejected[0].orderingSafe,false);
+  assert.deepEqual(rejected[0].context,{competitionId:900111,fixtureId:900283,marketId:160,selectionId:'1'});
+  assert(!JSON.stringify(rejected).includes('isolated-not-a-credential'));
+
  }finally{await new Promise<void>(r=>http.close(()=>r()));}
 });
 test('envelope fallback rejects zone-less strings instead of applying the host timezone',async()=>{

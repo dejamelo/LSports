@@ -18,7 +18,8 @@
     "build": "npm run build --workspaces --if-present",
     "test": "tsx --test apps/api/src/*.test.ts apps/worker/src/*.test.ts packages/feed-store/src/*.test.ts",
     "diagnose:trade": "npm run diagnose -w @lsports/worker",
-    "validate:local-ui": "tsx scripts/validate-local-sportsbook.mts"
+    "validate:local-ui": "tsx scripts/validate-local-sportsbook.mts",
+    "recover:timestamps": "npm run recover:timestamps -w @lsports/worker --"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",

@@ -38,7 +38,14 @@ export interface SnapshotQuoteObservation {
   receivedPrice: number | null;
   decision: "confirmed" | "older_than_stored" | "missing_or_invalid_price";
 }
+export interface TimestampContext {competitionId: number; fixtureId: number; marketId: number; selectionId: string}
+export interface TimestampRecovery {
+  auditId: string; status: "awaiting_fresh_amqp" | "validated_amqp" | "awaiting_settlement_replay" | "settlement_replayed";
+  replayCode?: number; replayReceivedAt?: string;
+  previousVersion: string; baselineVersion: string; preparedAt: string; validatedAt?: string;
+}
 export interface TimestampInspection {
+  context?: TimestampContext;
   rawLastUpdate: string | number | null;
   rawType: "missing" | "null" | "string" | "number" | "other";
   timezone: "missing" | "epoch_milliseconds" | "explicit" | "absent" | "invalid";
@@ -62,6 +69,7 @@ export interface SettlementTrace {last41?: SettlementObservation; last42?: Settl
 export interface SettlementMarketCounts {marketId: number; rootBets: number; rootNumeric: number; rootNull: number; rootMissing: number; providerBets: number; providerNumeric: number}
 export type SettlementMarketEvidence = Partial<Record<SettlementObservation["source"], SettlementMarketCounts & {receivedAt: string}>>;
 export interface OutrightMarketResult {
+  timestampRejections?: TimestampInspection[];
   settlementEvidence?: SettlementMarketEvidence;
   id: number | null;
   name: string | null;
@@ -80,6 +88,7 @@ export interface OutrightMarketResult {
     resultKnown: boolean;
     resultDescription: string;
     settlementTrace?: SettlementTrace;
+    timestampRecovery?: TimestampRecovery;
     odds?: number;
     available?: boolean;
     unavailableReasons?: string[];
@@ -326,7 +335,7 @@ export interface ConnectionState {
   lastSnapshotAt?: string;
   snapshotEvents?: number;
   catalogHorseRacing?: boolean;
-  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; checkedAt: string; responseInspections?: { fixtures?: HttpResponseInspection; markets?: HttpResponseInspection }; marketRequest?: SnapshotRequestInspection };
+  outrightRecovery?: { fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; timestampRejections?: TimestampInspection[]; checkedAt: string; responseInspections?: { fixtures?: HttpResponseInspection; markets?: HttpResponseInspection }; marketRequest?: SnapshotRequestInspection };
 }
 export interface SnapshotAudit {
   bodyShape: "array" | "single_event" | "events_wrapper" | "other" | "missing";
@@ -354,6 +363,7 @@ export interface CoverageStats {
   staleUpdatesIgnored: number;
 }
 export interface EventFeed {
+  ticketVersionRecoveries?: {auditId:string;eventId:string;marketId:string;selectionId:string;previousVersion:string;baselineVersion:string}[];
   ticketOutcomes?: import("./tickets.js").TicketOutcome[];
   mode: "demo" | "connected";
   notice: string;

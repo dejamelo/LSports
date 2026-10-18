@@ -13,6 +13,8 @@ export function checkpoint(state: TradeState) {
     [...state.rows[lane]].filter(([, row]) => row.outright).map(([key, row]) => ({
       lane, fixtureId: Number(String(key).split(':').at(-1)),
       fixture: row.fixture, outright: row.outright, livescore: row.livescore, outrightScore: row.outrightScore, marketReceipt: row.marketReceipt,
+      deferredTimestampBets: row.deferredTimestampBets ? [...row.deferredTimestampBets] : undefined,
+      timestampRecovery: row.timestampRecovery ? [...row.timestampRecovery] : undefined,
       settlementAudit: row.settlementAudit ? [...row.settlementAudit] : undefined,
       settlementMarkets: row.settlementMarkets ? [...row.settlementMarkets] : undefined,
       markets: [...row.markets], marketAt: [...row.marketAt], betAt: [...row.betAt],
@@ -43,6 +45,9 @@ export async function restore(state: TradeState, path: string) {
           [...entry.marketAt, ...entry.betAt].some(([, t]) => typeof t !== 'number' || !Number.isFinite(t)) ||
           (entry.fixture !== undefined && (!object(entry.fixture) || !object(entry.fixture.value) || typeof entry.fixture.at !== 'number' || !Number.isFinite(entry.fixture.at))))
         throw new Error('Invalid outright checkpoint; original file preserved');
+      if ((entry.deferredTimestampBets !== undefined && (!tuples(entry.deferredTimestampBets) || entry.deferredTimestampBets.some(([, r]) => !object(r) || !validId(r.marketId) || typeof r.selectionId!=="string" || !object(r.bet) || !object(r.inspection) || typeof r.receivedAt!=="string"))) ||
+          (entry.timestampRecovery !== undefined && (!tuples(entry.timestampRecovery) || entry.timestampRecovery.some(([, r]) => !object(r) || !["awaiting_fresh_amqp","validated_amqp","awaiting_settlement_replay","settlement_replayed"].includes(String(r.status)) || ![r.previousVersion,r.baselineVersion,r.preparedAt].every(v=>typeof v==="string"&&Number.isFinite(Date.parse(v)))))))
+        throw new Error('Invalid timestamp quarantine; original preserved');
       if ((entry.settlementAudit !== undefined && (!tuples(entry.settlementAudit) || entry.settlementAudit.some(([, trace]) => !validTrace(trace)))) ||
           (entry.settlementMarkets !== undefined && (!tuples(entry.settlementMarkets) || entry.settlementMarkets.some(([, evidence]) => !validMarketEvidence(evidence)))))
         throw new Error('Invalid saved settlement evidence; original file preserved');
@@ -66,6 +71,8 @@ export async function restore(state: TradeState, path: string) {
       const key = `outright:${entry.outright.competitionId}:${entry.fixtureId}`;
       if (recovered.rows[lane].has(key)) throw new Error('Duplicate outright checkpoint identity');
       recovered.rows[lane].set(key, {
+        deferredTimestampBets: entry.deferredTimestampBets === undefined ? undefined : new Map(entry.deferredTimestampBets as [string, unknown][]) as Row["deferredTimestampBets"],
+        timestampRecovery: entry.timestampRecovery === undefined ? undefined : new Map(entry.timestampRecovery as [string, unknown][]) as Row["timestampRecovery"],
         settlementAudit: entry.settlementAudit === undefined ? undefined : new Map(entry.settlementAudit as [string, unknown][]) as Row["settlementAudit"],
         settlementMarkets: entry.settlementMarkets === undefined ? undefined : new Map(entry.settlementMarkets as [string, unknown][]) as Row["settlementMarkets"],
         outrightScore: entry.outrightScore as unknown as Row["outrightScore"],

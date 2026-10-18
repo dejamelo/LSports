@@ -441,7 +441,7 @@ export function decodeMessage(
         outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type },
         markets: event.markets,
         marketMessageType: type,
-        settlementInspection: inspectSettlements(((value.Competition as Record<string, unknown>).Events as Record<string, unknown>[])[index].Markets, event.markets || []),
+        settlementInspection: inspectSettlements(((value.Competition as Record<string, unknown>).Events as Record<string, unknown>[])[index].Markets, event.markets || [], "amqp", {competitionId:competition.id!,fixtureId:event.fixtureId}),
       }));
       if (events.length !== ((value.Competition as Record<string, unknown>).Events as unknown[]).length)
         throw new Error("Conversion lost events");

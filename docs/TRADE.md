@@ -1087,3 +1087,76 @@ No caso Parislongchamp 20545283 / Sangomar, depois da atualização/reinício no
 Se `timezone:absent`, solicitar à LSports o fuso contratual de `Bets[].LastUpdate` no AMQP 41/42 e no endpoint `/Prematch/GetOutrightFixtureMarkets`, idealmente com emissão consistente de `Z` ou offset explícito. Informar pacote Test 4511, fixture 20545283, mercado 160, Bet ID de Sangomar e os campos sanitizados acima. Se ambos forem explícitos e representarem instantes diferentes, pedir explicação da diferença nos valores emitidos; não convertê-los artificialmente para o mesmo instante.
 
 Os testes executam o SDK real sob UTC, America/Sao_Paulo e Europe/Berlin: igualdade entre timestamps equivalentes com offsets diferentes; snapshot antigo sem substituir uma odd recente; AMQP com versão posterior aceito; snapshot ambíguo sem alterar a odd; diagnóstico HTTP 200 não tratado como recuperação válida; e requeue para versão ambígua AMQP. São amostras isoladas, sem acesso ao feed ou aos arquivos do Mac.
+
+### Lotes parcialmente ambíguos e preparação segura do legado
+
+**Contrato ainda pendente:** em 18/10/2026, a leitura de `docs.lsports.eu` neste ambiente retornou HTTP 403. O código público oficial [BaseBet](https://github.com/lsportsltd/trade360-nodejs-sdk/blob/main/src/entities/core-entities/market/base-bet.ts) expõe `LastUpdate` com `@Type(() => Date)` e não declara a zona de uma string sem offset. Logo, o SDK não confirma que `2026-10-18T00:19:34.10384` HTTP seja UTC. Não foi acrescentado `Z`, subtraído um offset, alterado `TZ` ou presumida semântica contratual. Solicitar à LSports confirmação específica para `Bets[].LastUpdate` HTTP e AMQP, incluindo o formato com cinco/sete casas decimais, e emissão com offset explícito. O trecho da documentação ou resposta do suporte é necessário antes de normalizar essas strings.
+
+A rejeição anterior abortava todo o lote HTTP no primeiro item ambíguo. Agora cada Bet ambíguo é isolado; os demais fixtures/mercados/seleções com versões inequívocas são processados. A recuperação informa `status:partial` e não considera o lote totalmente recuperado. `connections.prematch.outrightRecovery.timestampRejections[]` identifica cada item com `context.{competitionId,fixtureId,marketId,selectionId}` e a inspeção sanitizada da data. O mesmo registro aparece em `matches[].markets[].timestampRejections` no diagnóstico individual. O Bet convertido e seu timestamp bruto permanecem em quarentena **privada no checkpoint**, sem aplicação da odd ou settlement, sem perda do item. Se já havia uma seleção carregada, ela fica bloqueada com `ambiguous_snapshot_timestamp` até uma atualização válida. Mensagens AMQP ambíguas continuam preservadas na fila por requeue; não são parcialmente ACKadas.
+
+#### Preparar apenas as versões históricas comprovadamente futuras
+
+O comando abaixo **não normaliza HTTP sem fuso**. Ele prepara uma quarentena seletiva do índice de versões, para permitir que cotações AMQP explícitas recentes substituam versões históricas incompatíveis. Cada candidato deve satisfazer todas as condições:
+
+- Está no fixture/mercado explicitamente solicitados e não tem settlement numérico terminal; resultados conhecidos não são reescritos.
+- A versão ainda armazenada coincide exatamente com a observação histórica do snapshot, não possui confirmação de interpretação inequívoca e estava mais de cinco minutos no futuro em relação ao início daquela própria consulta HTTP.
+- Existe observação individual AMQP 41 posterior à consulta, com zona explícita, conversão SDK verificada, versão anterior ao índice futuro e horário coerente com seu envelope. Deve ter sido observada nos últimos quinze minutos. Os limites de cinco/quinze minutos são políticas conservadoras locais, não regras declaradas pela LSports. A falta de settlement nessa mensagem não impede comprovar a versão da cotação.
+- Não foi preparada anteriormente. IDs sem prova suficiente são listados em `excluded`, sem alteração. Não existe seleção por nome, diferença fixa de três horas, atualização global ou aceitação automática de timestamp menor.
+
+Pare **API e worker** com Ctrl+C imediatamente antes de atualizar/aplicar, para manter as observações recentes. Use Node >=22.13 (Node 24 recomendado). No Mac:
+
+```bash
+cd ~/LSports
+git switch feat/sportsbook-demo
+git pull --ff-only origin feat/sportsbook-demo
+npm ci
+npm run build
+npm run recover:timestamps -- --fixture 20545283 --market 160
+```
+
+O último comando é **dry-run**, não escreve dados. Confira `candidates` e `excluded`. Se não houver candidatos, não há reparo automático autorizado pelos dados: reinicie normalmente para obter novas observações AMQP, depois pare e repita o dry-run. Não altere arquivos, timestamps ou cooldowns para forçar elegibilidade. Se o próprio snapshot não for futuro em relação à sua consulta, precisamos da evidência adicional/contrato do fornecedor antes de fazer outro tipo de recuperação.
+
+Para preparar exatamente os candidatos elegíveis, com API/worker ainda parados:
+
+```bash
+npm run recover:timestamps -- --fixture 20545283 --market 160 --apply
+npm run dev
+```
+
+`--apply` verifica o lock do worker e se a porta local da API está ocupada; adquire seu próprio lock exclusivo e nunca remove um lock pré-existente. A função faz backup do checkpoint original e uma cópia consistente do SQLite com `VACUUM INTO`, inclusive dados do WAL, em um novo diretório `timestamp-recovery-<UUID>` ao lado do checkpoint. Verifica o fingerprint de **todos** os bilhetes antes/depois da cópia. O arquivo `audit.json` registra IDs, versão anterior, baseline AMQP comprovada, hashes antes/depois e fingerprint dos bilhetes. Em falha antes da substituição atômica, o checkpoint não é sobrescrito e o backup é mantido. O procedimento não consulta o fornecedor, não altera `.env`, assinaturas, fila, cooldowns ou arquivos de snapshot anteriores.
+
+A versão contaminada é preservada em `timestampRecovery.previousVersion` e no backup; apenas o índice de ordenação das seleções elegíveis passa para a baseline individual AMQP. O preço salvo **continua bloqueado**, mesmo que o mercado esteja aberto. Snapshots/status-only não removem a quarentena. É necessária mensagem AMQP 41 recebida após a preparação, com odd explícita válida, versão com zona explícita verificada, maior que a baseline e não futura em relação ao envelope. Só então o estado passa de `awaiting_fresh_amqp` para `validated_amqp`. Fixture, mercado, status de seleção, conexão e settlement continuam a bloquear normalmente; uma seleção suspensa como Serie não é forçada a abrir.
+
+Na reconciliação seguinte, um índice de resultado **0 (não liquidado)** que coincida exatamente com a versão contaminada também pode ser rebased para a baseline auditada, de forma idempotente. Isso evita que o mesmo índice futuro bloqueie uma liquidação explícita recebida depois. Nenhum resultado terminal, corpo de bilhete, odd aceita, histórico ou pagamento é modificado por esse reparo de metadados. O backup de SQLite preserva ambos os bilhetes existentes; bilhetes só mudam de resultado quando chegam settlements explícitos, usando suas odds aceitas originais.
+
+Valide no Mac: `/api/diagnostics/outright/20545283` deve mostrar os IDs dos rejeitados e `selections[].timestampRecovery` para os candidatos. Antes da nova cotação, `awaiting_timestamp_recovery` é esperado e nenhuma odd antiga deve ficar selecionável. Após uma mensagem recente válida, o status muda para `validated_amqp`, a odd publicada corresponde à nova mensagem e a seleção fica disponível somente se todos os demais estados permitirem. `staleBetUpdates` é acumulado; não é zerado pelo reparo. Confira ambos os bilhetes pelo histórico/ID, preservando odds aceitas. Guarde o diretório de backup/auditoria; não substitua SQLite ou checkpoint com processos em execução.
+
+Os testes isolados cobrem lote de seis fixtures com um item ambíguo (cinco seguem disponíveis), identificação completa do item, persistência da quarentena, dry-run sem mudanças, recusa de lock existente, backup consistente de dois bilhetes, repetição sem novas alterações, bloqueio de preço salvo/status-only, aceitação posterior de AMQP explícito, reinício e liquidação com a odd aceita original (2.6233, mesmo com cotação atual diferente). Não foi executada migração nos arquivos do Mac nem validada conexão real neste ambiente.
+
+#### Reprocessar settlements 42 já recebidos (chamado 217525)
+
+A evidência adicional de Madrid muda o diagnóstico: os sete códigos **foram recebidos**, convertidos e registrados, mas rejeitados pela versão histórica adiantada. Para Green Hussar / Bet ID `3160611920540564`, a observação informada é `last42.versionAt=2026-10-18T14:17:24.015Z`, `receivedAt=2026-10-18T14:17:24.152Z`, código `1`, contra índice histórico de snapshot `16:11:13.230Z`. Não há motivo para aguardar outro resultado do fornecedor se essas observações já estão persistidas e passam pela validação abaixo.
+
+O mesmo comando aceita `--settlements`, **separado da recuperação de cotações**. Usa apenas `settlementAudit.last42` já salvo, com código terminal inteiro, `decision:ignored_older`, `Z`/offset explícito, conversão SDK inequívoca e IDs correspondentes ao mercado/seleção. Valida individualmente a coincidência exata da versão histórica ainda aplicada com a observação do snapshot, que essa versão era futura em relação à consulta, e que não há evidência numérica explícita mais recente contraditória/superveniente. Resultado conhecido/terminal já aplicado não é substituído. Campos ausentes, null, placar, nome do vencedor, código deduzido ou dados de outro Bet ID nunca viram settlement. Diferentemente de odds, um resultado histórico explícito não expira após quinze minutos; datas ainda precisam ser coerentes e não futuras no envelope.
+
+Com API e worker parados e o código atualizado, primeiro examine o plano:
+
+```bash
+npm run recover:timestamps -- --fixture 20540564 --market 160 --settlements
+```
+
+Confira cada `candidate`: Bet ID, código, versão AMQP, recebimento e índice histórico. Esperam-se os sete códigos `1` se todos possuem prova válida; a ferramenta **não força uma quantidade de sete**. Veja `excluded` quando faltar evidência, houver versão divergente ou resultado mais recente. Não edite o JSON para contornar exclusões.
+
+Para aplicar o plano validado, mantendo os processos parados:
+
+```bash
+npm run recover:timestamps -- --fixture 20540564 --market 160 --settlements --apply
+```
+
+É criado **outro backup completo e consistente** do checkpoint e do SQLite, com manifesto/hashes e os sete códigos originais no plano, antes da migração. Cada observação elegível é reconstruída como entidade mínima 42 (somente IDs, Settlement e LastUpdate explícitos preservados), passa pelo parser oficial e por `TradeState.apply`, e recebe marca `settlement_replayed`. Não inventa preço/status nem incrementa contadores de mensagens AMQP reais. A migração grava apenas o checkpoint; os corpos dos dois bilhetes continuam idênticos ao backup nesse momento.
+
+Ao executar `npm run dev`, o primeiro save do worker restaura os resultados e chama **a rotina normal `TicketStore.reconcile`**, antes de depender de conexão ou nova mensagem do fornecedor. Também corrige apenas o índice 0/não liquidado que coincida exatamente com a versão histórica auditada; nenhum índice terminal é rebaixado. O bilhete Green Hussar deve passar a `LOST`, retorno simulado `0`, pelo código explícito `1`, mantendo ID, valor e odd aceita **2.6233**. O outro bilhete mantém seu estado salvo, salvo se seus próprios resultados explícitos também forem elegíveis e reprocessados pelo plano correspondente. Nenhum corpo de bilhete é editado manualmente pelo migrador.
+
+Reiniciar/reconsultar não liquida em duplicidade nem aumenta revisão sem novo resultado. Repetir o plano mostra as seleções já preparadas/aplicadas como excluídas, sem nova migração. `--apply` sem candidatos aborta sem reescrever checkpoint ou tickets. O backup e o manifesto permanecem disponíveis para auditoria. Uma falha após preparar o checkpoint e antes de iniciar o worker é recuperável pelo reinício: os marcadores de versão tornam a reconciliação idempotente.
+
+Depois confira o diagnóstico de Madrid (sete settlements `1`, `resultKnown:true`, `timestampRecovery.status:settlement_replayed`) e o bilhete `cd4196d2-45be-4870-acad-c0289f549ff7` pelo endpoint/histórico. A recuperação de Parislongchamp continua sendo o modo de cotações, sem `--settlements`, exigindo preço AMQP novo para abrir seleção; uma migração de resultado não habilita odds antigas. Os testes reproduzem sete resultados antigos rejeitados, Bet ID longo, backup dos dois bilhetes, replay sem nova mensagem, liquidação normal, odds preservadas e repetição sem efeitos adicionais.

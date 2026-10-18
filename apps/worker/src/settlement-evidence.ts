@@ -1,11 +1,13 @@
+import {OperationError} from './diagnostics.js';
 import { inspectTimestamp, requireTimestamp } from "./timestamp-evidence.js";
 import type {Market} from 'trade360-nodejs-sdk';
 import type {SettlementFieldEvidence, SettlementMarketCounts, SettlementObservation, SettlementTrace} from '@lsports/contracts';
 const object=(v:unknown):v is Record<string,unknown> => !!v&&typeof v==='object'&&!Array.isArray(v);
 // Compare the actual supplier JSON with the official entity conversion. Never log payloads.
-export function inspectSettlements(raw:unknown, converted:Market[], source: "amqp" | "snapshot" = "amqp"):{fields:SettlementFieldEvidence[];counts:SettlementMarketCounts[]} {
+export function inspectSettlements(raw:unknown, converted:Market[], source: "amqp" | "snapshot" = "amqp", context?: {competitionId:number;fixtureId:number}):{fields:SettlementFieldEvidence[];counts:SettlementMarketCounts[];rejected:{marketId:number;selectionId:string;bet:NonNullable<Market["bets"]>[number];inspection:import("@lsports/contracts").TimestampInspection}[]} {
  if(!Array.isArray(raw)||raw.length!==converted.length)throw new Error('Settlement conversion mismatch');
  const fields:SettlementFieldEvidence[]=[], counts:SettlementMarketCounts[]=[];
+ const rejected:ReturnType<typeof inspectSettlements>["rejected"]=[];
  for(let i=0;i<raw.length;i++){
   const market=raw[i], sdk=converted[i];
   if(!object(market)||market.Id!==sdk.id)throw new Error('Settlement market identity mismatch');
@@ -16,7 +18,11 @@ export function inspectSettlements(raw:unknown, converted:Market[], source: "amq
    const bet=bets[j], parsed=sdk.bets![j];
    if(!object(bet)||String(bet.Id)!==parsed.id)throw new Error('Settlement selection identity mismatch');
    const timestamp=inspectTimestamp(bet.LastUpdate,parsed.lastUpdate);
-   requireTimestamp(timestamp,source);
+   if(context)timestamp.context={...context,marketId:sdk.id!,selectionId:/^[a-zA-Z0-9:_-]{1,200}$/.test(parsed.id)?parsed.id:"nonstandard-id"};
+   try{requireTimestamp(timestamp,source);}catch(error){
+    if(source!=="snapshot"||!(error instanceof OperationError))throw error;
+    rejected.push({marketId:sdk.id!,selectionId:parsed.id,bet:structuredClone(parsed),inspection:timestamp});
+   }
    const field=!Object.hasOwn(bet,'Settlement')?'missing':bet.Settlement===null?'null':'integer';
    if(field==='integer'&&(!Number.isInteger(bet.Settlement)||parsed.settlement!==bet.Settlement))throw new Error('Settlement numeric value invalid or lost');
    if(field==='missing'&&parsed.settlement!==undefined)throw new Error('Settlement invented during conversion');
@@ -32,7 +38,7 @@ export function inspectSettlements(raw:unknown, converted:Market[], source: "amq
   }
   counts.push(summary);
  }
- return {fields,counts};
+ return {fields,counts,rejected};
 }
 const sources=new Set(['amqp.41','amqp.42','snapshot.outright.markets']);
 export function validObservation(v:unknown):v is SettlementObservation {

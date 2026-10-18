@@ -99,6 +99,15 @@ export class TicketStore {
   }
   reconcile(feed: EventFeed) {
     this.transaction(() => {
+      // Repair only an explicitly quarantined *unsettled* version index. Ticket bodies,
+      // accepted odds and terminal outcomes are immutable here. Exact old-version match
+      // makes this crash/replay safe after the offline checkpoint preparation.
+      for(const recovery of feed.ticketVersionRecoveries || []) {
+        const previous=Date.parse(recovery.previousVersion),baseline=Date.parse(recovery.baselineVersion);
+        if(feed.mode!=="connected"||!recovery.auditId||!Number.isFinite(previous)||!Number.isFinite(baseline)||baseline>=previous)continue;
+        this.db.prepare('UPDATE outcomes SET version=? WHERE mode=? AND event_id=? AND market_id=? AND selection_id=? AND code=0 AND version=?')
+          .run(baseline,feed.mode,canonical(recovery.eventId),canonical(recovery.marketId),canonical(recovery.selectionId),previous);
+      }
       let changed = false;
       for (const result of feed.ticketOutcomes || []) {
         const version = Date.parse(result.updatedAt);

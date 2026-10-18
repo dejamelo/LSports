@@ -44,6 +44,7 @@ axios.defaults.maxRedirects = 0;
 export interface ProviderClients {
   snapshot(): Promise<TradeEvent[]>;
   outrightFixtures?: () => Promise<TradeEvent[]>;
+  outrightTimestampRejections?: () => import("@lsports/contracts").TimestampInspection[];
   outrightMarkets?: (fixtureIds?: number[]) => Promise<TradeEvent[]>;
   outrightMarketRequest?: () => import("@lsports/contracts").SnapshotRequestInspection | undefined;
   catalog(): Promise<{ id?: number; name?: string }[]>;
@@ -101,12 +102,14 @@ export function clients(
     ...options,
     restApiBaseUrl: urls.customersUrl,
   });
+  let rejectedTimestamps: import("@lsports/contracts").TimestampInspection[] = [];
   let audit: SnapshotAudit | undefined;
   let recoveredFixtureIds: number[] | undefined;
   let marketRequest: import("@lsports/contracts").SnapshotRequestInspection | undefined;
   const outrightInspections: NonNullable<ReturnType<NonNullable<ProviderClients["outrightResponseInspections"]>>> = {};
   return {
     snapshotAudit: () => audit,
+    outrightTimestampRejections: () => structuredClone(rejectedTimestamps),
     outrightMarketRequest: () => marketRequest ? { ...marketRequest } : undefined,
     outrightResponseInspections: () => structuredClone(outrightInspections),
     ...(config.lane === "prematch" ? {
@@ -127,6 +130,7 @@ export function clients(
           return await snapshotRequest("snapshot.outright.markets", async () => {
             const sdk = await (snapshot as ReturnType<SnapshotApiFactory["createSnapshotApiPrematchHttpClient"]>).getOutrightFixtureMarkets(new GetOutrightMarketRequestDto(ids.length ? { fixtures: ids } : {}));
             const result = decodeOutrightSnapshot(sdk, snapshotResponsePayload(), "markets");
+            rejectedTimestamps = result.flatMap(e => (e.settlementInspection?.rejected || []).map(r => r.inspection));
             outrightInspections.markets = snapshotResponseInspection();
             return result;
           });
@@ -291,8 +295,13 @@ function decodeOutrightSnapshot(sdk: unknown, payload: unknown, kind: "fixtures"
       const competition = TransformerUtil.transform({ Competition: body }, OutrightFixtureMarketUpdate).competition!;
       for (const [index, row] of (competition.events || []).entries()) {
         if (row.markets?.some(m => m.bets?.some(b => typeof b.id !== "string" || !b.id))) invalid();
-        events.push({ fixtureId: row.fixtureId, outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type }, markets: row.markets, marketRecovery: true,
-          settlementInspection: (() => { try { return inspectSettlements(body.Events[index].Markets, row.markets || [], "snapshot"); } catch (error) { if (error instanceof OperationError) throw error; return invalid(); } })() });
+        let inspection: ReturnType<typeof inspectSettlements>;
+        try { inspection = inspectSettlements(body.Events[index].Markets, row.markets || [], "snapshot", {competitionId:competition.id!,fixtureId:row.fixtureId}); }
+        catch (error) { if (error instanceof OperationError) throw error; return invalid(); }
+        const blocked = new Set(inspection.rejected.map(r => `${r.marketId}:${r.selectionId}`));
+        events.push({ fixtureId: row.fixtureId, outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type },
+          markets: (row.markets || []).map(m => ({...m,bets:(m.bets || []).filter(b => !blocked.has(`${m.id}:${b.id}`))})),
+          marketRecovery: true, settlementInspection: inspection });
       }
     }
   }

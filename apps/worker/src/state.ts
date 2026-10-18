@@ -22,6 +22,7 @@ export interface TradeEvent {
   markets?: Market[];
   marketMessageType?: 41 | 42;
   marketRecovery?: boolean;
+  localReplay?: boolean;
   settlementInspection?: ReturnType<typeof import("./settlement-evidence.js").inspectSettlements>;
 }
 interface Versioned<T> {
@@ -39,6 +40,8 @@ export interface Row {
   marketAt: Map<string, number>;
   betAt: Map<string, number>;
   freshBets?: Set<string>;
+  deferredTimestampBets?: Map<string, {marketId:number;selectionId:string;bet:NonNullable<Market["bets"]>[number];inspection:import("@lsports/contracts").TimestampInspection;receivedAt:string}>;
+  timestampRecovery?: Map<string, import("@lsports/contracts").TimestampRecovery>;
   settlementAudit?: Map<string, import("@lsports/contracts").SettlementTrace>;
   settlementMarkets?: Map<string, import("@lsports/contracts").SettlementMarketEvidence>;
   // Session evidence only: a checkpoint must never restore quote confirmation.
@@ -159,7 +162,7 @@ export class TradeState {
             receipt.snapshotMarketUpdates = (receipt.snapshotMarketUpdates || 0) + (event.markets?.length || 0);
             receipt.lastMarketSnapshotAt = new Date(at).toISOString();
           }
-          if (event.marketMessageType) {
+          if (event.marketMessageType && !event.localReplay) {
           const type = String(event.marketMessageType);
           receipt.messagesByType[type] = (receipt.messagesByType[type] || 0) + 1;
           receipt.marketUpdates += event.markets?.length || 0;
@@ -196,6 +199,10 @@ export class TradeState {
         evidence[settlementSource] = {...counts, receivedAt: new Date(at).toISOString()};
         row.settlementMarkets.set(String(counts.marketId), evidence);
       }
+      for(const rejection of event.settlementInspection?.rejected || []) {
+        (row.deferredTimestampBets ||= new Map()).set(`${rejection.marketId}:${rejection.selectionId}`, {...rejection,receivedAt:new Date(at).toISOString()});
+        row.freshBets?.delete(`${rejection.marketId}:${rejection.selectionId}`);
+      }
       const settlementFields = new Map((event.settlementInspection?.fields || []).map(f => [`${f.marketId}:${f.selectionId}`, f]));
       for (const market of event.markets || []) {
         if (market.id === undefined) {
@@ -210,9 +217,21 @@ export class TradeState {
         const bets = new Map((old?.bets || []).map((b) => [b.id, b]));
         for (const bet of market.bets || []) {
           const betKey = `${key}:${bet.id}`;
+          if(event.settlementInspection?.rejected.some(r=>`${r.marketId}:${r.selectionId}`===betKey))continue;
           const t = timestamp(bet.lastUpdate, at);
           const previousAt = row.betAt.get(betKey) || 0;
           const field = settlementFields.get(betKey);
+          const recovery = row.timestampRecovery?.get(betKey);
+          const recovering = recovery?.status === "awaiting_fresh_amqp";
+          const replaying = recovery?.status === "awaiting_settlement_replay";
+          const validatesReplay = replaying && event.marketMessageType === 42 && field?.timestamp?.timezone === "explicit" &&
+            field.timestamp.orderingSafe && field.code === recovery.replayCode && t===previousAt && at===Date.parse(recovery.replayReceivedAt || '');
+          if(replaying && !validatesReplay)continue;
+          // Only a new, explicitly zoned live quote can validate a quarantined version.
+          const validatesRecovery = recovering && event.marketMessageType === 41 && field?.timestamp?.timezone === "explicit" &&
+            field.timestamp.orderingSafe && Number.isFinite(Number(bet.price)) && Number(bet.price)>1 &&
+            t>previousAt && t<=at+300000 && at>=Date.parse(recovery.preparedAt);
+          if(recovering && !validatesRecovery) continue;
           if (settlementSource && field) {
             const observation: import("@lsports/contracts").SettlementObservation = {
               source: settlementSource, receivedAt: new Date(at).toISOString(), versionAt: new Date(t).toISOString(),
@@ -233,6 +252,9 @@ export class TradeState {
             });
           }
           if (t >= previousAt) {
+            row.deferredTimestampBets?.delete(betKey);
+            if(validatesReplay) {recovery.status="settlement_replayed";recovery.validatedAt=new Date(at).toISOString();}
+            if(validatesRecovery) {recovery.status="validated_amqp";recovery.validatedAt=new Date(at).toISOString();}
             bets.set(bet.id, {
               ...bets.get(bet.id),
               ...defined(bet),
@@ -267,8 +289,13 @@ export class TradeState {
     });
   }
   feed(now = Date.now()): EventFeed {
+    const ticketVersionRecoveries: NonNullable<EventFeed["ticketVersionRecoveries"]> = [];
     const ticketOutcomes: NonNullable<EventFeed["ticketOutcomes"]> = [];
     for (const lane of ["prematch", "inplay"] as const) {
+      for (const [key,row] of this.rows[lane]) for(const [betKey,recovery] of row.timestampRecovery || []) {
+        const marketId=betKey.slice(0,betKey.indexOf(':'));
+        ticketVersionRecoveries.push({auditId:recovery.auditId,eventId:`${lane}:${key}`,marketId:`${lane}:${key}:${marketId}`,selectionId:`${lane}:${key}:${betKey}`,previousVersion:recovery.previousVersion,baselineVersion:recovery.baselineVersion});
+      }
       for (const [key, row] of this.rows[lane]) for (const market of row.markets.values()) {
         for (const bet of market.bets || []) {
           const at = row.betAt.get(`${market.id}:${bet.id}`);
@@ -296,6 +323,7 @@ export class TradeState {
           messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0,
           ...structuredClone(row.marketReceipt),
           markets: [...row.markets.values()].map(m => ({
+            timestampRejections: [...(row.deferredTimestampBets?.values() || [])].filter(r=>r.marketId===m.id).map(r=>r.inspection),
             settlementEvidence: row.settlementMarkets?.get(String(m.id)),
             id: m.id ?? null, name: m.name ?? null, status: m.status ?? null, statusLabel: marketStatusLabel(m.status),
             selections: (m.bets || []).map(b => {
@@ -307,6 +335,7 @@ export class TradeState {
                 status: b.betStatusId ?? b.status ?? null, providerStatus: b.status ?? null, betStatusId: b.betStatusId ?? null,
                 settlement: b.settlement ?? null, resultKnown: known,
                 settlementTrace: row.settlementAudit?.get(`${m.id}:${b.id}`),
+                timestampRecovery: row.timestampRecovery?.get(`${m.id}:${b.id}`),
                 quoteRecovery: {
                   awaitingFreshQuote: !!row.restored && !row.freshBets?.has(`${m.id}:${b.id}`),
                   snapshotSeen: !!row.snapshotBets?.has(`${m.id}:${b.id}`),
@@ -353,6 +382,8 @@ export class TradeState {
               ...((b.betStatusId ?? b.status) !== 1 ? ["selection_not_open"] : []),
               ...(b.settlement !== undefined && b.settlement !== 0 ? ["selection_settled"] : []),
               ...(!(Number(b.price) > 1 && Number.isFinite(Number(b.price))) ? ["invalid_price"] : []),
+              ...(row.deferredTimestampBets?.has(`${m.id}:${b.id}`) ? ["ambiguous_snapshot_timestamp"] : []),
+              ...(row.timestampRecovery?.get(`${m.id}:${b.id}`)?.status === "awaiting_fresh_amqp" ? ["awaiting_timestamp_recovery"] : []),
               ...(row.restored && !row.freshBets?.has(`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
             ];
             return ({
@@ -494,6 +525,7 @@ export class TradeState {
       connections: structuredClone(this.connections),
       events: visible,
       ticketOutcomes,
+      ticketVersionRecoveries,
       coverage,
       outrightDiagnostics,
       horseRacing: {
