@@ -259,3 +259,38 @@ Se a conferência local passa e o POST dá 401, confira se **a API em execução
 mesmo PLATFORM_DATA_DIR** e a versão atual, além do arquivo da credencial nova.
 403 indica conferir escopo e domínio autorizado (`http://localhost:5173` exato).
 Compartilhe apenas essas linhas sanitizadas, nunca o arquivo `.key`.
+
+### Página local completa · Argentina Demo
+
+Na configuração já validada do Mac (`PLATFORM_ENABLED=true`, origem pública da API
+`http://localhost:3001`, domínio autorizado `http://localhost:5173`), execute:
+
+```sh
+npm run build
+npm run dev:embed
+```
+
+Abra **http://localhost:5173/demo/argentina**. Pare antes o `npm run dev` anterior:
+esses dois comandos disputariam as portas e o lock do mesmo worker. O novo comando
+inicia a API, o worker existente e um servidor exclusivo da demonstração, substituindo
+apenas o Vite nessa execução. Não cria clientes, operações, credenciais ou assinaturas.
+Não modifica `.env`, `.runtime`, backups ou bilhetes, nem executa migrações.
+
+A página incorpora o sportsbook completo servido pela API; a criação da sessão
+ocorre no backend local, lendo o arquivo da credencial ativa
+`29338d81-0a16-4377-94f0-1be91386ccbf.key` dentro de
+`PLATFORM_DATA_DIR/credentials` (padrão `.runtime/platform/credentials`). O escopo é
+fixo: cliente `941e6249-4e84-4154-a71e-1b15d9983ca3`, operação Argentina Demo
+`6685c19e-9f27-4769-a2c2-772abd4053d0`, ARS, jogador `demo-001`, canal web.
+O navegador recebe somente uma URL com código temporário de uso único. Nunca recebe
+a chave permanente. O botão “Abrir / renovar sesión” gera uma nova sessão temporária.
+As operações financeiras continuam em simulação; apostas de teste aceitas podem
+ser persistidas no histórico dessa operação pela rotina normal existente.
+
+O servidor de demonstração não faz parte do build/publicação, recusa
+`NODE_ENV=production`, escuta somente loopback e verifica Host e Origin.
+Não habilita CORS, não aceita escopo/credenciais enviados pelo navegador, não segue
+redirecionamentos e não publica respostas brutas de erro. Não abra pelo IP da rede
+ou por `127.0.0.1`: use a origem autorizada exata `http://localhost:5173`.
+Se a credencial for rotacionada novamente, atualize seu ID no script backend local;
+não coloque o segredo no código. A API continua validando revogação e permissões.

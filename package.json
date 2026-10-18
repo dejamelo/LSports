@@ -22,7 +22,8 @@
     "recover:timestamps": "npm run recover:timestamps -w @lsports/worker --",
     "platform:bootstrap": "node --import tsx --env-file-if-exists=.env scripts/bootstrap-platform.ts",
     "validate:platform-ui": "node --import tsx scripts/validate-platform.mts",
-    "diagnose:integration": "node --import tsx --env-file-if-exists=.env scripts/diagnose-integration.ts"
+    "diagnose:integration": "node --import tsx --env-file-if-exists=.env scripts/diagnose-integration.ts",
+    "dev:embed": "concurrently -k -n api,worker,demo \"npm run dev -w @lsports/api\" \"node --import tsx --env-file-if-exists=.env apps/worker/src/index.ts\" \"node --import tsx --env-file-if-exists=.env scripts/local-embed-demo.ts\""
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",
