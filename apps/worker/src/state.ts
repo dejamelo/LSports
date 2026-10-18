@@ -1,3 +1,4 @@
+import { SettlementType } from "trade360-nodejs-sdk";
 import { marketStatusLabel, settlementLabel } from "@lsports/contracts";
 import type {
   ConnectionState,
@@ -230,6 +231,19 @@ export class TradeState {
           restored: row.restored || undefined, participantCount: row.fixture?.value.participants?.length || 0,
           messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0,
           ...structuredClone(row.marketReceipt),
+          markets: [...row.markets.values()].map(m => ({
+            id: m.id ?? null, name: m.name ?? null, status: m.status ?? null, statusLabel: marketStatusLabel(m.status),
+            selections: (m.bets || []).map(b => {
+              const participantName = b.participantId === undefined ? undefined : row.fixture?.value.participants?.find(p => p.id === b.participantId)?.name;
+              const known = typeof b.settlement === "number" && Object.hasOwn(SettlementType, b.settlement);
+              return { id: b.id, name: b.name ?? participantName ?? null,
+                participantId: b.participantId ?? null, participantName: participantName ?? null,
+                nameSource: b.name !== undefined ? "selection" as const : participantName !== undefined ? "participant" as const : "not_reported" as const,
+                status: b.betStatusId ?? b.status ?? null, providerStatus: b.status ?? null, betStatusId: b.betStatusId ?? null,
+                settlement: b.settlement ?? null, resultKnown: known,
+                resultDescription: b.settlement == null ? "Liquidación no informada" : known ? settlementLabel(b.settlement) : "Código de liquidación desconocido" };
+            }),
+          })),
           storedMarkets: row.markets.size,
           storedSelections: [...row.markets.values()].reduce((n, m) => n + (m.bets?.length || 0), 0), selectableSelections: 0 };
         const winner = row.markets.get("160");

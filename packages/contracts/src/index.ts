@@ -32,7 +32,27 @@ export interface EventParticipant {
   type?: number;
   extraData?: { name?: string; value?: string }[];
 }
+export interface OutrightMarketResult {
+  id: number | null;
+  name: string | null;
+  status: number | null;
+  statusLabel: string;
+  selections: {
+    id: string;
+    name: string | null;
+    participantId: number | null;
+    participantName: string | null;
+    nameSource: "selection" | "participant" | "not_reported";
+    status: number | null;
+    providerStatus: number | null;
+    betStatusId: number | null;
+    settlement: number | null;
+    resultKnown: boolean;
+    resultDescription: string;
+  }[];
+}
 export interface OutrightMarketDiagnostic {
+  markets?: OutrightMarketResult[];
   lane: Lane;
   competitionId: number;
   fixtureId: number;

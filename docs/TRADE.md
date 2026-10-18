@@ -918,3 +918,65 @@ conteos, datos ausentes, estados, precios y bloqueos. También comprueba que una
 fila que el predicado anterior aceptaba sigue siendo candidata: las advertencias
 diagnósticas no se usan como nuevos filtros. No se afirma haber inspeccionado los
 14 eventos reales del Mac desde este workspace.
+
+### Resultados individuales de selecciones Outright
+
+`GET /api/diagnostics/outright/:fixtureId` agrega `matches[].markets`, generado
+con los datos ya almacenados en TradeState y preservados por el checkpoint.
+No consulta al proveedor ni cambia disponibilidad, suscripciones o simulación.
+No requiere otra actualización de mercado para exponer una liquidación ya guardada.
+Los feeds/competiciones conservan matches separados, incluso si una fila todavía
+no tiene metadatos de fixture o no aparece en la lista visible del sportsbook.
+
+Cada mercado incluye `id` (ID original del proveedor), `name`, `status`,
+`statusLabel` y `selections`. Cada selección incluye:
+
+- `id`: ID del proveedor como string, sin pérdida de precisión.
+- `name`: nombre original de la selección, o el nombre del participante si existe
+  un vínculo explícito por `ParticipantId`. `nameSource` indica el origen.
+- `participantId` y `participantName`: permiten ubicar el caballo aunque el nombre
+  de la selección sea diferente. No se vinculan participantes por posición ni odds.
+- `status`: estado efectivo (`BetStatusId` si existe, si no `Status`).
+  `providerStatus` conserva `Status` y `betStatusId` conserva ese campo por separado.
+- `settlement`: código original; `null` si no fue informado. No se sustituye por 0.
+- `resultKnown`: si el código es reconocido por `SettlementType` del SDK instalado.
+- `resultDescription`: descripción del mapeamiento existente, o indicación explícita
+  de código desconocido / liquidación no informada. No se infiere a partir de precio,
+  nombre, orden de llegada ni status general del mercado.
+
+Mapeo confirmado por el enum oficial del SDK y los labels existentes:
+
+| Settlement | SDK | Descripción |
+|---|---|---|
+| -1 | Cancelled | Cancelada |
+| 0 | NotSettled | Sin liquidar |
+| 1 | Loser | Perdedora |
+| 2 | Winner | Ganadora |
+| 3 | Refund | Reembolso |
+| 4 | HalfLost | Media pérdida |
+| 5 | HalfWon | Media ganancia |
+
+Los nombres ausentes permanecen `null` si no hay un vínculo explícito utilizable.
+Los códigos desconocidos se conservan y no se interpretan. `status: 3` no sustituye
+el código de settlement: status de mercado/selección y resultado tienen dominios
+separados.
+
+Para el caso del fixture 20540195, mercado 160, el histograma `{"1":9,"2":1}`
+identifica nueve perdedoras y una ganadora, pero no revela sus identidades. Tras
+actualizar y reiniciar conservando `.runtime`, lea solo la API local:
+
+```bash
+curl -sS http://localhost:3001/api/diagnostics/outright/20540195
+```
+
+En cada match, localice `markets[].id: 160`. La selección con `settlement: 2`
+contiene el nombre/ID de la ganadora. Para Vegas Vickie, busque tanto `name` como
+`participantName` y lea su `settlement` / `resultDescription`. Estos son resultados
+almacenados del proveedor; no una adjudicación de dinero ni apuesta real.
+
+La prueba HTTP usa una muestra **sintética** con nueve códigos 1 y un código 2,
+checkpoint/restauración y dos feeds separados. El resultado asignado a Vegas Vickie
+en esa prueba es deliberadamente sintético y **no representa el resultado real**
+del fixture. Sin acceso al checkpoint del Mac, no se declara aquí el nombre de la
+ganadora real ni el resultado real de Vegas Vickie. No se hicieron nuevas consultas
+al proveedor para esta validación.
