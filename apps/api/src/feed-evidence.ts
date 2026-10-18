@@ -42,6 +42,8 @@ export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
         deferred: diagnostic.deferred === true,
         retryAt: iso(diagnostic.retryAt),
         retryAfterMs: diagnostic.retryAfterMs,
+        responseLimitBytes:diagnostic.responseLimitBytes,timeoutMs:diagnostic.timeoutMs,
+        memoryBudgetBytes:diagnostic.memoryBudgetBytes,memoryHeadroomBytes:diagnostic.memoryHeadroomBytes,
         rateLimitSource: diagnostic.rateLimitSource,
         requesterPid: diagnostic.requesterPid,
         coordinator: diagnostic.coordinator ? {
@@ -51,6 +53,8 @@ export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
           outcome: ["reserved","success","rate_limited","failed"].includes(diagnostic.coordinator.outcome)?diagnostic.coordinator.outcome:"unknown",
           failure:diagnostic.coordinator.failure ? {
             category: safeLabel(diagnostic.coordinator.failure.category),reason:safeLabel(diagnostic.coordinator.failure.reason),
+            responseLimitBytes:diagnostic.coordinator.failure.responseLimitBytes,timeoutMs:diagnostic.coordinator.failure.timeoutMs,
+            memoryBudgetBytes:diagnostic.coordinator.failure.memoryBudgetBytes,memoryHeadroomBytes:diagnostic.coordinator.failure.memoryHeadroomBytes,
             httpStatus:diagnostic.coordinator.failure.httpStatus,errorType:safeLabel(diagnostic.coordinator.failure.errorType),
             clientCode:safeCode(diagnostic.coordinator.failure.clientCode),networkCode:safeCode(diagnostic.coordinator.failure.networkCode),stage:safeLabel(diagnostic.coordinator.failure.stage),
           }:undefined,

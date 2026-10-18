@@ -388,18 +388,17 @@ test("PreMatch oversized snapshot preserves client error and response limit thro
       JSON.stringify({
         Header: { HttpStatusCode: 200 },
         Body: [],
-        padding: pkg.password.repeat(100),
+        padding: pkg.password.repeat(80000),
       }),
     );
   });
-  const previous = sdkAxios.defaults.maxContentLength;
+  const previous = process.env.LSPORTS_SNAPSHOT_MAX_RESPONSE_MB;
   try {
-    sdkAxios.defaults.maxContentLength = 256;
+    process.env.LSPORTS_SNAPSHOT_MAX_RESPONSE_MB = "1";
     const api = clients(pkg, {
       snapshotUrl: server.url,
       customersUrl: server.url,
     });
-    sdkAxios.defaults.maxContentLength = previous;
     await assert.rejects(
       () => api.snapshot(),
       (error) => {
@@ -409,14 +408,14 @@ test("PreMatch oversized snapshot preserves client error and response limit thro
         assert.equal(d.category, "response_limit");
         assert.equal(d.reason, "response_size_limit");
         assert.equal(d.clientCode, "ERR_BAD_RESPONSE");
-        assert.equal(d.responseLimitBytes, 256);
+        assert.equal(d.responseLimitBytes, 1024*1024);
         assert(typeof d.elapsedMs === "number");
         assert(!JSON.stringify(d).includes(pkg.password));
         return true;
       },
     );
   } finally {
-    sdkAxios.defaults.maxContentLength = previous;
+    if(previous===undefined)delete process.env.LSPORTS_SNAPSHOT_MAX_RESPONSE_MB;else process.env.LSPORTS_SNAPSHOT_MAX_RESPONSE_MB=previous;
     await server.close();
   }
 });

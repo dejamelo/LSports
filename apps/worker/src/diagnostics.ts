@@ -1,3 +1,5 @@
+import {snapshotCapacity} from "./snapshot-capacity.js";
+import {IdSafeJsonParser} from "trade360-nodejs-sdk";
 import { normalizeSdkTimestamps,hasInvalidProviderTimestamp } from './timestamp-contract.js';
 import { marketRequestBody } from "./http-compat.js";
 import { inspectResponse } from "./response-inspection.js";
@@ -27,6 +29,7 @@ type Observation = {
   clientCode?: string;
   timeoutMs?: number;
   responseLimitBytes?: number;
+  receivedBytes?: number;
   httpStatus?: number;
   providerStatus?: number;
   envelopeError?: boolean;
@@ -43,7 +46,7 @@ function observe(
   observation: Observation,
   response: { status: number; data: unknown; headers?: Record<string, unknown> },
 ) {
-  observation.rawResponse = response.data;
+  observation.receivedBytes = typeof response.data === "string" ? Buffer.byteLength(response.data) : undefined;
   observation.httpStatus = status(response.status);
   const retry = response.headers?.['retry-after'];
   if (typeof retry === 'string' || typeof retry === 'number') {
@@ -54,12 +57,13 @@ function observe(
   let data = response.data;
   if (typeof data === "string") {
     try {
-      data = JSON.parse(data);
+      data = IdSafeJsonParser.parse(data);
     } catch {
       observation.reason = typeof response.data === "string" && !response.data.trim() ? "empty_http_body" : "non_json_response";
       data = undefined;
     }
   }
+  observation.rawResponse = data;
   if (typeof data === "string" && data.trim())
     observation.reason = "non_json_response";
   observation.responseInspection = inspectResponse(data, response.headers?.["content-type"]);
@@ -120,6 +124,13 @@ function observe(
 }
 axios.defaults.adapter = async (config) => {
   const observation = observations.getStore();
+  if(observation?.operation==="snapshot.events"){
+    let capacity:ReturnType<typeof snapshotCapacity>;
+    try{capacity=snapshotCapacity();}catch{throw configError("configuration",["LSPORTS_SNAPSHOT_MAX_RESPONSE_MB"],"Límite snapshot inválido: debe ser un entero entre 1 y 256 MiB.");}
+    observation.responseLimitBytes=capacity.limitBytes;
+    if(!capacity.allowed)throw new OperationError({operation:observation.operation,protocol:"local",category:"response_limit",reason:"memory_budget_exceeded",stage:"request",responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,message:"Snapshot aplazado sin HTTP: espacio insuficiente en heap para el presupuesto de conversión. Revisá capacidad del proceso; no se modifica la proyección."});
+    config.maxContentLength=capacity.limitBytes;
+  }
   if (observation) {
     if (typeof config.timeout === "number" && config.timeout > 0)
       observation.timeoutMs = config.timeout;
@@ -140,14 +151,13 @@ axios.defaults.adapter = async (config) => {
         throw new Error("Supplier error envelope");
     }
     if(observation?.operation==='snapshot.events'){
-      const raw=typeof response.data==='string'?JSON.parse(response.data):response.data;
+      const raw=observation.rawResponse;
       if(hasInvalidProviderTimestamp(raw))throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_timestamp',message:'LastUpdate inválido en snapshot; se conserva el estado anterior.'});
     }
-    // Preserve original response evidence above; normalize before SDK date conversion.
-    if (observation?.operation?.startsWith('snapshot.') && typeof response.data === 'string') {
-      response.data = response.data.replace(/("(?:LastUpdate|CreationDate|StartDate|StartTime|EndDate|NextFixtureStartTime|ServerTimestamp|lastUpdate|BirthDate)"\s*:\s*)("[^"\\]*")/g, (_match:string,prefix:string,quoted:string)=>prefix+JSON.stringify(normalizeSdkTimestamps({LastUpdate:JSON.parse(quoted)}).LastUpdate));
-    }
-    if (observation?.operation?.startsWith('snapshot.') && response.data && typeof response.data === 'object')response.data=normalizeSdkTimestamps(response.data);
+    // SDK AxiosService accepts already-parsed objects. Parse IDs once above and
+    // retain original evidence separately from the normalized copy used by the SDK.
+    if(observation?.operation?.startsWith('snapshot.') && observation.rawResponse && typeof observation.rawResponse==='object')
+      response.data=normalizeSdkTimestamps(observation.rawResponse);
     return response;
   } catch (error) {
     if (observation && axios.isAxiosError(error)) {
@@ -428,6 +438,10 @@ export async function operation<T>(
         ...(observation.providerStatus && diagnostic.providerStatus === undefined ? { providerStatus: observation.providerStatus } : {}),
         ...(name.startsWith("snapshot.") && observation.responseInspection ? { responseInspection: observation.responseInspection } : {}),
       });
+    } finally {
+      // Do not retain a full snapshot through an HTTP/AsyncLocalStorage resource.
+      // All evidence, precision attachment and SDK conversion happen inside action().
+      observation.rawResponse=undefined;
     }
   });
 }
@@ -454,6 +468,7 @@ export function responseEvidence() {
     bodyShape: o?.bodyShape || ("missing" as const),
     providerRows: o?.providerRows,
     fixturesCount: o?.fixturesCount,
+    transport:o ? {responseLimitBytes:o.responseLimitBytes,receivedBytes:o.receivedBytes,timeoutMs:o.timeoutMs} : undefined,
   };
 }
 

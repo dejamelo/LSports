@@ -41,6 +41,7 @@ export const silentLogger: ILogger = {
   error() {},
 };
 axios.defaults.timeout = 20000;
+// Ordinary requests retain the smaller cap; tagged snapshots are bounded per request.
 axios.defaults.maxContentLength = 50 * 1024 * 1024;
 axios.defaults.maxRedirects = 0;
 export interface ProviderClients {
@@ -211,6 +212,7 @@ export function clients(
         let rawSnapshot=snapshotResponsePayload();
         if(typeof rawSnapshot==='string')rawSnapshot=IdSafeJsonParser.parse(rawSnapshot);
         audit = {
+          transport:evidence.transport,
           content:snapshotEvidence(rawSnapshot,rows),
           bodyShape: evidence.bodyShape,
           providerRows: evidence.providerRows,

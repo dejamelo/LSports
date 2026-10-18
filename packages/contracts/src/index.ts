@@ -251,6 +251,7 @@ export interface IntegrationDiagnostic {
   reason?:
     | "timeout"
     | "response_size_limit"
+    | "memory_budget_exceeded"
     | "request_size_limit"
     | "redirect_limit"
     | "connection_reset"
@@ -300,9 +301,11 @@ export interface IntegrationDiagnostic {
   deferred?: boolean;
   rateLimitSource?: "supplier_http" | "local_in_flight" | "local_host_cooldown" | "local_operation_cooldown";
   requesterPid?: number;
-  coordinator?: { packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage"> };
+  coordinator?: { packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage" | "responseLimitBytes" | "timeoutMs" | "memoryBudgetBytes" | "memoryHeadroomBytes"> };
   timeoutMs?: number;
   responseLimitBytes?: number;
+  memoryBudgetBytes?: number;
+  memoryHeadroomBytes?: number;
   httpStatus?: number;
   providerStatus?: number;
   amqpCode?: number;
@@ -362,6 +365,7 @@ export interface ConnectionState {
   outrightRecovery?: { operations?:Partial<Record<"fixtures"|"marketEvents",{lastAttemptAt?:string;lastSuccessAt?:string;lastErrorAt?:string}>>; fixtures?: number; marketEvents?: number; status: "ok" | "partial" | "rate_limited" | "unsupported"; diagnostics?: IntegrationDiagnostic[]; timestampRejections?: TimestampInspection[]; checkedAt: string; responseInspections?: { fixtures?: HttpResponseInspection; markets?: HttpResponseInspection }; marketRequest?: SnapshotRequestInspection };
 }
 export interface SnapshotAudit {
+  transport?: {responseLimitBytes?:number;receivedBytes?:number;timeoutMs?:number};
   content?: {rawStructureRecognized:boolean;providerFixtureStatusCounts:Record<string,number>|null;sdkFixtureStatusCounts:Record<string,number>;providerMarketStatusCounts:Record<string,number>|null;sdkMarketStatusCounts:Record<string,number>;providerMarkets:number|null;sdkMarkets:number;providerPricedSelections:number|null;sdkPricedSelections:number;examples:{fixtureId:number;status:number|null}[]};
   bodyShape: "array" | "single_event" | "events_wrapper" | "other" | "missing";
   providerRows?: number;

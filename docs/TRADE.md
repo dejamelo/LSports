@@ -1511,3 +1511,32 @@ npm run --silent diagnose:feed:local -- --connections > diagnostico-tipo40.json
 Verificar `feed.decode status=ok` com `messageType=40` nos logs, `lanes[].projection.messagesByType["40"]`, ausência do bloqueio anterior, progresso do handoff e resultado do snapshot regular. Um 40 processado não substitui o snapshot inicial obrigatório nem confirma que todas as cotações estão disponíveis.
 
 Se ainda falhar, a coleta mínima é esse diagnóstico sanitizado. Se ele indicar formato divergente, obter em TRADE Logs **uma única mensagem tipo 40 correspondente**, reduzida a: Header.Type e timestamp; Body.Competition.Id/Type; Competitions[].Id/Type; Events[].FixtureId; Markets[].Id/Status; Bets[].Id/Status/Price/LastUpdate/Settlement quando existentes. Preservar arrays, tipos JSON e campos ausentes/null; nomes podem ser anonimizados de forma consistente. Não incluir credenciais, Authorization, cookies, URLs AMQP, headers de transporte, GUID ou outros logs/payloads completos. Não é necessário consumir manualmente ou confirmar a mensagem na fila.
+
+### Limite HTTP do snapshot regular e memória
+
+A captura `diagnostico-tipo40-2.json` demonstra `response_limit / response_size_limit`, HTTP 200, na reserva PreMatch iniciada em **21:10:30.461Z** e encerrada em **21:10:36.514Z**. O PID solicitante e o da reserva são 11315; o adiamento seguinte respeita a reserva dessa operação. A causa comprovada é **nosso `axios.defaults.maxContentLength = 50 * 1024 * 1024`**, configurado antes de o SDK criar suas instâncias Axios. Não é rejeição do fornecedor nem ausência de eventos. Não se pode obter o tamanho total da resposta abortada por esse diagnóstico.
+
+O snapshot regular usa agora **128 MiB**, configurável por `LSPORTS_SNAPSHOT_MAX_RESPONSE_MB` (inteiro de 1 a 256). Axios continua aplicando um teto finito aos bytes recebidos/descomprimidos; não foi usado `-1`/ilimitado. Outright e outras consultas conservam o teto de 50 MiB. O timeout permanece em **20.000 ms**. Limites, reservas/cooldown, locks, assinaturas, persistência antes do ACK e a exigência de snapshot inicial válido não foram relaxados.
+
+Antes do HTTP regular, exige-se margem estimada de **8 × teto + 64 MiB**, limitada pelo menor valor entre espaço restante no heap V8 e memória disponível ao processo (`process.availableMemory`). Com 128 MiB, essa margem é de **1.088 MiB**. A política retorna `memory_budget_exceeded` sem HTTP se faltar essa margem. É uma estimativa preventiva para buffer, JSON e conversão SDK, não uma garantia de RSS máximo para qualquer estrutura JSON. Uma máquina/container precisa acomodar também o estado, a aplicação e a persistência já residentes; não aumentar o teto indefinidamente. Se o volume real exceder 256 MiB ou não houver memória, será necessária outra estratégia validada com a LSports.
+
+O JSON é interpretado uma vez com `IdSafeJsonParser` oficial, preservando IDs grandes. A evidência original permanece separada da cópia com timestamps normalizados em UTC; o AxiosService oficial aceita objetos já interpretados, evitando a reinterpretação pelo SDK. O original é liberado ao terminar a operação, inclusive em erro, para não ser retido por recursos HTTP/AsyncLocalStorage. A auditoria de sucesso inclui `snapshot.audit.transport.{receivedBytes,responseLimitBytes,timeoutMs}` sem corpo ou credenciais.
+
+`GetEventRequestDto` oficial contém filtros `timestamp`, `fromDate`, `toDate`, `sports`, `locations`, `leagues` e `fixtures`; não apresenta contrato de paginação/cursor. A API do SDK retorna o snapshot completo. Não foram inventados paginação, streaming remoto ou filtros que omitiriam eventos. O teste HTTP local transmite uma resposta JSON válida de mais de **51 MiB** em chunks: com teto 50 reproduz o erro; com 128 conclui `api.snapshot()`, normaliza datas, mantém IDs e audita a aceitação. O preenchimento volumoso é sintético, isolado, e valida o limite em bytes; não representa a complexidade/memória da projeção real do fornecedor. Isso não confirma a recuperação real no Mac nem a reentrega do tipo 40, ainda pendente na captura.
+
+Atualizar com a aplicação parada por Ctrl+C:
+
+```bash
+cd ~/LSports
+git pull --ff-only origin feat/sportsbook-demo
+npm run build
+npm run dev:embed
+```
+
+O padrão 128 vale mesmo sem adicionar a variável ao `.env` existente; este não foi modificado. Não apagar locks/journal nem repetir migrações. Após o retryAt já reservado, coletar em outro terminal:
+
+```bash
+npm run --silent diagnose:feed:local -- --connections > diagnostico-snapshot-volume.json
+```
+
+Confirmar `snapshot.lastSuccessAt`, contagem e `snapshot.audit.transport`, conclusão do handoff e ausência de novo erro. Se o limite ainda for excedido, preservar `responseLimitBytes` e a categoria; HTTP 200 sozinho não é sucesso. Se houver erro de margem de memória, verificar capacidade disponível antes de ajustar o teto. Não executar `diagnose:trade` para antecipar a consulta.

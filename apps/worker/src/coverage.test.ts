@@ -65,11 +65,14 @@ test("real SDK snapshot array preserves fixtures through state, atomic projectio
     );
     const decoded = await provider.snapshot();
     assert.equal(decoded.length, 2);
-    const {content,...audit}=provider.snapshotAudit!()!;
+    const {content,transport,...audit}=provider.snapshotAudit!()!;
     assert.deepEqual(content?.providerFixtureStatusCounts,{"1":1,"3":1});
     assert.deepEqual(content?.sdkFixtureStatusCounts,content?.providerFixtureStatusCounts);
     assert.equal(content?.providerMarkets,content?.sdkMarkets);
     assert.equal(content?.providerPricedSelections,content?.sdkPricedSelections);
+    assert.equal(transport?.responseLimitBytes,128*1024*1024);
+    assert(transport?.receivedBytes!>0);
+    assert.equal(transport?.timeoutMs,20000);
     assert.deepEqual(audit, {
       bodyShape: "array",
       providerRows: 2,
