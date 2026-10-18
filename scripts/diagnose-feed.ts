@@ -11,10 +11,11 @@ try {
     throw new Error("INVALID_FEED");
   const { workerCheckpoint: _privateCheckpoint, ...feed } = saved;
   const report = feedEvidence(feed);
+  const {events:_events,exclusions:_exclusions,ui:_ui,...connections}=report;
   console.log(
     process.argv.includes("--support")
       ? supportFeedMessage(report)
-      : JSON.stringify(report, null, 2),
+      : JSON.stringify(process.argv.includes("--connections") ? connections : report, null, 2),
   );
 } catch {
   console.error(

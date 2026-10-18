@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { root } from "@lsports/feed-store";
 import type { EventFeed } from "@lsports/contracts";
 import { TradeState } from "../../worker/src/state.js";
-import { feedEvidence } from "./feed-evidence.js";
+import { feedEvidence, safeFeedDiagnostic } from "./feed-evidence.js";
 import { serverConfig } from "./server-config.js";
 test("evidence explains 19 API rows / 12 football rows without date filtering, partial Outright and settled prices; does not expose raw exceptions", () => {
   const now = Date.parse("2026-10-18T18:00:00Z"),
@@ -155,6 +155,7 @@ test("local feed evidence command reads once without provider calls, checkpoint/
     events: [],
     updatedAt: new Date().toISOString(),
     workerCheckpoint: { private: "do-not-print-checkpoint" },
+    connections:{prematch:{phase:"error",diagnostic:{operation:"feed.decode",protocol:"amqp",category:"unsupported_message",reason:"unsupported_message_type",message:"do-not-print-private-message",messageMetadata:{messageType:999,messageTypeName:"unknown",wireBytes:100,contentType:"application/json",contentEncoding:"unspecified",signature:"json_object",amqpHeadersPresent:[],redelivered:true}}}},
   });
   await writeFile(path, body);
   await writeFile(ticket, "preserve-ticket");
@@ -169,6 +170,13 @@ test("local feed evidence command reads once without provider calls, checkpoint/
     assert.equal(result.writes, 0);
     assert.equal(result.supplierRequests, 0);
     assert(!output.stdout.includes("do-not-print-checkpoint"));
+    const compact = await promisify(execFile)(process.execPath,["--import","tsx","scripts/diagnose-feed.ts","--connections"],{cwd:root,env:{...process.env,LSPORTS_STATE_FILE:path}});
+    const compactReport=JSON.parse(compact.stdout);
+    assert(Array.isArray(compactReport.lanes));
+    assert.equal(compactReport.events,undefined);
+    assert.equal(compactReport.lanes[0].diagnostic.messageMetadata.messageType,999);
+    assert(!compact.stdout.includes("do-not-print"));
+    assert.equal(compactReport.supplierRequests,0);
     assert.equal(await readFile(path, "utf8"), body);
     assert.equal(await readFile(ticket, "utf8"), "preserve-ticket");
   } finally {
@@ -274,3 +282,20 @@ test("partial Outright recovery does not hide a current open football fixture; r
  assert.equal(lane.recoveryProgress?.processedAtHandoff,40);
  assert(!JSON.stringify(lane).includes("private"));
  });
+
+test("unsupported type evidence retains the real decoder metadata and queue disposition without a payload or GUID", async () => {
+ const {decodeMessage}=await import("../../worker/src/messages.js");
+ let diagnostic:import("@lsports/contracts").IntegrationDiagnostic|undefined;
+ try {decodeMessage(Buffer.from(JSON.stringify({Header:{Type:999,MsgGuid:"private-guid"},Body:{private:"private-payload"}})),{}, {}, true);} catch(error) {diagnostic=(error as import("../../worker/src/diagnostics.js").OperationError).diagnostic;}
+ assert(diagnostic);
+ const before=JSON.stringify(diagnostic);
+ const safe=safeFeedDiagnostic({...diagnostic,retryPolicy:"restart_required",deliveryDisposition:"requeue_requested"})!;
+ assert.equal(safe.messageMetadata?.messageType,999);
+ assert.equal(safe.messageMetadata?.messageTypeName,"unknown");
+ assert.equal(safe.messageMetadata?.redelivered,true);
+ assert.equal(safe.decodeStage,"entity");
+ assert.equal(safe.retryPolicy,"restart_required");
+ assert.equal(safe.deliveryDisposition,"requeue_requested");
+ assert(!JSON.stringify(safe).includes("private"));
+ assert.equal(JSON.stringify(diagnostic),before);
+});

@@ -361,8 +361,8 @@ export async function session(
           if (closed || signal.aborted) throw error;
           state.set(lane,{lastSnapshotErrorAt:new Date().toISOString()});
           const diagnostic = describeFailure(error, "snapshot.events", "http");
-          if (diagnostic.category !== "rate_limited") throw error;
           state.set(lane, { diagnostic, lastSnapshotDiagnostic: diagnostic });
+          if (diagnostic.category !== "rate_limited") throw error;
           nextDue["snapshot.events"] = retryTime(diagnostic);
           console.warn(JSON.stringify({ lane, status: "deferred", ...diagnostic }));
         }

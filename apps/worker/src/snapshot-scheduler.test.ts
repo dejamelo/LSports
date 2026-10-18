@@ -83,3 +83,29 @@ test('separate worker/diagnose processes cannot send simultaneous or duplicate s
     assert.equal((await run()).stdout, 'deferred');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('a failed reservation is recorded; retry 15 seconds later in the same process is deferred with its original failure and unchanged five-minute deadline', async () => {
+ const dir=await mkdtemp(join(tmpdir(),'adl-failed-reservation-'));
+ let now=Date.parse('2026-10-18T20:47:14.225Z'); const started=now; let calls=0;
+ const options={root:join(dir,'feed'),now:()=>now,spacingMs:5000,refreshMs:300000};
+ const first=new SnapshotScheduler('https://stm-snapshot.lsports.eu',4511,options);
+ try {
+  await assert.rejects(()=>first.run('snapshot.events',async()=>{calls++;now+=14000;throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',message:'sanitized failure',networkCode:'ETIMEDOUT'});}),e=>{
+   assert(e instanceof OperationError);assert.equal(e.diagnostic.coordinator?.outcome,'failed');assert.equal(e.diagnostic.coordinator?.failure?.reason,'timeout');return true;
+  });
+  // Another successful operation must not overwrite the failed operation's own evidence.
+  await first.run('snapshot.outright.fixtures',async()=>[]);
+  now=started+15611;
+  await assert.rejects(()=>new SnapshotScheduler('https://stm-snapshot.lsports.eu',4511,options).run('snapshot.events',async()=>{calls++;}),e=>{
+   assert(e instanceof OperationError);const d=e.diagnostic;
+   assert.equal(d.rateLimitSource,'local_operation_cooldown');assert.equal(d.requesterPid,process.pid);
+   assert.equal(d.coordinator?.pid,process.pid);assert.equal(d.coordinator?.operation,'snapshot.events');assert.equal(d.coordinator?.outcome,'failed');
+   assert.equal(d.coordinator?.failure?.reason,'timeout');assert.equal(d.retryAt,'2026-10-18T20:52:14.225Z');
+   assert.equal(d.httpStatus,undefined);return true;
+  });
+  assert.equal(calls,1);
+  now=started+300000;
+  assert.equal(await first.run('snapshot.events',async()=>{calls++;return 'ok';}),'ok');
+  assert.equal(calls,2);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

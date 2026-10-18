@@ -1469,3 +1469,25 @@ npm run diagnose:feed:local > diagnostico-feed-2.json
 ```
 
 Comparar `snapshot.diagnostic`, `snapshot.lastAttemptAt`, `lastSuccessAt`, `recoveryProgress` e o erro atual da conexão. Se ocorrer novamente `worker.start / unknown_exception`, preservar as linhas JSON do worker imediatamente anteriores: o anexo atual não demonstra sua causa e não justifica forçar consultas ou abrir mercados. Nenhuma conexão real ao fornecedor foi executada para esta alteração; os testes de concorrência e HTTP 429 usam processos/servidor locais e armazenamento temporário.
+
+### Mensagem não suportada e reserva sem resultado (captura 20:51:05Z)
+
+Na captura de 2026-10-18T20:51:05.455Z, o PreMatch está bloqueado em `feed.decode / unsupported_message_type`, com o handoff 4/4 concluído. Não é espera do handoff. O decoder inclui o número e nome do tipo (`knownEntityKeys` do SDK oficial) no diagnóstico original, mas o resumo local anterior omitia `messageMetadata`, `decodeStage`, `deliveryDisposition` e `retryPolicy`. Portanto, **o arquivo anexado não identifica o tipo**. A correção expõe esses campos sem GUID, corpo, headers ou credenciais. Não se implementa handler por suposição.
+
+Uma mensagem não reconhecida dispara NACK com requeue, fecha a conexão e coloca o worker em pausa `restart_required`. Isso conserva a mensagem na fila e bloqueia preços, evitando um ciclo de redelivery. Não reiniciar repetidamente para tentar ultrapassar a mensagem. Os tipos 37, 39, 41 e 42 já possuem handlers explícitos; nenhum tipo novo foi aceito nesta alteração.
+
+A reserva `4511:snapshot.events` de 20:47:14.225Z explica exatamente o prazo de 20:52:14.225Z: intervalo local de cinco minutos. A tentativa 15,611 segundos depois não enviou HTTP. Contudo, `outcome=reserved` não prova consulta ainda em andamento ou segundo processo: o código anterior também deixava esse resultado após uma exceção não-429. Essa falha de registro foi corrigida: `failed`, `completedAt` e `failure` sanitizado são persistidos **sem diminuir o prazo**, com `requesterPid` para comparar com o PID da reserva. Cada operação conserva seu próprio último resultado, evitando atribuir o cooldown de uma operação à última consulta de outra. Journals antigos permanecem compatíveis; não se infere retroativamente a falha da reserva do PID 10898.
+
+O erro do snapshot também é preservado quando não é rate limiting, antes de sair da sessão. Falhas novas permitem distinguir HTTP, timeout, validação/SDK e outros códigos seguros, quando disponíveis. Uma reserva deixada por encerramento abrupto continua `reserved`: significa resultado não registrado, não confirmação de concorrência.
+
+Coleta **antes de reiniciar o worker**, para ler o diagnóstico original já persistido:
+
+```bash
+cd ~/LSports
+git pull --ff-only origin feat/sportsbook-demo
+npm run --silent diagnose:feed:local -- --connections > diagnostico-conexoes.json
+```
+
+O comando atualizado funciona com o worker anterior em execução ou pausado; não consulta a LSports, não consome a fila, não abre SQLite, não grava estado nem migra dados. O formato compacto conserva conexões, metadados e snapshots, omitindo as listas extensas de eventos e exclusões. Conferir `lanes[].diagnostic.messageMetadata.messageType` e `messageTypeName`. Sem o diagnóstico original ou as linhas JSON `blocked_message` do worker não há evidência para implementar o handler faltante. Não enviar payloads ou chaves.
+
+**Complemento do suporte, ticket #217525 (Szymon Luka, captura enviada pelo cliente):** o fornecedor confirma atualizações constantes de mercados e mensagens de settlement após o término dos fixtures anteriormente apresentados; os respectivos mercados retornam status 3 porque os eventos terminaram. As mensagens e horários estão em [TRADE Logs](https://platform.lsports.eu/trade360/logs/). Eventos atuais com fornecedores e preços podem ser localizados em [Coverage Hub → Monitoring](https://platform.lsports.eu/coverage-hub/monitoring/inplay); a contratação/ordenação seria por Competition/Fixture em Fixture Ordering. Essa orientação não identifica o tipo que bloqueou o decoder atual nem autoriza novas assinaturas: nenhuma foi criada. Comparar os IDs e horários exatos antes de atribuir eventos atuais ao cenário histórico de mercados já encerrados.

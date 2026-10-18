@@ -299,7 +299,8 @@ export interface IntegrationDiagnostic {
   attempts?: number;
   deferred?: boolean;
   rateLimitSource?: "supplier_http" | "local_in_flight" | "local_host_cooldown" | "local_operation_cooldown";
-  coordinator?: { packageId: number; operation: string; pid: number; at: string; outcome: "reserved" | "success" | "rate_limited" };
+  requesterPid?: number;
+  coordinator?: { packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage"> };
   timeoutMs?: number;
   responseLimitBytes?: number;
   httpStatus?: number;

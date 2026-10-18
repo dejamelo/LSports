@@ -21,6 +21,9 @@ const id = (value: unknown) =>
   typeof value === "string" && /^[a-zA-Z0-9:_-]{1,200}$/.test(value)
     ? value
     : "nonstandard-id";
+const safeLabel = (value?:string) => value && /^[a-z_]{1,60}$/.test(value)?value:undefined;
+const safeCode = (value?:string) => value && /^[A-Z_]{1,60}$/.test(value)?value:undefined;
+const safeName = (value?:string) => value && /^[A-Za-z][A-Za-z0-9]{0,79}$/.test(value)?value:undefined;
 export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
   diagnostic
     ? {
@@ -40,7 +43,29 @@ export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
         retryAt: iso(diagnostic.retryAt),
         retryAfterMs: diagnostic.retryAfterMs,
         rateLimitSource: diagnostic.rateLimitSource,
-        coordinator: diagnostic.coordinator ? {packageId:diagnostic.coordinator.packageId,pid:diagnostic.coordinator.pid,operation:/^[a-z_.]{1,80}$/.test(diagnostic.coordinator.operation)?diagnostic.coordinator.operation:"unknown",at:iso(diagnostic.coordinator.at),outcome:diagnostic.coordinator.outcome} : undefined,
+        requesterPid: diagnostic.requesterPid,
+        coordinator: diagnostic.coordinator ? {
+          packageId:diagnostic.coordinator.packageId,pid:diagnostic.coordinator.pid,
+          operation:/^[a-z_.]{1,80}$/.test(diagnostic.coordinator.operation)?diagnostic.coordinator.operation:"unknown",
+          at:iso(diagnostic.coordinator.at),completedAt:iso(diagnostic.coordinator.completedAt),
+          outcome: ["reserved","success","rate_limited","failed"].includes(diagnostic.coordinator.outcome)?diagnostic.coordinator.outcome:"unknown",
+          failure:diagnostic.coordinator.failure ? {
+            category: safeLabel(diagnostic.coordinator.failure.category),reason:safeLabel(diagnostic.coordinator.failure.reason),
+            httpStatus:diagnostic.coordinator.failure.httpStatus,errorType:safeLabel(diagnostic.coordinator.failure.errorType),
+            clientCode:safeCode(diagnostic.coordinator.failure.clientCode),networkCode:safeCode(diagnostic.coordinator.failure.networkCode),stage:safeLabel(diagnostic.coordinator.failure.stage),
+          }:undefined,
+        } : undefined,
+        decodeStage:diagnostic.decodeStage,
+        retryPolicy:diagnostic.retryPolicy,
+        deliveryDisposition:diagnostic.deliveryDisposition,
+        messageMetadata: diagnostic.messageMetadata ? {
+          messageType:diagnostic.messageMetadata.messageType,
+          messageTypeName:safeName(diagnostic.messageMetadata.messageTypeName),
+          wireBytes:diagnostic.messageMetadata.wireBytes,decodedBytes:diagnostic.messageMetadata.decodedBytes,
+          redelivered:diagnostic.messageMetadata.redelivered,
+          compression:diagnostic.messageMetadata.compression,
+          signature:diagnostic.messageMetadata.signature,
+        }:undefined,
       }
     : null;
 const selectable = (event: SportEvent) =>
