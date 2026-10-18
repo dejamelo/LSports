@@ -173,6 +173,7 @@ export async function session(
   const lane = pkg.lane;
   state.set(lane, {
     phase: "recovering",
+    recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady:false},
     diagnostic: undefined,
     message: "Conectando y recuperando snapshot…",
   });
@@ -208,7 +209,7 @@ export async function session(
   signal.addEventListener("abort", abort, { once: true });
   let processing = Promise.resolve();
   let buffered: ConsumeMessage[] = [];
-  let recovering = true;
+  let bufferingForSnapshot = true;
   let lastReceived = Date.now();
   const seen = new Set<string>();
   const reportedShapes = new Set<string>();
@@ -323,7 +324,7 @@ export async function session(
             return;
           }
           lastReceived = Date.now();
-          if (recovering) buffered.push(msg);
+          if (bufferingForSnapshot) buffered.push(msg);
           else processing = processing.then(() => processMessage(msg));
         },
         { noAck: false },
@@ -333,10 +334,14 @@ export async function session(
       "snapshot.outright.fixtures": api.outrightFixtures ? 0 : Infinity,
       "snapshot.outright.markets": api.outrightMarkets ? 0 : Infinity };
     const retryTime = (d: import("@lsports/contracts").IntegrationDiagnostic) => Math.max(Date.now() + 1000, Date.parse(d.retryAt || "") || Date.now() + (d.retryAfterMs ?? 60000));
+    // A reconnect must establish its own regular snapshot baseline; a previous
+    // session's lastSnapshotAt is not proof that this connection recovered.
+    let regularSnapshotReady = false;
     const recover = async () => {
-      recovering = true;
+      bufferingForSnapshot = true;
       state.set(lane, {
         phase: "recovering",
+        recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady},
         message: "Recuperando snapshot; cuotas bloqueadas.",
       });
       await processing;
@@ -349,6 +354,7 @@ export async function session(
           rows = await api.snapshot();
           if (closed || signal.aborted) throw failure || new Error("Disconnected during recovery");
           state.replace(lane, rows, started, api.snapshotAudit?.());
+          regularSnapshotReady = true;
           state.set(lane, { diagnostic: undefined });
           nextDue["snapshot.events"] = Date.now() + Math.max(300000, config.recoveryMs);
         } catch (error) {
@@ -398,17 +404,24 @@ export async function session(
       outrightRecovery.marketRequest = api.outrightMarketRequest?.();
       state.set(lane, { outrightRecovery });
       if (rows !== undefined) seen.clear();
-      // Messages remain unacknowledged while HTTP recovery runs; replay deltas over snapshot.
-      while (buffered.length && !closed) {
-        const batch = buffered;
-        buffered = [];
+      // Capture a FINITE prefix and hand the same serial chain to live delivery.
+      // Do not wait for a continuously replenished buffer to become empty.
+      // No await between installing the prefix and switching delivery mode:
+      // newer messages append after it, preserving ordering and persist-before-ACK.
+      const batch = buffered;
+      buffered = [];
+      state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,stage:"handoff",queuedAtHandoff:batch.length}});
+      const barrier = processing.then(async () => {
         for (const msg of batch) await processMessage(msg);
-      }
+      });
+      processing = barrier;
+      bufferingForSnapshot = false;
+      await barrier;
       if (closed) throw failure;
-      recovering = false;
       state.set(lane, {
-        phase: "connected",
-        message: rows !== undefined && rows.length
+        phase: regularSnapshotReady ? "connected" : "recovering",
+        recoveryProgress:{...state.connections[lane].recoveryProgress!,stage:regularSnapshotReady?"idle":"waiting_retry",regularSnapshotReady,completedAt:new Date().toISOString(),nextRegularAttemptAt:new Date(nextDue["snapshot.events"]).toISOString()},
+        message: !regularSnapshotReady ? "AMQP activo; snapshot inicial pendiente. Cuotas bloqueadas hasta completar la recuperación." : rows !== undefined && rows.length
           ? "Feed conectado; snapshot recuperado." + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : "")
           : (rows === undefined ? "Feed AMQP conectado; recuperación HTTP pendiente." : "Feed conectado; snapshot regular vacío (0 fixtures).") + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : " Recuperación Outright consultada por separado."),
       });
@@ -416,7 +429,7 @@ export async function session(
       console.log(
         JSON.stringify({
           lane,
-          status: "snapshot_recovered",
+          status: rows === undefined ? "snapshot_deferred" : "snapshot_recovered",
           ...(rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
           snapshotAudit: api.snapshotAudit?.(),
           coverage: state.feed().coverage?.[lane],

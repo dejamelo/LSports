@@ -63,6 +63,13 @@ export function feedEvidence(feed: EventFeed, now = Date.now()) {
       packageId: lane === "prematch" ? 4511 : 4510,
       phase: connection?.phase ?? "unknown",
       diagnostic: safeFeedDiagnostic(connection?.diagnostic),
+      recoveryProgress:connection?.recoveryProgress?{
+        stage:connection.recoveryProgress.stage,
+        startedAt:iso(connection.recoveryProgress.startedAt),completedAt:iso(connection.recoveryProgress.completedAt),
+        queuedAtHandoff:connection.recoveryProgress.queuedAtHandoff,
+        regularSnapshotReady:connection.recoveryProgress.regularSnapshotReady,
+        nextRegularAttemptAt:iso(connection.recoveryProgress.nextRegularAttemptAt),
+      }:null,
       transport: {
         lastMessageAt: iso(connection?.lastMessageAt),
         note: "Any AMQP message, including keepalive; not evidence of a new quote.",

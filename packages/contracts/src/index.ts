@@ -344,6 +344,7 @@ export interface FeedMessageMetadata {
   warnings?: string[];
 }
 export interface ConnectionState {
+  recoveryProgress?:{stage:"snapshot"|"handoff"|"waiting_retry"|"idle";startedAt:string;completedAt?:string;queuedAtHandoff?:number;regularSnapshotReady:boolean;nextRegularAttemptAt?:string};
   diagnostic?: IntegrationDiagnostic;
   phase: "starting" | "recovering" | "connected" | "error" | "stopped";
   message: string;

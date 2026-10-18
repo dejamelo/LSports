@@ -1378,3 +1378,68 @@ esse cenário e demonstram que snapshot e projeção mantêm mercados liquidados
 fechados; um fixture aberto recebido do fornecedor simulado segue publicado.
 
 `outrightRecovery.operations` separa tentativa/sucesso/erro de fixtures e mercados; `checkedAt` é apenas a avaliação local da recuperação, não prova de uma chamada HTTP nova. `deferred:true` indica coordenação local sem nova requisição; HTTP 429 indica resposta do fornecedor. `projectionUsableByApi` aplica apenas a janela de publicação existente de 20 segundos, não habilita odds.
+
+## PreMatch preso em recovering com mercados novos — captura 18/10/2026 20:13:24.587Z
+
+A captura fornecida pelo operador contém 138 eventos, 234 mercados abertos em
+18 eventos e nenhum candidato selecionável. No fixture **20572565**, status 1,
+há 21 mercados abertos e 80 preços válidos; as três seleções abertas do 1X2 têm
+apenas `feed_disconnected` como bloqueio. Em 16 dos 18 eventos com mercados
+abertos esse é o único motivo registrado; nos demais há também seleções sem
+preço válido/estado aberto, que devem continuar bloqueadas individualmente.
+
+PreMatch está em `recovering`, mas dados e mercados foram decodificados às
+20:13:24.478Z. A tentativa regular permaneceu em 20:08:23.592Z, com
+`retryAt=20:09:44.560Z`. O diagnóstico é `rate_limited,deferred:true`, sem status
+HTTP: representa adiamento do coordenador local, não comprova um HTTP 429 novo.
+O snapshot bem-sucedido anterior, às 20:04:45.191Z, continha dois fixtures
+liquidados. Dados novos chegaram depois por AMQP, portanto a ausência de
+candidatos nesta captura não é explicada por ausência de eventos abertos.
+
+**Causa reproduzida:** a recuperação aguardava `buffered.length === 0`, mas
+novas entregas eram inseridas no mesmo buffer enquanto ele era drenado. Sob
+tráfego contínuo, esse laço podia nunca acabar. O worker persistia/aplicava
+mensagens, porém não executava a transição para `connected` nem retornava ao
+laço do agendador. O `lastAttemptAt` congelado é consistente com a tentativa não
+executada; não era somente um horário esquecido na instrumentação.
+
+**Correção:** capturar um prefixo finito do buffer, instalá-lo na mesma cadeia
+serial e transferir as entregas novas para depois desse prefixo, sem `await`
+entre a instalação e a troca. A recuperação aguarda apenas essa barreira finita.
+Assim preserva ordem, persistência antes do ACK e mensagens sem ACK em caso de
+falha, sem exigir que a fila inteira fique vazia. O agendador volta a executar,
+respeitando `retryAt`, cooldown e as regras existentes do fornecedor.
+
+A sessão precisa completar seu próprio snapshot regular inicial antes de
+publicar `phase=connected`; o horário de snapshot de uma conexão anterior não
+conta como confirmação. Enquanto isso, `phase=recovering` mantém as quotas
+bloqueadas, mas a cadeia serial continua processando entregas e o agendador
+continua tentando nos horários autorizados. Depois de uma base válida, uma
+recuperação Outright parcial continua identificada separadamente. Nenhuma
+seleção recebe `available=true` diretamente; status, preço, versão, settlement e
+confirmação de cotações restauradas seguem os critérios anteriores.
+
+`lanes[].recoveryProgress` no diagnóstico local informa `stage` (`snapshot`,
+`handoff`, `waiting_retry`, `idle`), início/conclusão, `queuedAtHandoff`,
+`regularSnapshotReady` e `nextRegularAttemptAt`. Um snapshot adiado agora é
+registrado como `snapshot_deferred`, sem declarar recuperação concluída.
+
+Validação isolada:
+
+```sh
+node --import tsx --test apps/worker/src/recovery-handoff.test.ts
+```
+
+O teste de fluxo contínuo falha com o código anterior por não executar o retry;
+com a correção, confirma nova tentativa depois do prazo e três seleções válidas
+sem forçar disponibilidade. Também valida keepalive sem confirmação inicial,
+mercado liquidado bloqueado, preço restaurado ainda aguardando atualização,
+recuperação Outright incompleta preservada, persistência antes de ACK e shutdown.
+As amostras são locais, sem conexão, consumo de filas ou assinatura do fornecedor.
+
+No Mac: atualizar/build, reiniciar o worker **uma só vez** pelo comando habitual,
+aguardar o snapshot/retry autorizado e executar `npm run --silent diagnose:feed:local`.
+Conferir avanço de `lastAttemptAt`/`lastSuccessAt`, `recoveryProgress` e candidatos
+do fixture 20572565 **se ele ainda estiver aberto no fornecedor**. Não apagar
+arquivos de agendamento, locks ou checkpoint, não repetir migrações nem limpar
+bilhetes. Nenhum deploy é necessário para esta correção local.

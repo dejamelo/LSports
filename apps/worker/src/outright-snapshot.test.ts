@@ -142,7 +142,10 @@ test('429 keeps checkpoint rows and AMQP message processing active without waiti
   const limit = (operation: 'snapshot.events' | 'snapshot.outright.fixtures' | 'snapshot.outright.markets') => new OperationError({ operation, protocol: 'http', category: 'rate_limited', httpStatus: 429, retryAfterMs: 3600000, retryAt: new Date(Date.now() + 3600000).toISOString(), message: 'Esperando al proveedor.' });
   await session(pkg, { packages: [pkg], snapshotUrl: 'https://stm-snapshot.lsports.eu', customersUrl: 'https://stm-api.lsports.eu', recoveryMs: 10000, staleMs: 90000 }, state,
     async () => {
-      if (state.connections.prematch.phase === 'connected') {
+      if (state.connections.prematch.recoveryProgress?.stage === 'waiting_retry' && !abort.signal.aborted) {
+        assert.equal(state.connections.prematch.phase, 'recovering');
+        assert.equal(state.connections.prematch.recoveryProgress.regularSnapshotReady,false);
+        assert.equal(state.feed().events[0].selections[0].available,false);
         assert.equal(acks, 1);
         assert.equal(state.connections.prematch.outrightRecovery?.status, 'rate_limited');
         assert.equal(state.connections.prematch.diagnostic?.httpStatus, 429);
