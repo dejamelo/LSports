@@ -1,4 +1,4 @@
-import { SettlementType } from "trade360-nodejs-sdk";
+import { SettlementType, OutrightScoreStatus } from "trade360-nodejs-sdk";
 import { marketStatusLabel, settlementLabel } from "@lsports/contracts";
 import type {
   ConnectionState,
@@ -11,12 +11,14 @@ import type {
   Sport,
   SportEvent,
 } from "@lsports/contracts";
-import type { Fixture, Livescore, Market, OutrightFixtureEvent } from "trade360-nodejs-sdk";
+import type { Fixture, Livescore, Market, OutrightFixtureEvent, OutrightScoreUpdate } from "trade360-nodejs-sdk";
+type OutrightScore = NonNullable<NonNullable<NonNullable<OutrightScoreUpdate["competition"]>["events"]>[number]["outrightScore"]>;
 export interface TradeEvent {
   fixtureId: number;
   outright?: { competitionId: number; competitionName?: string; competitionType?: number; fixture?: NonNullable<OutrightFixtureEvent["outrightFixture"]> };
   fixture?: Fixture;
   livescore?: Livescore;
+  outrightScore?: OutrightScore;
   markets?: Market[];
   marketMessageType?: 41 | 42;
   marketRecovery?: boolean;
@@ -31,6 +33,7 @@ export interface Row {
   outright?: TradeEvent["outright"];
   marketReceipt?: { messagesByType: Record<string, number>; marketUpdates: number; betUpdates: number; providerMarketUpdates: number; providerBetUpdates: number; staleBetUpdates: number; lastMarketMessageAt?: string; snapshotMarketUpdates?: number; lastMarketSnapshotAt?: string };
   livescore?: Versioned<Livescore>;
+  outrightScore?: Versioned<OutrightScore>;
   markets: Map<string, Market>;
   marketAt: Map<string, number>;
   betAt: Map<string, number>;
@@ -164,6 +167,11 @@ export class TradeState {
           }
         }
       }
+      if (event.outrightScore) {
+        if (!row.outrightScore || at >= row.outrightScore.at) {
+          row.outrightScore = {value: {...row.outrightScore?.value, ...defined(event.outrightScore)}, at};
+        } else this.metrics[lane].staleUpdatesIgnored++;
+      }
       if (event.fixture) {
         const t = timestamp(event.fixture.lastUpdate, at);
         if (!row.fixture || t >= row.fixture.at)
@@ -254,6 +262,11 @@ export class TradeState {
         if (!row.outright) continue;
         const diagnostic: OutrightMarketDiagnostic = { lane, competitionId: row.outright.competitionId,
           fixtureId: Number(String(key).split(":").at(-1)), hasFixture: !!row.fixture,
+          outrightScore: row.outrightScore ? {
+            updatedAt: new Date(row.outrightScore.at).toISOString(), status: row.outrightScore.value.status ?? null,
+            statusName: OutrightScoreStatus[row.outrightScore.value.status ?? -1] ?? "Unrecognized",
+            participantResults: structuredClone(row.outrightScore.value.participantResults || []),
+          } : undefined,
           restored: row.restored || undefined, participantCount: row.fixture?.value.participants?.length || 0,
           messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0,
           ...structuredClone(row.marketReceipt),
@@ -362,6 +375,7 @@ export class TradeState {
           sport,
           source: lane,
           marketDiagnostic,
+          outrightScore: marketDiagnostic?.outrightScore,
           restored: row.restored || undefined,
           kind: row.outright ? "outright" : "fixture",
           competition: row.outright ? { id: row.outright.competitionId, name: row.outright.competitionName, type: row.outright.competitionType } : undefined,

@@ -11,7 +11,7 @@ export function checkpoint(state: TradeState) {
   return { version: 1, outright: (['prematch', 'inplay'] as const).flatMap(lane =>
     [...state.rows[lane]].filter(([, row]) => row.outright).map(([key, row]) => ({
       lane, fixtureId: Number(String(key).split(':').at(-1)),
-      fixture: row.fixture, outright: row.outright, livescore: row.livescore, marketReceipt: row.marketReceipt,
+      fixture: row.fixture, outright: row.outright, livescore: row.livescore, outrightScore: row.outrightScore, marketReceipt: row.marketReceipt,
       markets: [...row.markets], marketAt: [...row.marketAt], betAt: [...row.betAt],
     }))) };
 }
@@ -40,6 +40,16 @@ export async function restore(state: TradeState, path: string) {
           [...entry.marketAt, ...entry.betAt].some(([, t]) => typeof t !== 'number' || !Number.isFinite(t)) ||
           (entry.fixture !== undefined && (!object(entry.fixture) || !object(entry.fixture.value) || typeof entry.fixture.at !== 'number' || !Number.isFinite(entry.fixture.at))))
         throw new Error('Invalid outright checkpoint; original file preserved');
+      if (entry.outrightScore !== undefined) {
+        const score = entry.outrightScore;
+        if (!object(score) || typeof score.at !== 'number' || !Number.isFinite(score.at) || !object(score.value) ||
+            (score.value.status !== undefined && (!Number.isInteger(score.value.status) || Number(score.value.status) < 0)) ||
+            (score.value.participantResults !== undefined && (!Array.isArray(score.value.participantResults) || score.value.participantResults.some((p: unknown) =>
+              !object(p) || (p.participantId !== undefined && (!Number.isSafeInteger(p.participantId) || Number(p.participantId) <= 0)) ||
+              (p.name !== undefined && typeof p.name !== 'string') ||
+              (p.result !== undefined && (typeof p.result !== 'number' || !Number.isFinite(p.result)))))))
+          throw new Error('Invalid saved outright score; original file preserved');
+      }
       if (entry.marketReceipt !== undefined && (!object(entry.marketReceipt) ||
           !object(entry.marketReceipt.messagesByType) ||
           Object.values(entry.marketReceipt.messagesByType).some(v => typeof v !== 'number' || !Number.isFinite(v) || v < 0) ||
@@ -50,6 +60,7 @@ export async function restore(state: TradeState, path: string) {
       const key = `outright:${entry.outright.competitionId}:${entry.fixtureId}`;
       if (recovered.rows[lane].has(key)) throw new Error('Duplicate outright checkpoint identity');
       recovered.rows[lane].set(key, {
+        outrightScore: entry.outrightScore as unknown as Row["outrightScore"],
         fixture: entry.fixture as unknown as Row["fixture"], outright: entry.outright as unknown as Row["outright"],
         livescore: entry.livescore as unknown as Row["livescore"], marketReceipt: entry.marketReceipt as unknown as Row["marketReceipt"],
         markets: new Map(entry.markets) as Map<string, Market>,

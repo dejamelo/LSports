@@ -4,6 +4,7 @@ import { TextDecoder } from "node:util";
 import {
   FixtureMetadataUpdate,
   OutrightFixtureUpdate,
+  OutrightScoreUpdate,
   OutrightFixtureMarketUpdate,
   OutrightSettlementsUpdate,
   LivescoreUpdate,
@@ -293,7 +294,7 @@ export function decodeMessage(
     );
   metadata.guidSource ??= envelopeGuid ? "envelope" : "transport";
   if (!headers.MessageGuid) metadata.warnings!.push("transport_guid_absent");
-  if (![1, 2, 3, 31, 32, 35, 37, 41, 42].includes(type))
+  if (![1, 2, 3, 31, 32, 35, 37, 39, 41, 42].includes(type))
     fail(
       "unsupported_message_type",
       "entity",
@@ -340,7 +341,7 @@ export function decodeMessage(
   if (
     type !== 31 &&
     type !== 32 &&
-    ![37, 41, 42].includes(type) &&
+    ![37, 39, 41, 42].includes(type) &&
     (!object(body) || !Array.isArray(body.Events))
   )
     fail(
@@ -349,24 +350,39 @@ export function decodeMessage(
       "El tipo de actualización requiere Body.Events como array.",
       ["Body.Events"],
     );
-  if ([37, 41, 42].includes(type)) {
+  if ([37, 39, 41, 42].includes(type)) {
     if (!object(body) || !object(body.Competition) ||
         !Number.isSafeInteger(body.Competition.Id) || Number(body.Competition.Id) <= 0 ||
         !Array.isArray(body.Competition.Events))
       fail("invalid_event_body", "entity", "Outright requiere Competition con ID y Events válidos.", ["Body.Competition"]);
     const competition = (body as Record<string, unknown>).Competition as Record<string, unknown>;
     const rawEvents = competition.Events as unknown[];
+    if (type === 39 && rawEvents.some(event => {
+      if (!object(event) || !object(event.OutrightScore)) return true;
+      const score = event.OutrightScore;
+      return (score.Status !== undefined && (!Number.isInteger(score.Status) || Number(score.Status) < 0)) ||
+        (score.ParticipantResults !== undefined && (!Array.isArray(score.ParticipantResults) || score.ParticipantResults.some((p: unknown) =>
+          !object(p) || (p.ParticipantId !== undefined && (!Number.isSafeInteger(p.ParticipantId) || Number(p.ParticipantId) <= 0)) ||
+          (p.Name !== undefined && typeof p.Name !== "string") ||
+          (p.Result !== undefined && (typeof p.Result !== "number" || !Number.isFinite(p.Result))))));
+    })) fail("invalid_event_body", "entity", "OutrightScore o ParticipantResults inválidos; se conserva el mensaje.", ["Body.Competition.Events.OutrightScore"]);
     if (rawEvents.some((event) => !object(event) || (type === 37
       ? !object(event.OutrightFixture) || (event.OutrightFixture.Participants !== undefined &&
           (!Array.isArray(event.OutrightFixture.Participants) || event.OutrightFixture.Participants.some((p: unknown) => !object(p))))
-      : !Array.isArray(event.Markets) || event.Markets.some((market: unknown) => !object(market) ||
+      : type === 39 ? !object(event.OutrightScore) : !Array.isArray(event.Markets) || event.Markets.some((market: unknown) => !object(market) ||
           !Number.isSafeInteger(market.Id) || Number(market.Id) <= 0 ||
           (market.Bets !== undefined && (!Array.isArray(market.Bets) || market.Bets.some((bet: unknown) => !object(bet))))))))
       fail("invalid_event_body", "entity", "Evento outright sin fixture o mercados válidos; se conserva para reprocesar.", ["Body.Competition.Events"]);
+    if (type === 39) metadata.participantResultCount = rawEvents.reduce<number>((count, event) => {
+      const score = (event as Record<string, unknown>).OutrightScore as Record<string, unknown>;
+      return count + (Array.isArray(score.ParticipantResults) ? score.ParticipantResults.length : 0);
+    }, 0);
     metadata.marketCount = rawEvents.reduce<number>((count, event) => count +
       (Array.isArray((event as Record<string, unknown>).Markets) ? ((event as Record<string, unknown>).Markets as unknown[]).length : 0), 0);
-    metadata.betCount = rawEvents.reduce<number>((count, event) => count +
-      (((event as Record<string, unknown>).Markets as Record<string, unknown>[] | undefined) || []).reduce((n, m) => n + (Array.isArray(m.Bets) ? m.Bets.length : 0), 0), 0);
+    metadata.betCount = rawEvents.reduce<number>((count, event) => {
+      const markets = (event as Record<string, unknown>).Markets;
+      return count + (Array.isArray(markets) ? markets.reduce((n, m) => n + (object(m) && Array.isArray(m.Bets) ? m.Bets.length : 0), 0) : 0);
+    }, 0);
   }
   if ((type === 31 || type === 32) && body != null && !object(body))
     fail(
@@ -403,6 +419,16 @@ export function decodeMessage(
       }));
       if (events.length !== ((value.Competition as Record<string, unknown>).Events as unknown[]).length)
         throw new Error("Conversion lost events");
+    }
+    if (type === 39) {
+      const competition = TransformerUtil.transform(value, OutrightScoreUpdate).competition;
+      if (!competition || !Array.isArray(competition.events)) throw new Error("Invalid score competition");
+      events = competition.events.map(event => ({ fixtureId: event.fixtureId,
+        outright: {competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type},
+        outrightScore: event.outrightScore,
+      }));
+      if (events.length !== ((value.Competition as Record<string, unknown>).Events as unknown[]).length)
+        throw new Error("Conversion lost score events");
     }
     if (type === 41 || type === 42) {
       const competition = type === 41
@@ -453,6 +479,7 @@ export function decodeMessage(
         e.fixtureId <= 0 ||
         (type === 1 && !e.fixture) ||
         (type === 37 && !e.outright?.fixture) ||
+        (type === 39 && !e.outrightScore) ||
         ([3, 35, 41, 42].includes(type) && !Array.isArray(e.markets)) ||
         (type === 2 && !e.livescore && !e.fixture),
     )

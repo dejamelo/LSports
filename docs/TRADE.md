@@ -1006,3 +1006,23 @@ Em `matches[].markets[]` encontre o mercado `id:160`. Cada seleção inclui `odd
 Se o snapshot inclui dez preços válidos de versão igual, as dez cotações devem ser confirmadas; se somente uma seleção está presente, as nove ausentes permanecem protegidas. Consulte também `/api/events`: IDs, odds e disponibilidade devem coincidir com o diagnóstico. Não apague `.runtime`, SQLite ou arquivos de cooldown e não execute `diagnose:trade` repetidamente para antecipar a recuperação.
 
 A regressão automatizada usa apenas um servidor HTTP local e amostras explicitamente sintéticas em diretório temporário: SDK oficial → restauração de checkpoint → uma atualização AMQP → snapshot com dez preços inalterados → API HTTP com dez seleções habilitadas → segundo reinício/snapshot parcial → apenas a seleção confirmada habilitada. Também verifica snapshot vazio/anterior, mensagem sem preço, suspensão, liquidação, conexão e preservação integral de um bilhete de teste já registrado. Isso não comprova o conteúdo do snapshot real de Madrid no Mac.
+
+### Mensagem 39: placar Outright, sem liquidação implícita
+
+O consumidor trata `OutrightScoreUpdate` (39) pelo contrato e pelo conversor do SDK oficial instalado. Referências oficiais:
+
+- [OutrightScoreUpdate e EntityKey(39)](https://github.com/lsportsltd/trade360-nodejs-sdk/blob/main/src/entities/message-types/outright-score-update.ts)
+- [OutrightScoreEvent](https://github.com/lsportsltd/trade360-nodejs-sdk/blob/main/src/entities/core-entities/outright-sport/outright-score-event.ts)
+- [OutrightScore](https://github.com/lsportsltd/trade360-nodejs-sdk/blob/main/src/entities/core-entities/outright-sport/outright-score.ts)
+- [ParticipantResult](https://github.com/lsportsltd/trade360-nodejs-sdk/blob/main/src/entities/core-entities/outright-sport/participant-result.ts)
+- [OutrightScoreStatus](https://github.com/lsportsltd/trade360-nodejs-sdk/blob/main/src/entities/core-entities/enums/outright-score-status.ts)
+
+O envelope contém `Body.Competition` (`Id`, `Events`), cada evento tem `FixtureId` e `OutrightScore`. O placar contém `Status` e/ou `ParticipantResults`, com `ParticipantId`, `Name` e `Result`. Todos são preservados nos campos correspondentes, sem converter `Result` em settlement ou deduzir seu significado. `Status` usa o enum específico do placar (`Unknown=0`, `Pending=1`, `InProgress=2`, `Completed=3`), **não** o enum de mercados, fixtures ou settlements. Códigos novos de status são preservados com `statusName:"Unrecognized"`.
+
+O placar é armazenado separadamente por competição/fixture e timestamp, sem modificar participantes do fixture, preço, estado de mercado ou resultado de bilhete. Atualizações antigas não substituem a versão mais recente. Campos omitidos preservam o valor anterior; quando `ParticipantResults` está presente, armazena-se o array recebido (inclusive vazio). Um placar recebido antes do fixture também é preservado e fica acessível no diagnóstico, aguardando os metadados, sem inventar participantes/mercados. O checkpoint existente continua compatível: o campo adicional é opcional e não exige apagar ou migrar manualmente `.runtime`.
+
+`GET /api/diagnostics/outright/20540564` agora pode mostrar `matches[].outrightScore` com `updatedAt`, `status`, `statusName` e `participantResults`. `/api/events` expõe o mesmo placar em `events[].outrightScore` quando o fixture está publicado. Os logs apenas mostram metadados seguros, incluindo tipo 39, quantidade de eventos e `participantResultCount`, sem publicar o payload completo.
+
+O ACK ocorre somente depois da gravação do checkpoint e da reconciliação persistente dos bilhetes. Mensagem redeliverada válida é processada; duplicatas são reconhecidas após persistência. Erros de formato ou de escrita continuam sem ACK, solicitando requeue. Não se cria fila, não se altera assinatura e não se descarta o tipo 39 para destravar o consumo.
+
+Após atualizar, reinicie API/worker (`npm run dev`) para sair do bloqueio anterior com `retryPolicy:restart_required`. A mensagem preservada será entregue novamente. Verifique no log `feed.decode`, `messageType:39`, `status:"ok"` e a recuperação/conexão do PreMatch. Isso não implica odds habilitadas: o placar não confirma preços do checkpoint; a recuperação de mercados continua respeitando `retryAt` e a confirmação individual documentada acima. Sem credenciais/feed do Mac no ambiente cloud, o teste de retomada usa consumidor AMQP simulado, persistência real em diretório temporário e o parser oficial, sem afirmar validação da conexão real.

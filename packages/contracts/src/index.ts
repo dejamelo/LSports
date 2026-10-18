@@ -65,7 +65,14 @@ export interface OutrightMarketResult {
     };
   }[];
 }
+export interface OutrightScoreProjection {
+  updatedAt: string;
+  status: number | null;
+  statusName: string;
+  participantResults: {participantId?: number; name?: string; result?: number}[];
+}
 export interface OutrightMarketDiagnostic {
+  outrightScore?: OutrightScoreProjection;
   markets?: OutrightMarketResult[];
   lane: Lane;
   competitionId: number;
@@ -90,6 +97,7 @@ export interface OutrightMarketDiagnostic {
   market160?: { status?: number; statusLabel?: string; selections: number; pricedSelections: number; selectableSelections: number; selectionStatusCounts?: Record<string, number>; settlementCounts?: Record<string, number>; blockedReasonCounts?: Record<string, number> };
 }
 export interface SportEvent {
+  outrightScore?: OutrightScoreProjection;
   kind?: "fixture" | "outright";
   restored?: boolean;
   marketDiagnostic?: OutrightMarketDiagnostic;
@@ -278,6 +286,7 @@ export interface FeedMessageMetadata {
   eventCount?: number;
   marketCount?: number;
   betCount?: number;
+  participantResultCount?: number;
   redelivered?: boolean;
   warnings?: string[];
 }

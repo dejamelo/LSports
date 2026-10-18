@@ -233,6 +233,7 @@ test("malformed and unsupported messages are not ACKed or discarded: NACK reques
   const { OperationError } = await import("./diagnostics.js");
   for (const [content, reason] of [
     [Buffer.from("invalid private payload"), "invalid_json"],
+    [Buffer.from(JSON.stringify({ Header: { Type: 39, MsgGuid: "bad-score" }, Body: { Competition: { Id: 90, Events: [{ FixtureId: 100, OutrightScore: { ParticipantResults: "invalid" } }] } } })), "invalid_event_body"],
     [Buffer.from(JSON.stringify({ Header: { Type: 37, MsgGuid: "bad-race" }, Body: { Competition: { Id: 90, Events: [{ FixtureId: 100 }] } } })), "invalid_event_body"],
     [
       Buffer.from(
