@@ -1,3 +1,5 @@
+import { platformEnabled, PlatformStore } from "@lsports/feed-store/platform";
+import { TenantTickets } from "@lsports/feed-store/tenant-tickets";
 import { TicketStore } from "@lsports/feed-store/tickets";
 import type { FeedMessageMetadata } from "@lsports/contracts";
 import amqp from "amqplib";
@@ -31,6 +33,8 @@ export async function runConnected(signal: AbortSignal, dependencies: {
   const path = dependencies.path ?? statePath();
   const releaseLock = await acquireWorkerLock(`${path}.lock`);
   let tickets: TicketStore | undefined;
+  let platform: PlatformStore | undefined;
+  let tenantTickets: TenantTickets | undefined;
   let completed = false;
   try {
     const state = new TradeState();
@@ -42,11 +46,16 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     }
     tickets = new TicketStore(dependencies.ticketPath);
     const ticketStore = tickets;
+    if (platformEnabled()) {
+      platform = new PlatformStore(undefined, true);
+      tenantTickets = new TenantTickets(platform);
+    }
     const publish = createPublisher(path);
     const save = () =>
       operation("file.persist", "local", async () => {
         const feed = state.feed();
-        ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
+        tenantTickets?.reconcile(feed);
+      ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
         await publish(feed, checkpoint(state));
       });
     let writing: Promise<void> | undefined;
@@ -141,10 +150,14 @@ export async function runConnected(signal: AbortSignal, dependencies: {
       completed = true;
     }
   } finally {
-    try { tickets?.close(); }
-    finally {
-      const released = await releaseLock();
-      console.info(JSON.stringify({ operation: "worker.shutdown", status: completed ? "ok" : "error", lock: released ? "released" : "ownership_changed_preserved" }));
+    try {
+      try { tenantTickets?.close(); } finally { platform?.close(); }
+    } finally {
+      try { tickets?.close(); }
+      finally {
+        const released = await releaseLock();
+        console.info(JSON.stringify({ operation: "worker.shutdown", status: completed ? "ok" : "error", lock: released ? "released" : "ownership_changed_preserved" }));
+      }
     }
   }
 }

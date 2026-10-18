@@ -91,7 +91,7 @@ a {
 .header nav .active {
   color: #d0f77c;
 }
-.active:after {
+.header nav .active:after {
   content: "";
   position: absolute;
   bottom: 0;
@@ -1272,3 +1272,5 @@ footer {
 
 .ticket-history { margin:24px 0; padding:22px; border:1px solid #28394d; border-radius:12px; background:#101c2b; overflow-wrap:anywhere; }
 .ticket-history h2 {font-size:20px}.ticket-history p,.ticket-history li {font-size:13px;line-height:1.7;color:#bac5d4}.ticket-history details{padding:14px 0;border-top:1px solid #29394c}.ticket-history summary{cursor:pointer;font-size:14px}.ticket-history a{color:#4ce5ad}.ticket-history button{padding:10px;margin:8px;border:1px solid #3d526a}
+
+.receipt-dialog{position:fixed;inset:5vh 5vw;z-index:1000;width:min(650px,90vw);height:85vh;border:1px solid #53676c;border-radius:12px;background:#fff;padding:16px;color:#172e37;box-shadow:0 0 0 100vmax #0009}.receipt-dialog>div{display:flex;justify-content:space-between;gap:15px;margin-bottom:12px}.receipt-dialog iframe{width:100%;height:calc(100% - 55px);border:0;background:white}

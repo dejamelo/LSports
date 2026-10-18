@@ -36,13 +36,13 @@ export class TicketStore {
     return this.db.prepare('SELECT code,version FROM outcomes WHERE mode=? AND event_id=? AND market_id=? AND selection_id=?')
       .get(mode, canonical(leg.eventId), canonical(leg.marketId), canonical(leg.selectionId)) as { code: number; version: number } | undefined;
   }
-  create(input: TicketRequest, idempotencyKey: string, getFeed: () => EventFeed): TestTicket {
+  create(input: TicketRequest, idempotencyKey: string, getFeed: () => EventFeed, policy?: (selections: TicketLeg[]) => void, accepted?: (ticket: TestTicket, transaction: DatabaseSync) => void): TestTicket {
     if (!validKey(idempotencyKey)) fail('INVALID_IDEMPOTENCY_KEY', 'Falta una clave de idempotencia válida.', 400);
     if (!input || !Number.isSafeInteger(input.stakeMinor) || input.stakeMinor <= 0 || input.stakeMinor > 100000000 ||
         !Array.isArray(input.selections) || input.selections.length < 1 || input.selections.length > 12)
       fail('INVALID_TICKET', 'Importe o cantidad de selecciones inválidos.', 400);
-    if (input.channel !== undefined && !['web', 'posnet_test'].includes(input.channel)) fail('INVALID_CHANNEL', 'Canal inválido.', 400);
-    if (input.channel === 'posnet_test' && !validKey(input.terminalId)) fail('INVALID_TERMINAL', 'Terminal de prueba inválida.', 400);
+    if (input.channel !== undefined && !['web', 'mobile', 'pos', 'posnet_test'].includes(input.channel)) fail('INVALID_CHANNEL', 'Canal inválido.', 400);
+    if ((input.channel === 'posnet_test' || input.channel === 'pos') && !validKey(input.terminalId)) fail('INVALID_TERMINAL', 'Terminal de prueba inválida.', 400);
     for (const leg of input.selections) {
       if (!leg || ![leg.eventId, leg.marketId, leg.selectionId].every(v => typeof v === 'string' && v.length > 0 && v.length <= 300) ||
           !Number.isFinite(leg.expectedOdds)) fail('INVALID_SELECTION', 'Selección inválida.', 400);
@@ -88,11 +88,13 @@ export class TicketStore {
       let max = BigInt(input.stakeMinor), denominator = 1n;
       for (const s of selections) { max *= BigInt(s.oddsMicros); denominator *= 1000000n; }
       if ((max + denominator - 1n) / denominator > BigInt(Number.MAX_SAFE_INTEGER)) fail('RETURN_LIMIT', 'Retorno fuera del límite de prueba.', 400);
+      policy?.(selections);
       const ticket: TestTicket = { id: randomUUID(), mode: feed.mode, testOnly: true, currency: 'TEST_POINTS',
         createdAt: new Date(at).toISOString(), stakeMinor: input.stakeMinor, status: 'PENDING', payoutMinor: null, revision: 0,
         channel: input.channel || 'web', ...(input.terminalId ? {terminalId: input.terminalId} : {}), selections,
         history: [{ revision: 0, at: new Date(at).toISOString(), status: 'PENDING', payoutMinor: null, reason: 'Billete de prueba aceptado por el servidor.' }] };
       this.db.prepare('INSERT INTO tickets VALUES(?,?,?,?,?)').run(ticket.id, idempotencyKey, hash, at, JSON.stringify(ticket));
+      accepted?.(ticket, this.db); // Same BEGIN IMMEDIATE transaction as admission.
       if (ticket.channel === 'posnet_test') this.db.prepare('INSERT INTO print_jobs(id,ticket_id,terminal_id,created) VALUES(?,?,?,?)').run(randomUUID(), ticket.id, ticket.terminalId!, at);
       return ticket;
     });

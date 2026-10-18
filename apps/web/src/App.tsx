@@ -1,3 +1,5 @@
+import {majorToMinor,formatMinor,minor,returnMinor} from '@lsports/contracts';
+import { sportsbookApi, embedded, getEmbedContext } from "./sportsbook-api";
 import { TicketHistory } from "./TicketHistory";
 import { useEffect, useState, useRef } from "react";
 import {
@@ -34,7 +36,8 @@ const sports: { id: Sport; icon: string; name: string }[] = [
 const money = (v: number) =>
   new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(v);
 export default function App() {
-  const [feed, setFeed] = useState<EventFeed>();
+  const embedScope=getEmbedContext();
+  const [feed, setFeed] = useState<EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:{minStakeMinor:string;maxStakeMinor:string}}>();
   const [error, setError] = useState("");
   const [tab, setTab] = useState("Prepartido");
   const [sport, setSport] = useState<Sport>("futbol");
@@ -57,11 +60,11 @@ export default function App() {
       controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
       try {
-        const response = await fetch("/api/events", {
+        const response = await sportsbookApi("/events", {
           signal: controller.signal,
         });
         if (!response.ok) throw Error();
-        const next = (await response.json()) as EventFeed;
+        const next = (await response.json()) as EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:{minStakeMinor:string;maxStakeMinor:string}};
         if (
           !["demo", "connected"].includes(next.mode) ||
           !Array.isArray(next.events)
@@ -106,7 +109,7 @@ export default function App() {
     };
   });
   const picksBlocked =
-    !!error ||
+    !!error || feed?.client?.acceptingTickets === false ||
     currentPicks.some(
       (p) => p.selection.available === false || p.event.available === false,
     );
@@ -142,23 +145,27 @@ export default function App() {
     );
   };
   const odds = currentPicks.reduce((v, p) => v * p.selection.odds, 1);
-  const stake = Number(amount);
-  const valid = Number.isFinite(stake) && stake > 0 && stake <= 1000000;
+  const stake = embedded ? 0 : Number(amount);
+  let simulatedMinor='';
+  let valid=false;
+  if(embedScope){try{simulatedMinor=majorToMinor(amount,embedScope.currency);const n=minor(simulatedMinor);valid=n>=minor(feed?.effectiveLimits?.minStakeMinor||'1')&&n<=minor(feed?.effectiveLimits?.maxStakeMinor||'100000000');}catch{}}
+  else valid=Number.isFinite(stake)&&stake>0&&stake<=1000000;
+  const simulatedReturn=embedScope&&valid?formatMinor(returnMinor(simulatedMinor,currentPicks.map(p=>Math.round(p.selection.odds*1000000))),embedScope.currency):'';
   const submitTicket = async () => {
     if(inFlight.current) return;
-    const payload=JSON.stringify({stakeMinor:Math.round(stake*100),selections:currentPicks.map(p=>({eventId:p.event.id,
+    const payload=JSON.stringify({...embedScope,stakeMinor:embedScope?simulatedMinor:Math.round(stake*100),selections:currentPicks.map(p=>({eventId:p.event.id,
       marketId:p.event.markets?.find(m=>m.selections.some(s=>s.id===p.selection.id))?.id || "demo",
       selectionId:p.selection.id,expectedOdds:p.selection.odds}))});
-    if(!submission.current) {
+    if(!submission.current && !embedded) {
       try {const saved=JSON.parse(sessionStorage.getItem("adl-pending-test-ticket") || "null");
         if(saved?.payload===payload && typeof saved.key==="string") submission.current=saved;
       } catch { /* Storage is optional; API remains authoritative. */ }
     }
     if(submission.current?.payload!==payload) submission.current={payload,key:crypto.randomUUID()};
-    try {sessionStorage.setItem("adl-pending-test-ticket",JSON.stringify(submission.current));} catch {}
+    try {if(!embedded)sessionStorage.setItem("adl-pending-test-ticket",JSON.stringify(submission.current));} catch {}
     inFlight.current=true;setSubmitting(true);setMessage("");
     try {
-      const r=await fetch("/api/tickets",{method:"POST",headers:{"Content-Type":"application/json","Idempotency-Key":submission.current.key},body:payload});
+      const r=await sportsbookApi("/tickets",{method:"POST",headers:{"Content-Type":"application/json","Idempotency-Key":submission.current.key},body:payload});
       const result=await r.json();
       if(!r.ok) {setMessage(result.error || "No se pudo aceptar el billete.");return;}
       setMessage(`Billete de prueba registrado: ${result.id}. Sin dinero real.`);
@@ -166,7 +173,7 @@ export default function App() {
     } catch {setMessage("Respuesta no confirmada. Reintentá sin cambiar el billete para evitar duplicados.");}
     finally{inFlight.current=false;setSubmitting(false);}
   };
-  if (location.pathname !== "/sportsbook" && location.pathname !== "/")
+  if (!embedded && location.pathname !== "/sportsbook" && location.pathname !== "/")
     return (
       <div className="not-found">
         <h1>Página no encontrada</h1>
@@ -206,7 +213,7 @@ export default function App() {
       <div className="demo-notice">
         <ShieldCheck size={14} />
         <span>
-          {feed?.notice || "Consultando estado de la API… Sin dinero real."}
+          {embedScope&&`${embedScope.currency} · SIMULACIÓN · `}{feed?.client?.displayName && `${feed.client.displayName} · `}{feed?.notice || "Consultando estado de la API… Sin dinero real."}
         </span>
         <span className="notice-age">18+</span>
       </div>
@@ -464,7 +471,7 @@ export default function App() {
                     <EventMarkets
                       event={event}
                       selected={picks.map((p) => p.selection.id)}
-                      blocked={!!error || event.available === false}
+                      blocked={!!error || feed?.client?.acceptingTickets === false || event.available === false}
                       onSelect={toggle}
                     />
                   </div>
@@ -573,11 +580,11 @@ export default function App() {
                   <span>Cuota total</span>
                   <strong>{odds.toFixed(2)}</strong>
                 </div>
-                <label htmlFor="stake">Importe ficticio (puntos)</label>
+                <label htmlFor="stake">{embedScope?`Importe simulado (${embedScope.currency})`:'Importe ficticio (puntos)'}</label>
                 <input
                   id="stake"
                   inputMode="decimal"
-                  type="number"
+                  type={embedScope?"text":"number"}
                   min="1"
                   max="1000000"
                   value={amount}
@@ -587,7 +594,7 @@ export default function App() {
                   }}
                 />
                 {!valid && (
-                  <p className="invalid">Ingresá entre 1 y 1.000.000 puntos.</p>
+                  <p className="invalid">{embedScope?"Revisá el importe y los límites de la operación.":"Ingresá entre 1 y 1.000.000 puntos."}</p>
                 )}
                 <div className="quick-stakes">
                   {[500, 1000, 5000].map((n) => (
@@ -605,7 +612,7 @@ export default function App() {
                 <div className="return">
                   <span>Retorno simulado</span>
                   <strong>
-                    {valid ? money(stake * odds) : "—"} <small>pts</small>
+                    {valid ? embedScope?simulatedReturn:money(stake * odds) : "—"} <small>{embedScope?"simulados":"pts"}</small>
                   </strong>
                 </div>
                 {picksBlocked && (
@@ -639,7 +646,7 @@ export default function App() {
                   submission.current=undefined;try{sessionStorage.removeItem("adl-pending-test-ticket");}catch{}setPicks([]);setMessage("");
                 }}>Armar otro billete de prueba</button>}
                 <p className="slip-fine">
-                  Puntos ficticios. Sin depósitos ni retiros.
+                  {embedScope?`Simulación en ${embedScope.currency}. Sin dinero real, depósitos ni retiros.`:"Puntos ficticios. Sin depósitos ni retiros."}
                 </p>
                 {message && (
                   <div className="success" role="status">

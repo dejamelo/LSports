@@ -1,5 +1,7 @@
 export type Sport = "futbol" | "tenis" | "basquet" | "hipica" | "otros";
 export interface Selection {
+  priceVersionAt?: string;
+  priceOrderingSafe?: boolean;
   id: string;
   label: string;
   odds: number;
@@ -383,3 +385,6 @@ export interface EventSource {
 }
 
 export type { TicketRequest, TicketLeg, TestTicket, TicketStatus, TicketOutcome } from './tickets.js';
+export {currencyPrecision,currency,minor,majorToMinor,formatMinor,returnMinor,MoneyError} from './money.js';
+export type {Currency,IntegrationChannel,OperationScope,WalletScope,WalletTransactionScope} from './money.js';
+export type {OperationTicket} from './tickets.js';

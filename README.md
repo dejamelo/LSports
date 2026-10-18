@@ -1,6 +1,6 @@
 # Apuesta DEPORTIVA LAT — sportsbook independente
 
-React + TypeScript, API Node.js e worker persistente para LSports TRADE, com interface em espanhol argentino preparada para iframe. **O bilhete é sempre uma simulação com pontos fictícios. Não aceita apostas, depósitos, pagamentos ou retiros.**
+React + TypeScript, API Node.js e worker persistente para LSports TRADE, com interface em espanhol argentino preparada para iframe. **O bilhete é sempre uma simulação: pontos fictícios no modo legado e valores na moeda fixa da operação no modo plataforma. Não movimenta dinheiro real, depósitos, pagamentos ou retiros.**
 
 ## Executar
 
@@ -25,6 +25,10 @@ npm run preview -w @lsports/web
 ```
 
 O build gera `apps/web/dist` e verifica os tipos dos serviços Node, que são executados com `tsx`. No ambiente cloud com HOME somente leitura, acrescente `--cache /workspace/.npm-cache` a `npm ci`.
+
+## Plataforma independente e painel
+
+A base por cliente/operação/moeda, com limites atômicos e risco determinístico em simulação está documentada em [docs/PLATFORM.md](docs/PLATFORM.md): inventário do projeto, permissões, configuração inicial, API autenticada, iframe por cliente e pendências para produção. O painel abre em `/control` na origem da API com `PLATFORM_ENABLED=true`. O padrão continua preservando o modo local e seus bilhetes anteriores. Não se integra com POSNET Lottery.
 
 ## Modos de dados
 

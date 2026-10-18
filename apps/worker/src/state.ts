@@ -388,6 +388,12 @@ export class TradeState {
             ];
             return ({
             id: `${prefix}:${m.id}:${b.id}`,
+            ...(() => {
+              const trace=row.settlementAudit?.get(`${m.id}:${b.id}`);
+              const version=row.betAt.get(`${m.id}:${b.id}`);
+              const proof=[trace?.last41,trace?.lastSnapshot].find(p=>p?.timestamp?.orderingSafe===true&&p.timestamp.timezone==='explicit'&&Date.parse(p.versionAt)===version);
+              return proof&&unavailableReasons.length===0?{priceVersionAt:proof.versionAt,priceOrderingSafe:true}:{};
+            })(),
             label: `${b.name || (row.outright && b.participantId !== undefined ? fixture.participants?.find((p) => p.id === b.participantId)?.name : undefined) || "Selección"}${b.line ? ` (${b.line})` : ""}`,
             line: b.line,
             participantId: b.participantId,

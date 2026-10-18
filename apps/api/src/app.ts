@@ -1,3 +1,5 @@
+import { platformRoutes } from "./platform-routes.js";
+import { platformEnabled, type PlatformStore } from "@lsports/feed-store/platform";
 import { ticketRoutes } from "./ticket-routes.js";
 import type { TicketStore } from "@lsports/feed-store/tickets";
 import { explainOpenEventExclusions } from "./open-event-diagnostics.js";
@@ -5,7 +7,7 @@ import express from "express";
 import { demoSource } from "@lsports/demo";
 import { dataMode, readConnectedFeed } from "@lsports/feed-store";
 import type { EventSource } from "@lsports/contracts";
-export function createApp(source?: EventSource, options: {ticketStore?: TicketStore} = {}) {
+export function createApp(source?: EventSource, options: {ticketStore?: TicketStore; platformStore?: PlatformStore; platform?: boolean; publicOrigin?: string} = {}) {
   const mode = dataMode();
   const feed =
     source ||
@@ -19,6 +21,12 @@ export function createApp(source?: EventSource, options: {ticketStore?: TicketSt
     res.setHeader("X-Content-Type-Options", "nosniff");
     next();
   });
+  if (options.platform ?? platformEnabled()) {
+    const control = platformRoutes(feed, options.platformStore, options.publicOrigin);
+    app.use(control.router);
+    app.locals.closeTickets = control.close;
+    return app;
+  }
   app.get("/api/health", async (_req, res) => {
     const data = await feed.getEvents();
     res.status(data.health === "unavailable" ? 503 : 200).json({

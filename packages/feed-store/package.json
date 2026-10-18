@@ -5,7 +5,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./tickets": "./src/tickets.ts"
+    "./tickets": "./src/tickets.ts",
+    "./platform": "./src/platform.ts",
+    "./tenant-tickets": "./src/tenant-tickets.ts",
+    "./operation-limits": "./src/operation-limits.ts"
   },
   "dependencies": {
     "@lsports/contracts": "*"
