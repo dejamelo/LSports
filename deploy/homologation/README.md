@@ -74,3 +74,10 @@ Ver [CAPACITY-REVIEW.md](CAPACITY-REVIEW.md) para evidencia, diagnóstico Docker
 complementario sólo lectura, opciones de ampliación/servidor separado, cálculo
 de costos pendiente de región y estimación de indisponibilidad. Ningún cambio
 remoto ni compra está autorizado hasta aprobar importe y ventana.
+
+El colector Docker fue corregido para continuar por container e identificar
+fallos sanitizados. También resume rutas de la configuración activa de Caddy,
+servicios habilitados de systemd y, si la AWS CLI existente lo permite, precios
+On-Demand oficiales de Ohio. No sustituye la revisión de scripts de arranque;
+`restartPolicy=no` sin mecanismo externo confirmado bloquea el redimensionamiento.
+Validación local: `python3 deploy/homologation/test-diagnose-docker.py`.

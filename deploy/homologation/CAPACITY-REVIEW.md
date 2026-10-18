@@ -116,3 +116,70 @@ Tras disponer de capacidad: parar normalmente el worker del Mac, confirmar
 persistencia y cierre, respetar retryAt/cooldowns, y sólo entonces activar un único
 consumidor AWS según README. No consumir simultáneamente las mismas colas.
 Mantener billetes/finanzas simulados; no mezclar con POSNET Lottery.
+
+## Seguimiento: inventario Docker incompleto recibido
+
+Captura 2026-10-18T23:08:36Z (20:08:36 de Brasilia): Docker 29.8.2,
+cgroup v2/systemd; 12 containers ejecutándose y 2 detenidos. Consumo observado
+agregado de containers ~580,85 MiB, sin representar picos ni memoria total del
+host. Los primeros dos tienen Memory=0/NanoCpus=0 y restartPolicy=no.
+Los nombres canary/rollback no autorizan su eliminación ni prueban que no
+atiendan tráfico. El Caddy público es `deploy-caddy-production-1`, con puertos
+80/443; existen además dos Caddys privados. No se conocen aún sus rutas activas.
+
+La versión anterior abortaba ante el primer error (`|| exit 2`) y ocultaba la
+causa de la plantilla. Falló al llegar al tercer container, un Caddy sin healthcheck
+visible en la lista. El archivo no contiene el error original: no confirma si
+faltaba Health, alguna opción de logs u otro campo. El colector nuevo elimina
+esa plantilla, tolera campos ausentes/null y comunica etapa, ID y categoría
+sanitizada por container. Continúa con los siguientes incluso si uno desaparece
+o falla. Exit 2 + resumen `partial` conserva la señal de inventario incompleto.
+
+Usar de nuevo el mismo comando SSH documentado, tras actualizar la branch.
+La salida ahora es JSON por línea. La inspección/configuración completa sólo se
+procesa en memoria privada: nunca se imprime ni se guarda. El reporte publica
+únicamente campos seleccionados. No contiene env, healthcheck logs, headers,
+claves ni argumentos ExecStart. Los mounts sí muestran rutas locales para que
+el operador identifique los archivos de configuración; tratar el reporte como
+información interna.
+
+### Rutas e inicio tras stop/start: puertas de aprobación
+
+- Consulta GET al admin local predeterminado de cada Caddy identificado por su
+  imagen oficial, mediante `docker exec ... wget`; no reload ni requests al POSNET.
+  Si el admin está deshabilitado, tiene otro puerto/socket o falta wget, se marca
+  `unverified`. No se usa un archivo montado como prueba de configuración activa.
+- Muestra match host/path/method, upstreams estáticos y candidatos por nombre,
+  alias/IP y redes compartidas. Un candidato por puerto publicado es sólo una
+  pista: localhost dentro del Caddy no es localhost del host. Upstreams dinámicos,
+  hosts externos, namespaces especiales y rutas ambiguas requieren revisión.
+- Lista servicios systemd habilitados, estado/dependencias, nombre del ejecutable
+  y presencia de Docker/Compose, sin imprimir argumentos o scripts con secretos.
+  Esto no sustituye revisar hooks, scripts, cron, cloud-init y servicios de usuario.
+- Para **cada ruta pública vigente**, registrar Caddy → upstream → container →
+  proyecto/servicio → mecanismo de inicio, orden, volúmenes y healthcheck. Toda
+  ruta sin vínculo demostrado sigue bloqueando el cambio.
+- `restartPolicy=no` no reinicia ese container automáticamente al arrancar Docker.
+  Necesita un mecanismo externo confirmado, o un cambio explícitamente aprobado
+  con procedimiento de rollback. No modificar políticas ni ejecutar compose up
+  durante el diagnóstico. Una unidad habilitada por sí sola no prueba cobertura.
+- No realizar stop/start hasta confirmar que todos los servicios actuales vuelven
+  y definir comprobaciones de POSNET/SSO/demo/staging con su responsable.
+
+### Confirmación de precios todavía pendiente
+
+El colector intenta `aws pricing get-products` sólo si la CLI ya existe, usando
+las credenciales/rol existentes sin imprimirlos. Filtra Linux/Shared/On-Demand,
+Ohio y los tres tipos comparados; reporta tarifa, SKU y fecha efectiva de la API
+oficial. No instala CLI ni solicita secretos. Falta de CLI/permisos queda explícita.
+
+Si no funciona, confirmar tarifas y costos EBS/IPv4 en AWS Pricing Calculator o
+consola antes del plan final. Los importes referenciales anteriores **no son precios
+actuales confirmados**. No dar autorización económica basada en ellos. El informe
+no ejecuta cambios ni confirma el arranque tras reinicio; ambas validaciones
+siguen pendientes del inventario remoto y la revisión operativa.
+
+Validación local del colector: `bash -n deploy/homologation/diagnose-docker.sh`
+y `python3 deploy/homologation/test-diagnose-docker.py` (5 tests, Docker/AWS/systemd
+simulados; ninguna operación remota). No se repitieron migraciones ni tests del
+feed porque no cambió el código de aplicación.

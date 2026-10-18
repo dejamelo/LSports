@@ -1,52 +1,225 @@
 #!/usr/bin/env bash
-# Read-only inventory. Run using existing sudo access; no permission changes.
-# Never dump inspect JSON, container environments, command arguments or application logs.
+# Streamable read-only collector. No writes, restarts, installs or permission changes.
 set -u
-printf '== ADL DOCKER CAPACITY: READ ONLY ==\n'
-date -u '+%Y-%m-%dT%H:%M:%SZ'
-printf 'collectorUid=%s\n' "$(id -u)"
-free -b
-df -hT / /var/lib/docker 2>/dev/null || true
-printf '\n== REGION (IMDSv2, optional; no credentials queried) ==\n'
-if command -v curl >/dev/null; then
-  metadata_token=$(curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null) || metadata_token=''
-  if [ -n "$metadata_token" ]; then
-    region=$(curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 -H "X-aws-ec2-metadata-token: $metadata_token" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null) || region=''
-    if [[ "$region" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then printf 'region=%s\n' "$region"; else printf 'region=unavailable\n'; fi
-  else printf 'region=unavailable\n'; fi
-  unset metadata_token region
-fi
-if ! command -v docker >/dev/null; then printf 'docker=cli_missing\n'; exit 2; fi
-# Selected output only. Classify errors without exposing raw daemon responses/URLs.
-query() {
-  local output status
-  output=$(docker "$@" 2>&1); status=$?
-  if [ "$status" -ne 0 ]; then
-    case "$output" in
-      *'permission denied'*|*'Permission denied'*) printf 'dockerQuery=failed code=%s category=permission_denied\n' "$status" ;;
-      *'Cannot connect'*|*'cannot connect'*|*'connection refused'*) printf 'dockerQuery=failed code=%s category=daemon_unreachable\n' "$status" ;;
-      *) printf 'dockerQuery=failed code=%s category=other_sanitized\n' "$status" ;;
-    esac
-    return "$status"
-  fi
-  printf '%s\n' "$output"
-}
-printf '\n== SERVER ACCESS ==\n'
-if ! query info --format 'serverVersion={{.ServerVersion}} CPUs={{.NCPU}} MemoryBytes={{.MemTotal}} cgroup={{.CgroupVersion}} driver={{.CgroupDriver}}'; then
-  printf 'Inventory incomplete. No permissions or services changed. Check existing sudo access / intended rootless Docker context.\n'
+if ! command -v python3 >/dev/null; then
+  printf 'collector=failed stage=prerequisite reason=python3_missing; no installation attempted\n'
   exit 2
 fi
-printf '\n== CONTAINERS (INCLUDING STOPPED) ==\n'
-query ps -a --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' || exit 2
-printf '\n== CURRENT USAGE (NOT PEAKS) ==\n'
-query stats --no-stream --format '{{.Name}} CPU={{.CPUPerc}} MEM={{.MemUsage}} MEM_PERCENT={{.MemPerc}} PIDS={{.PIDs}}' || exit 2
-printf '\n== LIMITS / HEALTH / STORAGE TARGETS ==\n'
-# IDs are only used as Docker arguments after a successful listing, never eval.
-container_ids=$(docker ps -aq 2>/dev/null) || { printf 'containerList=failed\n'; exit 2; }
-for container_id in $container_ids; do
-  [[ "$container_id" =~ ^[a-f0-9]+$ ]] || { printf 'containerId=invalid\n'; exit 2; }
-  query inspect --format '{{.Name}} running={{.State.Running}} oomKilled={{.State.OOMKilled}} restarts={{.RestartCount}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}unconfigured{{end}} memoryBytes={{.HostConfig.Memory}} memoryReservationBytes={{.HostConfig.MemoryReservation}} memorySwapBytes={{.HostConfig.MemorySwap}} nanoCpus={{.HostConfig.NanoCpus}} cpuQuota={{.HostConfig.CpuQuota}} cpuPeriod={{.HostConfig.CpuPeriod}} cpuShares={{.HostConfig.CpuShares}} cpuset={{.HostConfig.CpusetCpus}} pidsLimit={{.HostConfig.PidsLimit}} restartPolicy={{.HostConfig.RestartPolicy.Name}} logDriver={{.HostConfig.LogConfig.Type}} logMaxSize={{index .HostConfig.LogConfig.Config "max-size"}} logMaxFile={{index .HostConfig.LogConfig.Config "max-file"}} mounts={{range .Mounts}}{{.Type}}:{{.Destination}}:rw={{.RW}} {{end}}' "$container_id" || exit 2
-done
-printf '\nMemory=0 / nanoCpus=0 means no corresponding explicit cap; CPU quota/cpuset may still apply. Reservations are not exclusive physical RAM.\n'
-printf 'Rootful inventory does not establish absence of separate rootless Docker daemons. No logs/env/credentials queried.\n'
-printf '== END: NO SERVICES OR RESOURCES CHANGED ==\n'
+exec python3 - <<'PY'
+import datetime
+import json
+import re
+import shutil
+import subprocess
+
+
+def emit(**fields):
+    print(json.dumps(fields, ensure_ascii=False), flush=True)
+
+
+def run(args, stage, subject=None, timeout=20):
+    try:
+        p = subprocess.run(args, capture_output=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        emit(stage=stage, subject=subject, status='failed', reason='timeout' if isinstance(exc, subprocess.TimeoutExpired) else 'command_unavailable')
+        return None
+    if p.returncode:
+        # Never print exceptions, argv, raw stderr, URLs, headers or daemon replies.
+        error = p.stderr.decode(errors='replace').lower()
+        reason = 'aws_access_denied' if 'accessdenied' in error else 'aws_credentials_unavailable' if any(s in error for s in ('unable to locate credentials', 'expiredtoken', 'invalidclienttokenid')) else 'permission_denied' if 'permission denied' in error else 'template_error' if any(s in error for s in ('template', 'index of untyped nil', "can't evaluate field")) else 'daemon_unreachable' if any(s in error for s in ('cannot connect', 'connection refused')) else 'command_failed'
+        emit(stage=stage, subject=subject, status='failed', exitCode=p.returncode, reason=reason)
+        return None
+    return p.stdout
+
+
+def parse(data, stage, subject=None):
+    if data is None:
+        return None
+    try:
+        return json.loads(data)
+    except (ValueError, TypeError):
+        emit(stage=stage, subject=subject, status='failed', reason='invalid_json')
+        return None
+
+
+def limits(item):
+    host = item.get('HostConfig') or {}
+    state = item.get('State') or {}
+    config = item.get('Config') or {}
+    log = host.get('LogConfig') or {}
+    opts = log.get('Config') or {}  # Missing/null logging options must not abort Caddy inventory.
+    labels = config.get('Labels') or {}
+    return dict(
+        stage='container.inspect', status='ok', id=item.get('Id'), name=item.get('Name'),
+        running=state.get('Running'), oomKilled=state.get('OOMKilled'),
+        restarts=item.get('RestartCount'), health=(state.get('Health') or {}).get('Status'),
+        limits={k: host.get(k) for k in ('Memory', 'MemoryReservation', 'MemorySwap', 'NanoCpus', 'CpuQuota', 'CpuPeriod', 'CpuShares', 'CpusetCpus', 'PidsLimit')},
+        restartPolicy=(host.get('RestartPolicy') or {}).get('Name'),
+        log={'driver': log.get('Type'), 'maxSize': opts.get('max-size'), 'maxFile': opts.get('max-file')},
+        compose={k: labels.get('com.docker.compose.' + k) for k in ('project', 'service', 'project.config_files', 'project.working_dir')},
+        mounts=[{'type': m.get('Type'), 'source': m.get('Source'), 'destination': m.get('Destination'), 'rw': m.get('RW')} for m in item.get('Mounts', [])],
+        ports=(item.get('NetworkSettings') or {}).get('Ports'),
+        networks={k: {'ip': v.get('IPAddress'), 'aliases': v.get('Aliases')} for k,v in ((item.get('NetworkSettings') or {}).get('Networks') or {}).items()})
+
+
+def safe_dial(value):
+    # Static host/IP/port or unix socket only. Do not expose credentials or query strings.
+    if not isinstance(value, str):
+        return '[dynamic_or_unavailable]'
+    if re.fullmatch(r'[a-zA-Z0-9_.:\[\]-]+', value):
+        return value
+    return '[redacted_or_dynamic]'
+
+
+def routes(config, inventory, subject):
+    count = 0
+    source = next((i for i in inventory if i.get('Name') == subject), {})
+    source_networks = set(((source.get('NetworkSettings') or {}).get('Networks') or {}).keys())
+    servers = (((config.get('apps') or {}).get('http') or {}).get('servers') or {})
+    def walk(nodes, matches, server):
+        nonlocal count
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            own = []
+            for match in node.get('match') or []:
+                own.append({k: match[k] for k in ('host', 'path', 'method') if k in match})
+            context = matches + own
+            if node.get('handler') == 'reverse_proxy':
+                upstreams = [safe_dial(u.get('dial')) for u in node.get('upstreams') or []]
+                candidates = []
+                for item in inventory:
+                    net = item.get('NetworkSettings') or {}
+                    names = {(item.get('Name') or '').lstrip('/')}
+                    for v in (net.get('Networks') or {}).values():
+                        names.add(v.get('IPAddress'))
+                        names.update(v.get('Aliases') or [])
+                    for upstream in upstreams:
+                        hostname, _, port = upstream.rpartition(':')
+                        if hostname in names:
+                            candidates.append({'container': item.get('Name'), 'upstream': upstream, 'evidence': 'container_name_alias_or_ip', 'sharedNetworks': sorted(source_networks.intersection((net.get('Networks') or {}).keys()))})
+                        for target, bindings in (net.get('Ports') or {}).items():
+                            if any(port == b.get('HostPort') and hostname in ('127.0.0.1','localhost','host.docker.internal') for b in bindings or []):
+                                candidates.append({'container': item.get('Name'), 'upstream': upstream, 'containerPort': target, 'evidence': 'published_port_candidate_only', 'requiresNetworkNamespaceVerification': True})
+                emit(stage='caddy.route', caddy=subject, server=server, match=context,
+                     upstreams=upstreams, dynamicUpstreams=bool(node.get('dynamic_upstreams')), candidates=candidates)
+                count += 1
+            walk(node.get('routes'), context, server)
+            walk(node.get('handle'), context, server)
+    for name, server in servers.items():
+        walk(server.get('routes'), [], name)
+    emit(stage='caddy.routes.summary', caddy=subject, reverseProxyRoutes=count,
+         note='Active admin configuration only; candidates need network/path verification. No application requests sent.')
+
+
+def boot_inventory():
+    raw = run(['systemctl','list-unit-files','--type=service','--state=enabled','--no-legend','--no-pager'], 'boot.units')
+    if raw is None:
+        return
+    units = [line.split()[0] for line in raw.decode(errors='replace').splitlines() if line.split()]
+    for unit in units:
+        # Inspect every enabled service, not only units named POSNET; never output ExecStart arguments.
+        if not re.fullmatch(r'[a-zA-Z0-9_.@:\\-]+\.service', unit):
+            continue
+        raw = run(['systemctl','show',unit,'--no-pager','-p','Id','-p','ActiveState','-p','UnitFileState','-p','After','-p','Requires','-p','ExecStart'], 'boot.unit', unit)
+        if raw is None:
+            continue
+        props = dict(line.split('=',1) for line in raw.decode(errors='replace').splitlines() if '=' in line)
+        command = props.pop('ExecStart','')
+        executables = [p.rsplit('/',1)[-1] for p in re.findall(r'(?:^|[ {;])path=([^ ;}]+)', command)]
+        emit(stage='boot.unit', unit=unit, properties=props, executables=executables,
+             mentionsDocker='docker' in command.lower(), mentionsCompose='compose' in command.lower(),
+             note='Arguments omitted. An enabled unit alone does not prove it restores every container.')
+    emit(stage='boot.coverage', status='partial_until_operator_review',
+         note='Inspect approved startup automation privately: systemd dependencies, root/user cron, rc.local, cloud-init and rootless Docker. No script bodies or cron commands dumped; no boot test performed.')
+
+
+def pricing():
+    if not shutil.which('aws'):
+        emit(stage='pricing', status='unavailable', reason='aws_cli_missing', action='No install. Confirm with AWS Pricing Calculator for Ohio.')
+        return
+    for instance in ('c7i-flex.large','m7i.large','m7i.xlarge'):
+        filters = [{'Type':'TERM_MATCH','Field':k,'Value':v} for k,v in {
+            'regionCode':'us-east-2', 'instanceType':instance, 'operatingSystem':'Linux',
+            'tenancy':'Shared', 'preInstalledSw':'NA', 'capacitystatus':'Used',
+            'productFamily':'Compute Instance'}.items()]
+        raw = run(['aws','pricing','get-products','--region','us-east-1','--service-code','AmazonEC2',
+                   '--filters',json.dumps(filters),'--max-results','100','--no-paginate','--output','json','--no-cli-pager'], 'pricing.query', instance, timeout=30)
+        data = parse(raw,'pricing.parse',instance)
+        if data is None:
+            continue
+        prices = []
+        for entry in data.get('PriceList',[]):
+            product = parse(entry, 'pricing.product', instance)
+            if not product:
+                continue
+            for term in (product.get('terms') or {}).get('OnDemand',{}).values():
+                for dimension in term.get('priceDimensions',{}).values():
+                    if dimension.get('unit') == 'Hrs':
+                        prices.append({'usdPerHour':dimension.get('pricePerUnit',{}).get('USD'), 'effectiveDate':term.get('effectiveDate'), 'sku':product.get('product',{}).get('sku')})
+        emit(stage='pricing.result', source='AWS Price List API', instance=instance, region='us-east-2',
+             status='ok' if prices and not data.get('NextToken') else 'incomplete', onDemand=prices,
+             excludes='EBS, IPv4, transfer, backups, taxes, discounts and credits')
+
+
+def main():
+    emit(stage='collector.start', readOnly=True, capturedAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    if not shutil.which('docker'):
+        emit(stage='prerequisite', status='failed', reason='docker_cli_missing')
+        return 2
+    memory = run(['free','-b'],'host.memory')
+    if memory:
+        for line in memory.decode(errors='replace').splitlines():
+            parts = line.split()
+            if parts and parts[0] == 'Mem:' and len(parts) >= 7 and all(v.isdigit() for v in parts[1:7]):
+                emit(stage='host.memory', totalBytes=int(parts[1]), availableBytes=int(parts[6]))
+    server = parse(run(['docker','info','--format','{{json .}}'],'docker.info'),'docker.info.parse')
+    if not server:
+        return 2
+    emit(stage='docker.info', **{k:server.get(k) for k in ('ServerVersion','NCPU','MemTotal','CgroupVersion','CgroupDriver')})
+    raw = run(['docker','ps','-aq'],'container.list')
+    if raw is None:
+        return 2
+    inventory = []
+    failures = 0
+    for cid in raw.decode().split():
+        if not re.fullmatch('[a-f0-9]{12,64}',cid):
+            emit(stage='container.list', status='failed', reason='invalid_id'); failures += 1; continue
+        # Raw inspect is private in-memory input only: never written or printed.
+        parsed = parse(run(['docker','inspect',cid],'container.inspect',cid),'container.parse',cid)
+        if not isinstance(parsed,list) or len(parsed) != 1 or not isinstance(parsed[0],dict):
+            failures += 1
+            continue
+        item = parsed[0]
+        try:
+            emit(**limits(item)); inventory.append(item)
+        except (TypeError, AttributeError, KeyError):
+            emit(stage='container.fields', subject=cid, status='failed', reason='unexpected_field_shape')
+            failures += 1
+    stats = run(['docker','stats','--no-stream','--format','{{json .}}'],'container.stats',timeout=30)
+    if stats:
+        for line in stats.splitlines():
+            data = parse(line,'container.stats.parse')
+            if isinstance(data,dict):
+                emit(stage='container.stats', **{k:data.get(k) for k in ('Name','CPUPerc','MemUsage','MemPerc','PIDs')})
+    for item in inventory:
+        image = ((item.get('Config') or {}).get('Image') or '').split('/')[-1]
+        # Image identifies candidates, not production ownership; never delete based on name.
+        if not image.startswith('caddy:') or not (item.get('State') or {}).get('Running'):
+            continue
+        cid = item['Id']
+        config = parse(run(['docker','exec',cid,'wget','-qO-','-T','5','http://127.0.0.1:2019/config/'], 'caddy.active_config',cid),'caddy.parse',cid)
+        if isinstance(config,dict):
+            routes(config,inventory,item.get('Name'))
+        else:
+            emit(stage='caddy.coverage', subject=cid, status='unverified', reason='default_admin_endpoint_unavailable', note='No config reload; mounted files are not proof of active configuration.')
+    boot_inventory()
+    pricing()
+    emit(stage='collector.summary', containersInspected=len(inventory), inspectionFailures=failures,
+         status='partial' if failures else 'container_inventory_complete',
+         noServicesChanged=True, note='No restart/start/stop/update/prune. Route/boot/pricing coverage must be checked independently.')
+    return 2 if failures else 0
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+PY
