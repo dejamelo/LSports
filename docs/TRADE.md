@@ -1231,3 +1231,30 @@ npm run dev
 ```
 
 O `--apply` cria **outro backup completo**, próprio da migração, antes de modificar o checkpoint. Na inicialização, a rotina normal de liquidação reconcilia os resultados explícitos; não é preciso esperar novo envio do fornecedor. Verifique Green Hussar e o segundo bilhete conforme a seção anterior. Se a recuperação do lock falhar ou seu PID tiver mudado, pare nesse diagnóstico; não remova arquivos nem pule a proteção. A recuperação de cotações de Parislongchamp continua sendo um dry-run/aplicação separado, sem `--settlements` e sem liberação de preços salvos.
+
+## Encerramento do worker e reinício sem migração
+
+`npm run dev` inicia o worker diretamente com `node --import tsx`, sem a cadeia adicional `npm → tsx → worker`. O comando separado `npm run dev:worker` usa o mesmo carregador no próprio processo Node. SIGINT (`Ctrl+C`) e SIGTERM acionam um único cancelamento, inclusive se o terminal e o supervisor repetirem o sinal.
+
+O worker interrompe entregas, aguarda o processamento/gravação em andamento, fecha a conexão AMQP uma única vez, publica os feeds como `stopped`, reconcilia os bilhetes pela rotina normal, fecha SQLite e só então libera seu lock. Mensagens não confirmadas continuam na fila existente. Um sinal recebido enquanto a conexão AMQP ainda está abrindo também fecha a conexão assim que ela retorna; não inicia consumo nem recuperação HTTP depois disso.
+
+A liberação confere PID, inode e dispositivo do arquivo, sob o mesmo guard usado pela recuperação offline. Se outro arquivo/owner ocupou o caminho, ele é preservado. A inicialização recusa qualquer lock existente: não apaga automaticamente locks antigos nem os de um segundo worker.
+
+Atualização normal no Mac, sem executar novamente a migração de timestamps:
+
+```sh
+# No terminal que executa a aplicação: Ctrl+C e aguarde o encerramento.
+cd ~/LSports
+git switch feat/sportsbook-demo
+git pull --ff-only origin feat/sportsbook-demo
+npm ci
+npm run build
+npm test
+npm run dev
+```
+
+Para validar: confira o histórico e as odds aceitas dos dois bilhetes; pressione `Ctrl+C`; aguarde `{"operation":"worker.shutdown","status":"ok","lock":"released"}`; execute `npm run dev` novamente e confira os mesmos bilhetes. Não execute dois workers para testar sobre dados reais. A suíte usa diretórios temporários, dois bilhetes sintéticos já liquidados e processos reais com SIGINT/SIGTERM, tanto diretamente como sob npm/concurrently. Não consulta a LSports.
+
+Se a versão **anterior** deixar um lock na primeira parada, mantenha API/worker parados e use apenas `npm run recover:timestamps -- --inspect`. Somente se o relatório confirmar API fechada e `lock.owner:"not_running"`, use `npm run recover:timestamps -- --recover-lock --expected-pid PID_DO_INSPECT`. Esse comando verifica novamente o owner, cria backups e arquiva o lock; **não aplica a migração de timestamps**. Não reutilize um PID antigo nem apague arquivos `.lock`/`.reclaim` manualmente. Backups, checkpoint e bilhetes existentes são preservados.
+
+SIGKILL, queda de energia ou encerramento forçado do terminal não permitem executar handlers; um lock residual nesses casos requer a recuperação offline verificada. A rejeição dos timestamps HTTP sem timezone continua vigente; nenhuma conversão UTC ou deslocamento fixo foi introduzido.

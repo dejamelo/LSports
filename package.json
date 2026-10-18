@@ -11,7 +11,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "concurrently -n web,api,worker \"npm run dev -w @lsports/web\" \"npm run dev -w @lsports/api\" \"npm run dev -w @lsports/worker\"",
+    "dev": "concurrently -n web,api,worker \"npm run dev -w @lsports/web\" \"npm run dev -w @lsports/api\" \"node --import tsx --env-file-if-exists=.env apps/worker/src/index.ts\"",
     "dev:web": "npm run dev -w @lsports/web",
     "dev:api": "npm run dev -w @lsports/api",
     "dev:worker": "npm run dev -w @lsports/worker",

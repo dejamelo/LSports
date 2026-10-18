@@ -2,8 +2,7 @@ import { TicketStore } from "@lsports/feed-store/tickets";
 import type { FeedMessageMetadata } from "@lsports/contracts";
 import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
-import { mkdir, open, readFile, rm } from "node:fs/promises";
-import { dirname } from "node:path";
+import { acquireWorkerLock } from "./worker-lock.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { createPublisher, statePath } from "@lsports/feed-store";
 import { loadConfig } from "./config.js";
@@ -19,148 +18,133 @@ import {
 import { checkpoint, restore } from "./persistence.js";
 import { connectMq } from "./mq.js";
 
-export async function runConnected(signal: AbortSignal) {
+export async function runConnected(signal: AbortSignal, dependencies: {
+  config?: ReturnType<typeof loadConfig>;
+  path?: string;
+  ticketPath?: string;
+  session?: typeof session;
+} = {}) {
   const fatal = new AbortController();
   signal = AbortSignal.any([signal, fatal.signal]);
-  const config = loadConfig();
-  const path = statePath();
-  const lockPath = `${path}.lock`;
-  await mkdir(dirname(path), { recursive: true });
-  // Shared guard prevents worker startup/reclaim during verified offline lock recovery.
-  const reclaim=await open(`${lockPath}.reclaim`, "wx", 0o600);
-  let retry=false;
+  if (signal.aborted) return;
+  const config = dependencies.config ?? loadConfig();
+  const path = dependencies.path ?? statePath();
+  const releaseLock = await acquireWorkerLock(`${path}.lock`);
+  let tickets: TicketStore | undefined;
+  let completed = false;
   try {
-    await reclaim.writeFile(String(process.pid));
-  try {
-    const lock = await open(lockPath, "wx", 0o600);
-    await lock.writeFile(String(process.pid));
-    await lock.close();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const pid = Number(await readFile(lockPath, "utf8"));
-    if (!Number.isSafeInteger(pid) || pid <= 0)
-      throw new Error("Invalid worker lock; inspect before removing .lock");
+    const state = new TradeState();
     try {
-      process.kill(pid, 0);
-      throw new Error("Another worker owns the state file");
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
+      const recovery = await restore(state, path);
+      console.info(JSON.stringify({ operation: "file.restore", status: "ok", ...recovery }));
+    } catch {
+      throw new Error("No se pudo restaurar el estado TRADE. Archivo original conservado; no se inicia la escritura.");
     }
-    await rm(lockPath);
-    retry = true;
-  }
-  } finally {await reclaim.close();await rm(`${lockPath}.reclaim`);}
-  if(retry)return runConnected(signal);
-  const state = new TradeState();
-  try {
-    const recovery = await restore(state, path);
-    console.info(JSON.stringify({ operation: "file.restore", status: "ok", ...recovery }));
-  } catch {
-    await rm(lockPath, { force: true });
-    throw new Error("No se pudo restaurar el estado TRADE. Archivo original conservado; no se inicia la escritura.");
-  }
-  let tickets: TicketStore;
-  try { tickets = new TicketStore(); } catch (error) { await rm(lockPath, {force: true}); throw error; }
-  const publish = createPublisher(path);
-  const save = () =>
-    operation("file.persist", "local", async () => {
-      const feed = state.feed();
-      tickets.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
-      await publish(feed, checkpoint(state));
-    });
-  let writing: Promise<void> | undefined;
-  let lastCoverageLog = 0;
-  const heartbeat = setInterval(() => {
-    if (Date.now() - lastCoverageLog >= 60000) {
-      lastCoverageLog = Date.now();
-      console.info(
-        JSON.stringify({
-          operation: "feed.coverage",
-          coverage: state.feed().coverage,
-        }),
-      );
-    }
-    if (!writing)
-      writing = save()
-        .catch(() =>
-          console.error("No se pudo guardar el estado local del worker."),
-        )
-        .finally(() => {
-          writing = undefined;
-        });
-  }, 5000);
-  try {
-    await save();
-    const tasks = config.packages.map(async (pkg) => {
-      let attempt = 0;
-      while (!signal.aborted) {
-        try {
-          await session(pkg, config, state, save, signal);
-          attempt = 0;
-        } catch (error) {
-          if (!signal.aborted) {
-            const original = describeFailure(error, "worker.start", "local");
-            const pause =
-              ["feed.decode", "feed.apply"].includes(original.operation) &&
-              original.reason !== "provider_interrupted";
-            const diagnostic = {
-              ...original,
-              ...(pause ? { retryPolicy: "restart_required" as const } : {}),
-            };
-            const message =
-              formatDiagnostic(diagnostic) +
-              (pause
-                ? " Mensaje no confirmado como procesado. Corregí la incompatibilidad y reiniciá el worker."
-                : "");
-            state.set(pkg.lane, { phase: "error", message, diagnostic });
-            console.error(
-              JSON.stringify({
-                lane: pkg.lane,
-                status: pause ? "blocked_message" : "error",
-                ...diagnostic,
-              }),
-            );
-            await save();
-            if (pause) {
-              await new Promise<void>((resolve) => {
-                if (signal.aborted) resolve();
-                else
-                  signal.addEventListener("abort", () => resolve(), {
-                    once: true,
-                  });
-              });
-              break;
-            }
-          }
-        }
-        if (!signal.aborted)
-          await delay(
-            Math.min(30000, 1000 * 2 ** Math.min(attempt++, 5)),
-            undefined,
-            { signal },
-          ).catch(() => {});
-      }
-    });
-    try {
-      await Promise.all(tasks);
-    } catch (error) {
-      fatal.abort();
-      await Promise.allSettled(tasks);
-      throw error;
-    }
-  } finally {
-    clearInterval(heartbeat);
-    if (writing) await writing;
-    for (const lane of ["prematch", "inplay"] as const)
-      state.set(lane, {
-        phase: "stopped",
-        message: "Worker detenido. Cuotas bloqueadas.",
+    tickets = new TicketStore(dependencies.ticketPath);
+    const ticketStore = tickets;
+    const publish = createPublisher(path);
+    const save = () =>
+      operation("file.persist", "local", async () => {
+        const feed = state.feed();
+        ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
+        await publish(feed, checkpoint(state));
       });
+    let writing: Promise<void> | undefined;
+    let lastCoverageLog = 0;
+    const heartbeat = setInterval(() => {
+      if (Date.now() - lastCoverageLog >= 60000) {
+        lastCoverageLog = Date.now();
+        console.info(
+          JSON.stringify({
+            operation: "feed.coverage",
+            coverage: state.feed().coverage,
+          }),
+        );
+      }
+      if (!writing)
+        writing = save()
+          .catch(() =>
+            console.error("No se pudo guardar el estado local del worker."),
+          )
+          .finally(() => {
+            writing = undefined;
+          });
+    }, 5000);
     try {
       await save();
+      const tasks = config.packages.map(async (pkg) => {
+        let attempt = 0;
+        while (!signal.aborted) {
+          try {
+            await (dependencies.session ?? session)(pkg, config, state, save, signal);
+            attempt = 0;
+          } catch (error) {
+            if (!signal.aborted) {
+              const original = describeFailure(error, "worker.start", "local");
+              const pause =
+                ["feed.decode", "feed.apply"].includes(original.operation) &&
+                original.reason !== "provider_interrupted";
+              const diagnostic = {
+                ...original,
+                ...(pause ? { retryPolicy: "restart_required" as const } : {}),
+              };
+              const message =
+                formatDiagnostic(diagnostic) +
+                (pause
+                  ? " Mensaje no confirmado como procesado. Corregí la incompatibilidad y reiniciá el worker."
+                  : "");
+              state.set(pkg.lane, { phase: "error", message, diagnostic });
+              console.error(
+                JSON.stringify({
+                  lane: pkg.lane,
+                  status: pause ? "blocked_message" : "error",
+                  ...diagnostic,
+                }),
+              );
+              await save();
+              if (pause) {
+                await new Promise<void>((resolve) => {
+                  if (signal.aborted) resolve();
+                  else
+                    signal.addEventListener("abort", () => resolve(), {
+                      once: true,
+                    });
+                });
+                break;
+              }
+            }
+          }
+          if (!signal.aborted)
+            await delay(
+              Math.min(30000, 1000 * 2 ** Math.min(attempt++, 5)),
+              undefined,
+              { signal },
+            ).catch(() => {});
+        }
+      });
+      try {
+        await Promise.all(tasks);
+      } catch (error) {
+        fatal.abort();
+        await Promise.allSettled(tasks);
+        throw error;
+      }
     } finally {
-      tickets.close();
-      await rm(lockPath, { force: true });
+      clearInterval(heartbeat);
+      if (writing) await writing;
+      for (const lane of ["prematch", "inplay"] as const)
+        state.set(lane, {
+          phase: "stopped",
+          message: "Worker detenido. Cuotas bloqueadas.",
+        });
+      await save();
+      completed = true;
+    }
+  } finally {
+    try { tickets?.close(); }
+    finally {
+      const released = await releaseLock();
+      console.info(JSON.stringify({ operation: "worker.shutdown", status: completed ? "ok" : "error", lock: released ? "released" : "ownership_changed_preserved" }));
     }
   }
 }
@@ -186,6 +170,8 @@ export async function session(
   const connection = await connectMq(pkg, dependencies.connect);
   let failure: unknown;
   let closed = false;
+  let closing: Promise<void> | undefined;
+  const closeConnection = () => closing ??= Promise.resolve().then(() => connection.close()).catch(() => {});
   const fail = (error: unknown) => {
     if (closed) return;
     failure = error;
@@ -198,11 +184,9 @@ export async function session(
         : formatDiagnostic(diagnostic),
       diagnostic: signal.aborted ? undefined : diagnostic,
     });
-    void save().catch(() => {});
-    // Stop further deliveries immediately; unacknowledged messages return on close.
-    void Promise.resolve()
-      .then(() => connection.close())
-      .catch(() => {});
+    // This same promise is awaited by finally; close is never started twice.
+    // Unacknowledged deliveries remain on the supplier's existing queue.
+    void closeConnection();
   };
   connection.on("error", fail);
   connection.on("close", () => fail(new Error("Connection closed")));
@@ -215,6 +199,8 @@ export async function session(
   const seen = new Set<string>();
   const reportedShapes = new Set<string>();
   try {
+    // Abort can happen while connectMq is in flight, before listener installation.
+    if (signal.aborted) { abort(); return; }
     const channel = await operation("amqp.channel", "amqp", () =>
       connection.createChannel(),
     );
@@ -465,10 +451,11 @@ export async function session(
         : state.connections[lane].message,
     });
     try {
+      // Drain writes for deliveries already being processed before final persist.
+      await processing;
       await save();
     } finally {
-      await connection.close().catch(() => {});
-      await processing;
+      await closeConnection();
     }
   }
 }

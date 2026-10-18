@@ -15,6 +15,8 @@ npm run dev
 
 Frontend: porta 5173, rota `/sportsbook`. API: porta 3001 em loopback. Worker: processo contínuo. Em terminais separados, use `npm run dev:web`, `npm run dev:api` e `npm run dev:worker`.
 
+Para parar, pressione `Ctrl+C` e aguarde o worker informar `worker.shutdown`, `status: "ok"`, `lock: "released"` antes de reiniciar. Ele conclui a persistência e fecha SQLite antes de liberar apenas seu próprio lock. [Encerramento, atualização e recuperação verificada de lock residual](docs/TRADE.md#encerramento-do-worker-e-reinício-sem-migração).
+
 ```sh
 npm run build
 npm test

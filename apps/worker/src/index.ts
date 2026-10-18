@@ -1,8 +1,7 @@
 import { dataMode } from "@lsports/feed-store";
 import { demoSource } from "@lsports/demo";
-const abort = new AbortController();
-for (const signal of ["SIGINT", "SIGTERM"] as const)
-  process.on(signal, () => abort.abort());
+import { shutdownSignal } from "./shutdown.js";
+const abort = shutdownSignal();
 async function main() {
   if (dataMode() === "connected") {
     const { runConnected } = await import("./connected.js");
@@ -34,4 +33,4 @@ main().catch(async (error) => {
     }),
   );
   process.exitCode = 1;
-});
+}).finally(() => abort.dispose());

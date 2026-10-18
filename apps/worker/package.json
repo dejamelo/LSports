@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx --env-file-if-exists=../../.env src/index.ts",
-    "start": "tsx --env-file-if-exists=../../.env src/index.ts",
+    "dev": "node --import tsx --env-file-if-exists=../../.env src/index.ts",
+    "start": "node --import tsx --env-file-if-exists=../../.env src/index.ts",
     "build": "tsc --noEmit",
     "diagnose": "tsx --env-file-if-exists=../../.env src/diagnose.ts",
     "recover:timestamps": "tsx --env-file-if-exists=../../.env src/recover-timestamps.ts"
