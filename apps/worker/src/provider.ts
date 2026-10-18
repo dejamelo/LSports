@@ -1,3 +1,4 @@
+import { inspectSettlements } from "./settlement-evidence.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import { sdkAxios as axios } from "./diagnostics.js";
 import {
@@ -288,9 +289,10 @@ function decodeOutrightSnapshot(sdk: unknown, payload: unknown, kind: "fixtures"
         competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type, fixture: row.outrightFixture } });
     } else {
       const competition = TransformerUtil.transform({ Competition: body }, OutrightFixtureMarketUpdate).competition!;
-      for (const row of competition.events || []) {
+      for (const [index, row] of (competition.events || []).entries()) {
         if (row.markets?.some(m => m.bets?.some(b => typeof b.id !== "string" || !b.id))) invalid();
-        events.push({ fixtureId: row.fixtureId, outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type }, markets: row.markets, marketRecovery: true });
+        events.push({ fixtureId: row.fixtureId, outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type }, markets: row.markets, marketRecovery: true,
+          settlementInspection: (() => { try { return inspectSettlements(body.Events[index].Markets, row.markets || []); } catch { return invalid(); } })() });
       }
     }
   }

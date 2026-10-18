@@ -22,6 +22,7 @@ export interface TradeEvent {
   markets?: Market[];
   marketMessageType?: 41 | 42;
   marketRecovery?: boolean;
+  settlementInspection?: ReturnType<typeof import("./settlement-evidence.js").inspectSettlements>;
 }
 interface Versioned<T> {
   value: T;
@@ -38,6 +39,8 @@ export interface Row {
   marketAt: Map<string, number>;
   betAt: Map<string, number>;
   freshBets?: Set<string>;
+  settlementAudit?: Map<string, import("@lsports/contracts").SettlementTrace>;
+  settlementMarkets?: Map<string, import("@lsports/contracts").SettlementMarketEvidence>;
   // Session evidence only: a checkpoint must never restore quote confirmation.
   snapshotBets?: Map<string, import("@lsports/contracts").SnapshotQuoteObservation>;
 }
@@ -187,6 +190,13 @@ export class TradeState {
           at,
         };
       else if (event.livescore) this.metrics[lane].staleUpdatesIgnored++;
+      const settlementSource = event.marketRecovery ? "snapshot.outright.markets" : event.marketMessageType ? `amqp.${event.marketMessageType}` as const : undefined;
+      if (settlementSource) for (const counts of event.settlementInspection?.counts || []) {
+        const evidence = (row.settlementMarkets ||= new Map()).get(String(counts.marketId)) || {};
+        evidence[settlementSource] = {...counts, receivedAt: new Date(at).toISOString()};
+        row.settlementMarkets.set(String(counts.marketId), evidence);
+      }
+      const settlementFields = new Map((event.settlementInspection?.fields || []).map(f => [`${f.marketId}:${f.selectionId}`, f]));
       for (const market of event.markets || []) {
         if (market.id === undefined) {
           this.metrics[lane].marketsWithoutId++;
@@ -202,6 +212,18 @@ export class TradeState {
           const betKey = `${key}:${bet.id}`;
           const t = timestamp(bet.lastUpdate, at);
           const previousAt = row.betAt.get(betKey) || 0;
+          const field = settlementFields.get(betKey);
+          if (settlementSource && field) {
+            const observation: import("@lsports/contracts").SettlementObservation = {
+              source: settlementSource, receivedAt: new Date(at).toISOString(), versionAt: new Date(t).toISOString(),
+              field: field.field, code: field.code,
+              decision: field.field === "missing" ? "ignored_missing" : field.field === "null" ? "ignored_null" : t < previousAt ? "ignored_older" : "stored",
+            };
+            const trace = (row.settlementAudit ||= new Map()).get(betKey) || {};
+            trace[settlementSource === "amqp.42" ? "last42" : settlementSource === "amqp.41" ? "last41" : "lastSnapshot"] = observation;
+            if (field.field === "integer") trace.lastNumeric = observation;
+            row.settlementAudit.set(betKey, trace);
+          }
           const hasPrice = bet.price !== undefined && Number.isFinite(Number(bet.price)) && Number(bet.price) > 1;
           if (event.marketRecovery) {
             (row.snapshotBets ||= new Map()).set(betKey, {
@@ -214,6 +236,9 @@ export class TradeState {
             bets.set(bet.id, {
               ...bets.get(bet.id),
               ...defined(bet),
+              // null/missing is absence of settlement, never an explicit correction.
+              // A supplier correction to unsettled must carry numeric code 0.
+              settlement: Number.isInteger(bet.settlement) ? bet.settlement : bets.get(bet.id)?.settlement,
             } as typeof bet);
             // A current snapshot explicitly reconfirms an unchanged quote. Its LastUpdate
             // describes the last price change, not when the snapshot was requested.
@@ -247,9 +272,9 @@ export class TradeState {
       for (const [key, row] of this.rows[lane]) for (const market of row.markets.values()) {
         for (const bet of market.bets || []) {
           const at = row.betAt.get(`${market.id}:${bet.id}`);
-          if (bet.settlement === undefined || at === undefined) continue;
+          if (!Number.isInteger(bet.settlement) || at === undefined) continue;
           ticketOutcomes.push({eventId: `${lane}:${key}`, marketId: `${lane}:${key}:${market.id}`,
-            selectionId: `${lane}:${key}:${market.id}:${bet.id}`, settlement: bet.settlement, updatedAt: new Date(at).toISOString()});
+            selectionId: `${lane}:${key}:${market.id}:${bet.id}`, settlement: bet.settlement!, updatedAt: new Date(at).toISOString()});
         }
       }
     }
@@ -271,6 +296,7 @@ export class TradeState {
           messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0,
           ...structuredClone(row.marketReceipt),
           markets: [...row.markets.values()].map(m => ({
+            settlementEvidence: row.settlementMarkets?.get(String(m.id)),
             id: m.id ?? null, name: m.name ?? null, status: m.status ?? null, statusLabel: marketStatusLabel(m.status),
             selections: (m.bets || []).map(b => {
               const participantName = b.participantId === undefined ? undefined : row.fixture?.value.participants?.find(p => p.id === b.participantId)?.name;
@@ -280,6 +306,7 @@ export class TradeState {
                 nameSource: b.name !== undefined ? "selection" as const : participantName !== undefined ? "participant" as const : "not_reported" as const,
                 status: b.betStatusId ?? b.status ?? null, providerStatus: b.status ?? null, betStatusId: b.betStatusId ?? null,
                 settlement: b.settlement ?? null, resultKnown: known,
+                settlementTrace: row.settlementAudit?.get(`${m.id}:${b.id}`),
                 quoteRecovery: {
                   awaitingFreshQuote: !!row.restored && !row.freshBets?.has(`${m.id}:${b.id}`),
                   snapshotSeen: !!row.snapshotBets?.has(`${m.id}:${b.id}`),

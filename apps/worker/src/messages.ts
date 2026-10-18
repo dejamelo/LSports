@@ -1,3 +1,4 @@
+import { inspectSettlements } from "./settlement-evidence.js";
 import { createHash } from "node:crypto";
 import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
 import { TextDecoder } from "node:util";
@@ -435,11 +436,12 @@ export function decodeMessage(
         ? TransformerUtil.transform(value, OutrightFixtureMarketUpdate).competition
         : TransformerUtil.transform(value, OutrightSettlementsUpdate).competition;
       if (!competition || !Array.isArray(competition.events)) throw new Error("Invalid competition");
-      events = competition.events.map((event) => ({
+      events = competition.events.map((event, index) => ({
         fixtureId: event.fixtureId,
         outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type },
         markets: event.markets,
         marketMessageType: type,
+        settlementInspection: inspectSettlements(((value.Competition as Record<string, unknown>).Events as Record<string, unknown>[])[index].Markets, event.markets || []),
       }));
       if (events.length !== ((value.Competition as Record<string, unknown>).Events as unknown[]).length)
         throw new Error("Conversion lost events");

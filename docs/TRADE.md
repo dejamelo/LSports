@@ -1026,3 +1026,32 @@ O placar é armazenado separadamente por competição/fixture e timestamp, sem m
 O ACK ocorre somente depois da gravação do checkpoint e da reconciliação persistente dos bilhetes. Mensagem redeliverada válida é processada; duplicatas são reconhecidas após persistência. Erros de formato ou de escrita continuam sem ACK, solicitando requeue. Não se cria fila, não se altera assinatura e não se descarta o tipo 39 para destravar o consumo.
 
 Após atualizar, reinicie API/worker (`npm run dev`) para sair do bloqueio anterior com `retryPolicy:restart_required`. A mensagem preservada será entregue novamente. Verifique no log `feed.decode`, `messageType:39`, `status:"ok"` e a recuperação/conexão do PreMatch. Isso não implica odds habilitadas: o placar não confirma preços do checkpoint; a recuperação de mercados continua respeitando `retryAt` e a confirmação individual documentada acima. Sem credenciais/feed do Mac no ambiente cloud, o teste de retomada usa consumidor AMQP simulado, persistência real em diretório temporário e o parser oficial, sem afirmar validação da conexão real.
+
+### Evidência de settlement por seleção (mensagem 42 e snapshot)
+
+Um fixture finalizado, um mercado liquidado ou um vencedor conhecido **não** define o resultado das demais seleções. O bilhete continua pendente até chegar um código explícito para seu próprio ID de seleção. O campo `ParticipantResults.Result` do placar 39 não é settlement. A odd aceita do bilhete não é recalculada a partir de odds posteriores.
+
+A inspeção usa `BaseBet.Settlement` do SDK oficial tanto para `OutrightSettlementsUpdate` (42) como para o snapshot convertido por `OutrightFixtureMarketUpdate`. Compara a resposta JSON com a entidade convertida: quantidade, IDs e valor numérico de settlement devem coincidir. Perda de código na conversão falha antes de aplicar/ACK; não se trata uma conversão incompleta como sucesso. Dados específicos de `ProviderMarkets[].Bets[]` são contados separadamente; não são promovidos arbitrariamente ao resultado recomendado da seleção.
+
+Foi corrigida uma falha local reproduzível: um campo `Settlement:null` posterior podia apagar um código numérico da projeção. Agora campo ausente/null preserva o último código explícito; uma correção para não liquidado exige código numérico `0`. A proteção de ordenação temporal continua ativa. Isso não comprova que os sete códigos de Madrid tenham chegado: os dados anteriores à implantação não possuem essa auditoria e não podem ser reconstruídos por inferência.
+
+Após atualizar/reiniciar normalmente, respeitando o cooldown/retryAt existente, consulte apenas dados locais:
+
+```
+GET http://localhost:3001/api/diagnostics/outright/20540564
+GET http://localhost:3001/api/tickets/cd4196d2-45be-4870-acad-c0289f549ff7
+```
+
+No primeiro endpoint, em `matches[].markets[]` para mercado `160`:
+
+- `settlementEvidence` contém a última contagem recebida por origem: `amqp.41`, `amqp.42` e `snapshot.outright.markets`. Inclui `receivedAt`, `rootBets`, `rootNumeric`, `rootNull`, `rootMissing`, `providerBets`, `providerNumeric`. As contagens são da resposta/mensagem individual, não o total acumulado da projeção.
+- Cada seleção contém `settlementTrace.last42`, `last41`, `lastSnapshot` e, se já houve código numérico observado após a atualização, `lastNumeric`. Registra `receivedAt`, `versionAt`, `field` (`missing`, `null`, `integer`), `code` original e `decision` (`stored`, `ignored_missing`, `ignored_null`, `ignored_older`). Ausência de observação significa **sem evidência gravada**, não prova de que o fornecedor nunca enviou o resultado. Quando uma resposta omite uma seleção, sua observação anterior permanece com a data original; compare as datas com `settlementEvidence`.
+- `integer`/`stored` e settlement armazenado igual ao código mostram recebimento, conversão e armazenamento completos. Se o bilhete correspondente continuar pendente após `GET /api/tickets/:id`, compare seu `mode`, `eventId`, `marketId` e `selectionId` com os IDs da projeção: isso exige investigar o vínculo local, não presumir ausência do fornecedor. Os IDs públicos completos usam prefixo `prematch:outright:<competitionId>:<fixtureId>:<marketId>:<betId>`; a seleção no diagnóstico mostra o `<betId>` original.
+- `integer`/`ignored_older` mostra um código recebido e rejeitado pela proteção de versão. Preserve código, versões e timestamps para investigar a ordem das mensagens; não force um resultado antigo.
+- `null` ou `missing` em uma observação recente mostra que aquela resposta individual não forneceu código numérico para essa seleção. `providerNumeric>0` com ausência no nível principal mostra resultados apenas no bloco específico de provider; não autoriza inferir o código recomendado.
+
+A evidência é persistida no checkpoint, sem payloads completos ou credenciais. É adicional e opcional em checkpoints anteriores; não apague `.runtime` nem o SQLite. Não há novas consultas, assinaturas ou alteração de limites: a inspeção acompanha o processamento normal. Não reinicie repetidamente para tentar antecipar consultas.
+
+Se a evidência recente confirmar ausência de códigos, complementar o chamado LSports 217525 com: ambiente **Test**, pacote **PreMatch 4511**, fixture **20540564**, competitionId observado, mercado **Race Winner 160**, IDs originais de Bet/Participant das sete seleções (incluindo Green Hussar), timestamps UTC e contagens por origem. Informar que Sibarita recebeu `Settlement:2`, Napoles/Darro `Settlement:1`, enquanto as sete restantes vieram sem código (distinguir campo omitido de null). Anexar somente o trecho sanitizado desses campos e das observações; não enviar `.env`, senhas, URLs autenticadas ou payload completo.
+
+Solicitação concreta: "Confirmem a liquidação das sete seleções do mercado 160 e reenviem os códigos explícitos de Settlement pelos respectivos Bet IDs na mensagem OutrightSettlementsUpdate (42), ou disponibilizem-nos no snapshot `/Prematch/GetOutrightFixtureMarkets` com `packageId:4511` e `fixtures:[20540564]`. Confirmem se há settlement apenas em ProviderMarkets e qual resultado recomendado deveria ser publicado no nível principal. Não solicitamos novas assinaturas." Se a evidência indicar `ignored_older`, pedir também confirmação de `LastUpdate` e ordenação para esses Bet IDs. Sem observações recentes, não é possível atribuir a falta ao fornecedor só pelo `settlement:null` da projeção.

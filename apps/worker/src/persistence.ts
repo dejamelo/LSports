@@ -1,3 +1,4 @@
+import { validTrace, validMarketEvidence } from "./settlement-evidence.js";
 import { constants } from 'node:fs';
 import { copyFile, readFile } from 'node:fs/promises';
 import type { EventFeed, Lane } from '@lsports/contracts';
@@ -12,6 +13,8 @@ export function checkpoint(state: TradeState) {
     [...state.rows[lane]].filter(([, row]) => row.outright).map(([key, row]) => ({
       lane, fixtureId: Number(String(key).split(':').at(-1)),
       fixture: row.fixture, outright: row.outright, livescore: row.livescore, outrightScore: row.outrightScore, marketReceipt: row.marketReceipt,
+      settlementAudit: row.settlementAudit ? [...row.settlementAudit] : undefined,
+      settlementMarkets: row.settlementMarkets ? [...row.settlementMarkets] : undefined,
       markets: [...row.markets], marketAt: [...row.marketAt], betAt: [...row.betAt],
     }))) };
 }
@@ -40,6 +43,9 @@ export async function restore(state: TradeState, path: string) {
           [...entry.marketAt, ...entry.betAt].some(([, t]) => typeof t !== 'number' || !Number.isFinite(t)) ||
           (entry.fixture !== undefined && (!object(entry.fixture) || !object(entry.fixture.value) || typeof entry.fixture.at !== 'number' || !Number.isFinite(entry.fixture.at))))
         throw new Error('Invalid outright checkpoint; original file preserved');
+      if ((entry.settlementAudit !== undefined && (!tuples(entry.settlementAudit) || entry.settlementAudit.some(([, trace]) => !validTrace(trace)))) ||
+          (entry.settlementMarkets !== undefined && (!tuples(entry.settlementMarkets) || entry.settlementMarkets.some(([, evidence]) => !validMarketEvidence(evidence)))))
+        throw new Error('Invalid saved settlement evidence; original file preserved');
       if (entry.outrightScore !== undefined) {
         const score = entry.outrightScore;
         if (!object(score) || typeof score.at !== 'number' || !Number.isFinite(score.at) || !object(score.value) ||
@@ -60,6 +66,8 @@ export async function restore(state: TradeState, path: string) {
       const key = `outright:${entry.outright.competitionId}:${entry.fixtureId}`;
       if (recovered.rows[lane].has(key)) throw new Error('Duplicate outright checkpoint identity');
       recovered.rows[lane].set(key, {
+        settlementAudit: entry.settlementAudit === undefined ? undefined : new Map(entry.settlementAudit as [string, unknown][]) as Row["settlementAudit"],
+        settlementMarkets: entry.settlementMarkets === undefined ? undefined : new Map(entry.settlementMarkets as [string, unknown][]) as Row["settlementMarkets"],
         outrightScore: entry.outrightScore as unknown as Row["outrightScore"],
         fixture: entry.fixture as unknown as Row["fixture"], outright: entry.outright as unknown as Row["outright"],
         livescore: entry.livescore as unknown as Row["livescore"], marketReceipt: entry.marketReceipt as unknown as Row["marketReceipt"],

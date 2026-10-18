@@ -38,7 +38,20 @@ export interface SnapshotQuoteObservation {
   receivedPrice: number | null;
   decision: "confirmed" | "older_than_stored" | "missing_or_invalid_price";
 }
+export interface SettlementFieldEvidence {
+  marketId: number; selectionId: string; field: "missing" | "null" | "integer"; code: number | null;
+}
+export interface SettlementObservation {
+  source: "amqp.41" | "amqp.42" | "snapshot.outright.markets";
+  receivedAt: string; versionAt: string;
+  field: "missing" | "null" | "integer"; code: number | null;
+  decision: "stored" | "ignored_missing" | "ignored_null" | "ignored_older";
+}
+export interface SettlementTrace {last41?: SettlementObservation; last42?: SettlementObservation; lastSnapshot?: SettlementObservation; lastNumeric?: SettlementObservation}
+export interface SettlementMarketCounts {marketId: number; rootBets: number; rootNumeric: number; rootNull: number; rootMissing: number; providerBets: number; providerNumeric: number}
+export type SettlementMarketEvidence = Partial<Record<SettlementObservation["source"], SettlementMarketCounts & {receivedAt: string}>>;
 export interface OutrightMarketResult {
+  settlementEvidence?: SettlementMarketEvidence;
   id: number | null;
   name: string | null;
   status: number | null;
@@ -55,6 +68,7 @@ export interface OutrightMarketResult {
     settlement: number | null;
     resultKnown: boolean;
     resultDescription: string;
+    settlementTrace?: SettlementTrace;
     odds?: number;
     available?: boolean;
     unavailableReasons?: string[];
