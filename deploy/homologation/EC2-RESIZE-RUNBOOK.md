@@ -9,49 +9,35 @@ inicio resultaron iguales (`boot_gate=config_matches_now`). Docker está enabled
 Caddy público ya era `unless-stopped`. No repetir la corrección ni migraciones.
 Conservar la ruta real del backup emitido por la rutina.
 
-## Pendientes antes de aprobar costo y ventana
+## Confirmaciones recibidas — no repetir consultas
 
-1. **Precio/IP/almacenamiento**: en AWS CloudShell de la cuenta correcta, subir
-   solamente `deploy/homologation/diagnose-aws-resize.py` (archivo del checkout,
-   sin claves/configs/backups) mediante Actions → Upload file. Ejecutar:
+El operador informó `pricingComplete=true` de AWS Price List API: subtotal actual
+USD **68,7467/mes**, propuesto USD **154,018/mes**, diferencia USD **85,2713/mes**.
+Redondeo comercial: **68,75 → 154,02**, incremento **85,27 USD/mes**. Base 730 h,
+Linux Shared On-Demand, sin créditos/descuentos. Es subtotal de los componentes
+consultados, no toda la factura: transferencia, backups/snapshots, otros servicios,
+impuestos y compromisos existentes siguen fuera si no figuraban en la consulta.
 
-   ```bash
-   python3 diagnose-aws-resize.py > diagnostico-redimensionamento-aws.jsonl
-   ```
+También confirmó Elastic IP asociado y `offeredInAz=true`. Mantener la misma
+instancia/ENI y asociación EIP: no liberar ni reasociar el IP, no crear otro.
+Oferta en AZ no garantiza capacidad inmediata. No repetir comprobaciones
+Caddy/originfix ni consulta de precios/IP para la preparación documental.
 
-   Usa AWS CLI/rol existentes; consultas `Describe*` y `pricing:GetProducts`.
-   No instala nada ni ejecuta stop/modify/start/allocate/associate/create.
-   Encuentra la instancia por su IPv4 actual, sin inventar un InstanceId.
-   Price List usa us-east-1 como endpoint, pero filtra productos de **Ohio**.
-   Reporta precios/SKU/fecha efectiva, EBS y asociación de Elastic IP, sin secretos.
-   Si carece de permiso, pedir a un operador autorizado esa consulta sólo lectura;
-   no ampliar IAM ni solicitar access keys por chat.
-2. El acceso público a precios AWS desde el workspace sigue devolviendo 403.
-   AWS CLI tampoco estaba instalada en el servidor. **No hay precio actual
-   confirmado**. Usar el informe de CloudShell o los campos ya documentados para
-   AWS Pricing Calculator. No convertir referencias anteriores en una cotización.
-3. El informe calcula subtotal EC2+gp3 estándar+IPv4 sólo con precios/unidades
-   inequívocos y volúmenes encontrados; si hay IOPS/throughput extra u otro tipo
-   de EBS, presupuestar aparte. Añadir snapshots, transferencia, otros servicios,
-   impuestos y compromisos existentes. Base 730 h/mes, Linux Shared On-Demand,
-   sin créditos/SP/reservas. Total propuesto menos actual = incremento.
-4. El DNS `ec2-77-113-150-100...` **no prueba que exista Elastic IP**. Preservación
-   del público sólo esperada si la EIP está asociada a la ENI de esta instancia y
-   se mantiene esa asociación. IP automática puede cambiar tras stop/start junto
-   al hostname DNS; en ese caso detener el plan hasta decidir DNS, allowlists,
-   terminales y nuevo SSH. No crear una EIP (recurso/costo) sin aprobarlo.
-5. Confirmar m7i.xlarge ofertada en us-east-2c, x86_64/HVM y root EBS compatible,
-   sin dependencia instance-store. Oferta no garantiza capacidad inmediata.
-6. **Otros servicios**: siete de los otros containers activos tenían restart=no
-   en el inventario (dos Caddys privados, dos SSO anteriores, validated-canary,
-   terminal-link y staging). No concluir que son prescindibles por no estar en
-   las dos rutas públicas. Responsable debe identificar consumidores y mecanismo
-   de inicio, o aprobar individualmente política/procedimiento de arranque.
-   No cambiar sus políticas masivamente ni eliminarlos. Esta puerta sigue abierta.
-7. Backups consistentes existentes del POSNET y dependencias externas: confirmar
-   recuperación, ubicación y responsable; el backup de metadatos no respalda por
-   sí solo la base del POSNET. No crear snapshots pagos ahora. Revisar automatismos
-   Compose/cloud-init que puedan recrear containers o revertir políticas en el boot.
+## Pendientes reales
+
+- Backup privado de configuración duradero: `prepare-posnet-resize-backup.sh`.
+  Guarda Compose/Caddy/overrides temporales, inventario privado y manifest con
+  hashes/lectura de verificación. No toca políticas, servicios o datos de aplicación.
+- Backup **consistente de datos** del POSNET: confirmar banco/servicio, fecha,
+  ubicación, responsable y método probado de restore. No confundir backup de
+  inspect/config con backup de base. No inventar comandos SQL ni copiar ficheros
+  SQLite/volúmenes activos como si fueran consistentes. No crear snapshots pagos.
+- Retorno de los otros siete containers activos: procedimiento dirigido manual
+  documentado en RESIZE-APPROVAL.md; no borrar ninguno ni arrancar los dos que
+  ya estaban detenidos. No es necesario cambiar sus políticas en esta etapa.
+- Compatibilidad EBS/HVM/x86_64 y dependencias de almacenamiento externo deben
+  estar anotadas por el operador desde los detalles de la instancia. Precio,
+  EIP/oferta y hashes ya confirmados no necesitan volver a consultarse ahora.
 
 ## Propuesta
 
@@ -59,7 +45,7 @@ Instancia compartida `m7i.xlarge`, 4 vCPU/16 GiB. Mantener discos, ENIs, grupos 
 seguridad, perfil IAM y rutas actuales. No cambiar EBS, DNS, EIP ni servicios al
 mismo tiempo. LSports sigue sin desplegar/consumir hasta validar POSNET/capacidad.
 Presupuesto LSports previsto: worker 4 GiB/2 CPU y API 768 MiB/0,5 CPU, más host,
-Caddy y picos POSNET. Precio y admisión final dependen de las consultas anteriores.
+Caddy y picos POSNET. Costo confirmado según el informe; admisión del worker se comprobará tras ampliar, sin bajar protecciones.
 
 Ventana estimada: 20–30 min; parada percibida 5–15 min si arranque normal. No SLA:
 capacidad AZ, DNS o fallos de servicios pueden prolongarla. Suspender nuevas

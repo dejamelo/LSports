@@ -95,3 +95,10 @@ restart. El siguiente plan, aún no autorizado, está en
 CloudShell para precio oficial/EIP/EBS, puertas pendientes para los otros siete
 containers con política no, cambio EC2 y recuperación. No ejecutar la sección
 stop/modify/start durante el diagnóstico.
+
+Preço/IP/oferta confirmados pelo operador: subtotal US$ 154,018/mês, aumento
+US$ 85,2713, Elastic IP associado. Não repetir a consulta. A proposta para revisão
+está em [RESIZE-APPROVAL.md](RESIZE-APPROVAL.md), com backup de configuração sem
+parada e retorno dirigido dos outros sete containers sem autostart. Backup
+consistente dos dados do POSNET ainda exige identificação/evidência; metadados
+não o substituem. Nenhuma parada está autorizada.
