@@ -1160,3 +1160,32 @@ Ao executar `npm run dev`, o primeiro save do worker restaura os resultados e ch
 Reiniciar/reconsultar não liquida em duplicidade nem aumenta revisão sem novo resultado. Repetir o plano mostra as seleções já preparadas/aplicadas como excluídas, sem nova migração. `--apply` sem candidatos aborta sem reescrever checkpoint ou tickets. O backup e o manifesto permanecem disponíveis para auditoria. Uma falha após preparar o checkpoint e antes de iniciar o worker é recuperável pelo reinício: os marcadores de versão tornam a reconciliação idempotente.
 
 Depois confira o diagnóstico de Madrid (sete settlements `1`, `resultKnown:true`, `timestampRecovery.status:settlement_replayed`) e o bilhete `cd4196d2-45be-4870-acad-c0289f549ff7` pelo endpoint/histórico. A recuperação de Parislongchamp continua sendo o modo de cotações, sem `--settlements`, exigindo preço AMQP novo para abrir seleção; uma migração de resultado não habilita odds antigas. Os testes reproduzem sete resultados antigos rejeitados, Bet ID longo, backup dos dois bilhetes, replay sem nova mensagem, liquidação normal, odds preservadas e repetição sem efeitos adicionais.
+
+### Investigar um `recover:timestamps --apply` abortado
+
+A mensagem genérica anterior ocultava a etapa e a exceção. `pgrep` vazio não identifica uma falha de filesystem/SQLite e não comprova ausência de lock residual ou de outro serviço na porta. Não apague locks ou backups nem repita `--apply` antes de identificar a etapa.
+
+Após atualizar o código, o próximo comando seguro é:
+
+```bash
+npm run recover:timestamps -- --inspect
+```
+
+Não exige fixture/mercado e **não executa migração, VACUUM, replay, alteração de bilhete ou remoção de locks**. Mostra versão do Node/SQLite, estado da porta configurada, existência e dono do lock (`running`, `not_running`, `invalid`, `unverifiable`), hashes do checkpoint, leitura/fingerprint dos tickets, os vinte backups mais recentes e temporários de recuperação. Examina arquivos existentes; não cria uma base vazia se o SQLite estiver ausente. Não imprime `.env`, corpos dos bilhetes, senha, SQL recebido ou mensagens brutas de exceção.
+
+Para cada backup, `checkpointMatchesBackup`/`audit.checkpointMatchesBefore` indicam se o checkpoint atual corresponde ao anterior; `audit.checkpointMatchesPrepared` identifica se o arquivo preparado já foi substituído. `ticketsMatchBackup`/`ticketsMatchRecordedFingerprint` comparam os **corpos dos bilhetes**, inclusive leitura normal de WAL pelo SQLite, não apenas bytes do arquivo principal. `sqliteInspection` informa falha de abertura/esquema sem vazar conteúdo. Um backup sem `audit.json` pode ser parcial: isso sozinho não prova uma etapa exata da tentativa antiga. Compare os arquivos/hashes; a mensagem genérica antiga não permite reconstruir uma exceção que não foi registrada. `temporaryFiles` lista temporários preservados, sem apagá-los.
+
+Novos abortos exibem JSON sanitizado com `stage`, `reason`, `cause`, `writes`, e, quando criado, `backup`/`auditId`. Códigos conhecidos de filesystem (`ENOENT`, `EACCES`, `EEXIST`, `ENOSPC` etc.) e `sqliteCode`/`sqliteReason` são expostos; a mensagem/stack da exceção nunca é publicada. Exemplos de etapas:
+
+- `api.port_check`: porta ocupada ou estado não verificável; nenhuma aplicação iniciada. Timeout/erro inesperado não é tratado como porta livre.
+- `worker.lock_check`/`worker.lock_create`: lock pré-existente ou falha ao adquirir o próprio; um lock externo permanece intacto, mesmo se seu PID não existir.
+- `backup.directory`/`backup.checkpoint`: falha de cópia ou diretório. Campos `*Started`/`*Complete` distinguem tentativa de arquivo possivelmente parcial de backup concluído.
+- `sqlite.open_readonly`/`sqlite.fingerprint`: base ausente, inacessível ou esquema divergente.
+- `sqlite.backup`/`sqlite.backup_verify`: criação/verificação da cópia consistente; `sqliteReason:readonly`, `busy`, `locked`, `cannot_open`, `disk_full` ou `sql_error` ajuda a localizar a causa. Não se remove a proteção read-only por padrão.
+- `checkpoint.replay`, `audit.write`, `checkpoint.concurrent_check`, `sqlite.concurrent_check`: replay, auditoria ou detecção de alteração concorrente; a substituição ainda não ocorreu.
+- `checkpoint.temp_write`/`checkpoint.replace`: temporário possivelmente parcial ou falha na substituição atômica.
+- `worker.lock_cleanup`: pode ocorrer **depois** da migração. Se `writes.checkpointReplaced:true`, não interprete exit code 1 como ausência de alteração; inspecione hashes antes de qualquer repetição.
+
+`writes.ticketBodiesWritten` é sempre false no migrador; a liquidação continua sendo responsabilidade da reconciliação normal. `checkpointReplaced:false` informa que esta tentativa não substituiu o original; backups/temporários podem existir. A limpeza libera apenas o lock criado pela própria execução, verificando inode/dispositivo; não remove lock substituído ou pré-existente. Uma falha na limpeza não mascara a causa original e aparece em `cleanupIssue`.
+
+Para o aborto já ocorrido no Mac, compartilhe apenas o JSON sanitizado de `--inspect`. Não é possível afirmar a causa exata com os dados atuais. O próximo passo de reparo depende desse resultado; nenhuma proteção foi contornada para tentar fazê-lo passar.
