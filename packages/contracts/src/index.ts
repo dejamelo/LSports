@@ -298,6 +298,8 @@ export interface IntegrationDiagnostic {
   retryAt?: string;
   attempts?: number;
   deferred?: boolean;
+  rateLimitSource?: "supplier_http" | "local_in_flight" | "local_host_cooldown" | "local_operation_cooldown";
+  coordinator?: { packageId: number; operation: string; pid: number; at: string; outcome: "reserved" | "success" | "rate_limited" };
   timeoutMs?: number;
   responseLimitBytes?: number;
   httpStatus?: number;
@@ -344,7 +346,8 @@ export interface FeedMessageMetadata {
   warnings?: string[];
 }
 export interface ConnectionState {
-  recoveryProgress?:{stage:"snapshot"|"handoff"|"waiting_retry"|"idle";startedAt:string;completedAt?:string;queuedAtHandoff?:number;regularSnapshotReady:boolean;nextRegularAttemptAt?:string};
+  lastSnapshotDiagnostic?: IntegrationDiagnostic;
+  recoveryProgress?:{stage:"snapshot"|"handoff"|"waiting_retry"|"idle";startedAt:string;completedAt?:string;queuedAtHandoff?:number;processedAtHandoff?:number;lastProgressAt?:string;regularSnapshotReady:boolean;nextRegularAttemptAt?:string};
   diagnostic?: IntegrationDiagnostic;
   phase: "starting" | "recovering" | "connected" | "error" | "stopped";
   message: string;

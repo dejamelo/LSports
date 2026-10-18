@@ -250,6 +250,9 @@ async function harness(flood: boolean) {
           waitingObserved = true;
           assert.equal(c.phase, "recovering");
           assert.equal(c.recoveryProgress.regularSnapshotReady, false);
+          assert.equal(c.recoveryProgress.processedAtHandoff,c.recoveryProgress.queuedAtHandoff);
+          assert(c.recoveryProgress.lastProgressAt);
+          assert.equal(c.lastSnapshotDiagnostic?.operation,"snapshot.events");
           assert(state.feed().events.every((e) => e.available === false));
         }
         if (c.phase === "connected" && attempts >= 2 && !abort.signal.aborted) {

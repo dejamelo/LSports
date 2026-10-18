@@ -262,3 +262,15 @@ test("partial Outright recovery does not hide a current open football fixture; r
   assert.equal(report.events[0].evidence, "observed_in_current_worker_session");
   assert.equal(report.ui.footballPreMatchNoSearch, 1);
 });
+
+ test("snapshot deferral survives a later connection error without conflating local delay with HTTP 429", () => {
+ const state = new TradeState();
+ state.set("prematch", {phase:"error",message:"closed", diagnostic:{operation:"worker.start",protocol:"local",category:"unexpected",message:"private"},lastSnapshotDiagnostic:{operation:"snapshot.events",protocol:"http",category:"rate_limited",message:"private",deferred:true,rateLimitSource:"local_host_cooldown",retryAt:"2026-10-18T20:41:36.444Z",coordinator:{packageId:4510,operation:"snapshot.events",pid:123,at:"2026-10-18T20:37:00Z",outcome:"success"}},recoveryProgress:{stage:"handoff",startedAt:"2026-10-18T20:37:57Z",queuedAtHandoff:100,processedAtHandoff:40,lastProgressAt:"2026-10-18T20:38:10Z",regularSnapshotReady:false}});
+ const lane=feedEvidence(state.feed()).lanes[0];
+ assert.equal(lane.diagnostic?.operation,"worker.start");
+ assert.equal(lane.snapshot.diagnostic?.rateLimitSource,"local_host_cooldown");
+ assert.equal(lane.snapshot.diagnostic?.httpStatus,undefined);
+ assert.equal(lane.snapshot.diagnostic?.coordinator?.packageId,4510);
+ assert.equal(lane.recoveryProgress?.processedAtHandoff,40);
+ assert(!JSON.stringify(lane).includes("private"));
+ });

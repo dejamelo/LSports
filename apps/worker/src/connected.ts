@@ -355,14 +355,14 @@ export async function session(
           if (closed || signal.aborted) throw failure || new Error("Disconnected during recovery");
           state.replace(lane, rows, started, api.snapshotAudit?.());
           regularSnapshotReady = true;
-          state.set(lane, { diagnostic: undefined });
+          state.set(lane, { diagnostic: undefined, lastSnapshotDiagnostic: undefined });
           nextDue["snapshot.events"] = Date.now() + Math.max(300000, config.recoveryMs);
         } catch (error) {
           if (closed || signal.aborted) throw error;
           state.set(lane,{lastSnapshotErrorAt:new Date().toISOString()});
           const diagnostic = describeFailure(error, "snapshot.events", "http");
           if (diagnostic.category !== "rate_limited") throw error;
-          state.set(lane, { diagnostic });
+          state.set(lane, { diagnostic, lastSnapshotDiagnostic: diagnostic });
           nextDue["snapshot.events"] = retryTime(diagnostic);
           console.warn(JSON.stringify({ lane, status: "deferred", ...diagnostic }));
         }
@@ -410,9 +410,14 @@ export async function session(
       // newer messages append after it, preserving ordering and persist-before-ACK.
       const batch = buffered;
       buffered = [];
-      state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,stage:"handoff",queuedAtHandoff:batch.length}});
+      state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,stage:"handoff",queuedAtHandoff:batch.length,processedAtHandoff:0,lastProgressAt:new Date().toISOString()}});
       const barrier = processing.then(async () => {
-        for (const msg of batch) await processMessage(msg);
+        for (const msg of batch) {
+          await processMessage(msg);
+          if (closed) break;
+          const progress=state.connections[lane].recoveryProgress!;
+          state.set(lane,{recoveryProgress:{...progress,processedAtHandoff:(progress.processedAtHandoff || 0)+1,lastProgressAt:new Date().toISOString()}});
+        }
       });
       processing = barrier;
       bufferingForSnapshot = false;

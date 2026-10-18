@@ -1443,3 +1443,29 @@ Conferir avanço de `lastAttemptAt`/`lastSuccessAt`, `recoveryProgress` e candid
 do fixture 20572565 **se ele ainda estiver aberto no fornecedor**. Não apagar
 arquivos de agendamento, locks ou checkpoint, não repetir migrações nem limpar
 bilhetes. Nenhum deploy é necessário para esta correção local.
+
+### Origem dos adiamentos e progresso de recuperação (2026-10-18)
+
+O anexo `diagnostico-lsports-corrigido.json` foi capturado às **20:39:53.112Z**, posterior à captura de 20:38:19 citada na solicitação. Nele, o handoff iniciado às 20:37:57.521Z terminou às 20:38:37.614Z: 100 mensagens em aproximadamente 40 segundos. Não demonstra novo travamento. O PreMatch posteriormente aparece em `worker.start / unexpected / unknown_exception`. Esse erro substituiu o diagnóstico do snapshot; o arquivo antigo não permite atribuir o `rate_limited` anterior a HTTP 429 ou ao limitador local. O próximo retry previsto (20:41:36.444Z) ainda não havia vencido na captura anexada.
+
+A evidência local agora preserva `lanes[].snapshot.diagnostic` separadamente do erro atual da conexão e informa:
+
+- `rateLimitSource=supplier_http`: a ação HTTP retornou rate limiting; conferir também `httpStatus` (429), `retryAfterMs`, `attempts` e `retryAt`.
+- `local_in_flight`: outra consulta detém o lock; nenhuma solicitação enviada nesta tentativa.
+- `local_host_cooldown`: intervalo compartilhado do host, inclusive backoff após 429 de outra operação/pacote.
+- `local_operation_cooldown`: intervalo reservado da operação/pacote, inclusive por outro processo usando o mesmo caminho de estado.
+- `coordinator`: última requisição registrada no journal compartilhado, com pacote, operação, PID, horário e resultado; não contém URLs ou credenciais. Trata-se da última requisição registrada, não de prova de que aquele PID continua ativo. Journals anteriores não possuem essa informação até a próxima requisição permitida.
+
+Snapshots regulares, Outright e `diagnose:trade` compartilham a coordenação por **origem do host e caminho de estado**. Caminhos distintos e computadores diferentes não compartilham esse arquivo; verificar se há outro worker/homologação usando o mesmo pacote. Não executar `diagnose:trade` para coletar esta evidência: ele consulta o fornecedor e consome os intervalos normais. Não apagar journal ou locks para antecipar tentativas.
+
+`recoveryProgress.processedAtHandoff`, `queuedAtHandoff` e `lastProgressAt` distinguem progresso de espera. A contagem avança após processamento, persistência e ACK; durante a execução, a publicação pode estar uma mensagem atrás. A disponibilidade continua bloqueada até um snapshot regular válido da conexão atual e conclusão do handoff. Keepalives não confirmam preços nem completam recuperação. Não foram alterados os intervalos, Retry-After, reserva entre processos ou critérios de disponibilidade.
+
+Validação local sem consultas adicionais, com o worker em execução:
+
+```bash
+npm run diagnose:feed:local > diagnostico-feed-1.json
+# Após o retryAt registrado e a conclusão do processamento, coletar novamente:
+npm run diagnose:feed:local > diagnostico-feed-2.json
+```
+
+Comparar `snapshot.diagnostic`, `snapshot.lastAttemptAt`, `lastSuccessAt`, `recoveryProgress` e o erro atual da conexão. Se ocorrer novamente `worker.start / unknown_exception`, preservar as linhas JSON do worker imediatamente anteriores: o anexo atual não demonstra sua causa e não justifica forçar consultas ou abrir mercados. Nenhuma conexão real ao fornecedor foi executada para esta alteração; os testes de concorrência e HTTP 429 usam processos/servidor locais e armazenamento temporário.

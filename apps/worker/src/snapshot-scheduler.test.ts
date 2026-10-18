@@ -17,11 +17,11 @@ test('persistent host cooldown and exponential backoff suppress HTTP across inst
   const first = new SnapshotScheduler('https://stm-snapshot.lsports.eu', 4511, options);
   try {
     await assert.rejects(() => first.run('snapshot.outright.fixtures', async () => { calls++; throw limited(); }), e => {
-      assert(e instanceof OperationError); assert.equal(e.diagnostic.retryAfterMs, 60000); assert.equal(e.diagnostic.attempts, 1); return true;
+      assert(e instanceof OperationError); assert.equal(e.diagnostic.retryAfterMs, 60000); assert.equal(e.diagnostic.attempts, 1); assert.equal(e.diagnostic.rateLimitSource, "supplier_http"); return true;
     });
     const second = new SnapshotScheduler('https://stm-snapshot.lsports.eu', 4510, options);
     await assert.rejects(() => second.run('snapshot.events', async () => { calls++; }), e => {
-      assert(e instanceof OperationError); assert.equal(e.diagnostic.deferred, true); assert.equal(e.diagnostic.httpStatus, undefined); return true;
+      assert(e instanceof OperationError); assert.equal(e.diagnostic.deferred, true); assert.equal(e.diagnostic.httpStatus, undefined); assert.equal(e.diagnostic.rateLimitSource, "local_host_cooldown"); assert.equal(e.diagnostic.coordinator?.packageId, 4511); assert.equal(e.diagnostic.coordinator?.operation, "snapshot.outright.fixtures"); assert.equal(e.diagnostic.coordinator?.outcome, "rate_limited"); return true;
     });
     assert.equal(calls, 1);
     now += 60000;
@@ -30,7 +30,7 @@ test('persistent host cooldown and exponential backoff suppress HTTP across inst
     });
     now += 120000;
     assert.equal(await first.run('snapshot.outright.fixtures', async () => 'recovered'), 'recovered');
-    await assert.rejects(() => first.run('snapshot.outright.fixtures', async () => assert.fail('Repeated query')));
+    await assert.rejects(() => first.run('snapshot.outright.fixtures', async () => assert.fail('Repeated query')), e => { assert(e instanceof OperationError); assert.equal(e.diagnostic.rateLimitSource, 'local_operation_cooldown'); return true; });
     now += 5000;
     assert.equal(await first.run('snapshot.outright.markets', async () => 'markets'), 'markets');
   } finally { await rm(dir, { recursive: true, force: true }); }

@@ -39,6 +39,8 @@ export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
         deferred: diagnostic.deferred === true,
         retryAt: iso(diagnostic.retryAt),
         retryAfterMs: diagnostic.retryAfterMs,
+        rateLimitSource: diagnostic.rateLimitSource,
+        coordinator: diagnostic.coordinator ? {packageId:diagnostic.coordinator.packageId,pid:diagnostic.coordinator.pid,operation:/^[a-z_.]{1,80}$/.test(diagnostic.coordinator.operation)?diagnostic.coordinator.operation:"unknown",at:iso(diagnostic.coordinator.at),outcome:diagnostic.coordinator.outcome} : undefined,
       }
     : null;
 const selectable = (event: SportEvent) =>
@@ -67,6 +69,8 @@ export function feedEvidence(feed: EventFeed, now = Date.now()) {
         stage:connection.recoveryProgress.stage,
         startedAt:iso(connection.recoveryProgress.startedAt),completedAt:iso(connection.recoveryProgress.completedAt),
         queuedAtHandoff:connection.recoveryProgress.queuedAtHandoff,
+        processedAtHandoff:connection.recoveryProgress.processedAtHandoff,
+        lastProgressAt:iso(connection.recoveryProgress.lastProgressAt),
         regularSnapshotReady:connection.recoveryProgress.regularSnapshotReady,
         nextRegularAttemptAt:iso(connection.recoveryProgress.nextRegularAttemptAt),
       }:null,
@@ -83,6 +87,7 @@ export function feedEvidence(feed: EventFeed, now = Date.now()) {
         lastAttemptAt: iso(connection?.lastSnapshotAttemptAt),
         lastSuccessAt: iso(connection?.lastSnapshotAt),
         lastErrorAt: iso(connection?.lastSnapshotErrorAt),
+        diagnostic: safeFeedDiagnostic(connection?.lastSnapshotDiagnostic),
         events: connection?.snapshotEvents,
         audit: coverage?.snapshot ?? null,
       },
