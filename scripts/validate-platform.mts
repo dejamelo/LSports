@@ -178,12 +178,38 @@ try {
   ).admin;
   const client = platform.clients(admin)[0];
   const operation = platform.operations(admin, client.id)[0];
-  const key = platform.credentials(admin, client.id, operation.id)[0];
+  const originalKey = platform.credentials(admin, client.id, operation.id)[0];
+  const oldSecret = await readFile(
+    join(directory, "credentials", `${originalKey.id}.key`),
+    "utf8",
+  );
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Rotar", exact: true }).click();
+  await page.getByText("Revocada", { exact: true }).waitFor();
+  const key = platform
+    .credentials(admin, client.id, operation.id)
+    .find((k) => !k.revoked)!;
+  assert.notEqual(key.id, originalKey.id);
+  // Reopen read-only, proving the rotated key survives store reopen.
+  const persisted = new PlatformStore(directory, true);
   const secret = await readFile(
     join(directory, "credentials", `${key.id}.key`),
     "utf8",
   );
+  assert.equal(persisted.integration(secret)?.credentialId, key.id);
+  assert.equal(persisted.integration(oldSecret), undefined);
+  persisted.close();
   assert(!(await page.content()).includes(secret));
+  assert(!(await page.content()).includes(oldSecret));
+  const rejected = await fetch(`${base}/api/integration/v1/embed-sessions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${oldSecret}`,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+  });
+  assert.equal(rejected.status, 401);
   const session = await fetch(`${base}/api/integration/v1/embed-sessions`, {
     method: "POST",
     headers: {
@@ -322,6 +348,8 @@ try {
         "create_client",
         "create_currency_operation",
         "server_only_key",
+        "panel_rotation_old_key_rejected",
+        "rotated_key_readonly_reopen",
         "authorized_cross_origin_iframe",
         "blocked_unauthorized_parent",
         "single_use_exchange",

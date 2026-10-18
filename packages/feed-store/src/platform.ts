@@ -765,7 +765,7 @@ export class PlatformStore {
     this.authorizeOperation(actor, clientId, operationId);
     return this.db
       .prepare(
-        "SELECT id,name,created,revoked,operation_id as operationId,client_id as clientId,currency FROM operation_credentials WHERE operation_id=? ORDER BY created DESC",
+        "SELECT id,name,created,revoked,operation_id as operationId,client_id as clientId,currency FROM operation_credentials WHERE operation_id=? ORDER BY created DESC,rowid DESC",
       )
       .all(operationId);
   }

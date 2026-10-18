@@ -75,13 +75,21 @@ export function platformRoutes(
   };
   const auth = (req: express.Request) => {
     const bearer = req.get("Authorization") || "";
-    if (!bearer.startsWith("Bearer ") || bearer.length > 250)
+    const parsed = /^Bearer +([A-Za-z0-9._~+/-]+=*)$/i.exec(bearer);
+    if (!parsed || bearer.length > 250)
       throw new PlatformError(
         "AUTH_REQUIRED",
         "Credencial o sesión requerida.",
         401,
       );
-    const access = platform.integration(bearer.slice(7));
+    const value = parsed[1];
+    if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value))
+      throw new PlatformError(
+        "CREDENTIAL_ID_NOT_SECRET",
+        "El ID no es el secreto. Usá el contenido completo del archivo .key vigente desde tu backend.",
+        401,
+      );
+    const access = platform.integration(value);
     if (!access)
       throw new PlatformError(
         "AUTH_REQUIRED",

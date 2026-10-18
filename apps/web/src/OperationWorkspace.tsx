@@ -584,7 +584,13 @@ export default function OperationWorkspace({
                 <article className="control-key" key={k.id}>
                   <div>
                     <strong>{k.name}</strong>
+                    <span>ID (no es el secreto)</span>
                     <code>{k.id}</code>
+                    <small>
+                      Archivo del backend: credentials/{k.id}.key, dentro de
+                      PLATFORM_DATA_DIR. Usá su contenido completo como Bearer;
+                      no este ID. Rotar crea otro archivo.
+                    </small>
                     <small>
                       {k.revoked
                         ? "Revocada"

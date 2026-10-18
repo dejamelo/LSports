@@ -21,7 +21,8 @@
     "validate:local-ui": "tsx scripts/validate-local-sportsbook.mts",
     "recover:timestamps": "npm run recover:timestamps -w @lsports/worker --",
     "platform:bootstrap": "node --import tsx --env-file-if-exists=.env scripts/bootstrap-platform.ts",
-    "validate:platform-ui": "node --import tsx scripts/validate-platform.mts"
+    "validate:platform-ui": "node --import tsx scripts/validate-platform.mts",
+    "diagnose:integration": "node --import tsx --env-file-if-exists=.env scripts/diagnose-integration.ts"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",

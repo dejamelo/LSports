@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile, stat, writeFile } from "node:fs/promises";
@@ -1494,5 +1496,87 @@ test("risk dashboard, global view, review and target suspensions enforce tenant 
     assert.equal(global.data.operations.length, 2);
   } finally {
     await s.close();
+  }
+});
+
+test("integration distinguishes credential ID, supports case-insensitive Bearer, rejects quoted keys", async () => {
+  const t = await setup();
+  try {
+    const client = await t.create("header-test");
+    const key = await t.key(client.id);
+    const input = {
+      clientId: client.id,
+      operationId: client.operation.id,
+      currency: "ARS",
+      playerId: "demo-001",
+      parentOrigin: "https://header-test.example",
+      channel: "web",
+    };
+    const endpoint = "/api/integration/v1/embed-sessions";
+    const idOnly = await t.request(endpoint, "POST", input, undefined, key.id);
+    assert.equal(idOnly.status, 401);
+    assert.equal(idOnly.data.code, "CREDENTIAL_ID_NOT_SECRET");
+    const quoted = await t.request(
+      endpoint,
+      "POST",
+      input,
+      undefined,
+      undefined,
+      { Authorization: `Bearer "${key.value}"` },
+    );
+    assert.equal(quoted.status, 401);
+    const lower = await t.request(
+      endpoint,
+      "POST",
+      input,
+      undefined,
+      undefined,
+      { Authorization: `bearer ${key.value}` },
+    );
+    assert.equal(lower.status, 201);
+    const run = promisify(execFile);
+    const args = [
+      "--import",
+      "tsx",
+      "scripts/diagnose-integration.ts",
+      "--credential-id",
+      key.id,
+      "--client-id",
+      client.id,
+      "--operation-id",
+      client.operation.id,
+      "--currency",
+      "ARS",
+      "--base-url",
+      t.base,
+      "--parent-origin",
+      "https://header-test.example",
+      "--probe",
+    ];
+    const output = await run(process.execPath, args, {
+      env: { ...process.env, PLATFORM_DATA_DIR: t.directory },
+    });
+    assert(!output.stdout.includes(key.value));
+    assert(!output.stdout.includes("iframeUrl"));
+    const reports = output.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(reports.at(-1).httpStatus, 201);
+    const invalidPath = join(t.directory, "invalid-input.key");
+    await writeFile(invalidPath, `"${key.value}"\n`);
+    await assert.rejects(
+      run(process.execPath, [...args, "--key-file", invalidPath], {
+        env: { ...process.env, PLATFORM_DATA_DIR: t.directory },
+      }),
+      (error: any) => {
+        assert(!error.stdout.includes(key.value));
+        assert(error.stdout.includes("INVALID_KEY_INPUT"));
+        assert(error.stdout.includes('"stage":"credential.read"'));
+        return true;
+      },
+    );
+  } finally {
+    await t.close();
   }
 });

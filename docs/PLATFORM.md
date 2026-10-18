@@ -221,3 +221,41 @@ Para concluir o produto comercial:
 6. Definir requisitos comerciais, jurisdicionais/licenças, KYC/idade/autoexclusão/jogo responsável, privacidade e suporte conforme a operação contratada. Homologar com os participantes; só então habilitar dinheiro real e produzir os manuais finais baseados no produto entregue.
 
 Resultado da entrega: `npm test` com **118 testes aprovados**, build completo aprovado e os dois roteiros de navegador (`validate:platform-ui` e `validate:local-ui`) aprovados com Chromium. O bootstrap foi executado em diretório temporário: criou a conta uma vez, recusou sobrescrita e não imprimiu o segredo. Nenhuma validação nova de conexão com o fornecedor ou de hardware é afirmada.
+
+### Diagnóstico seguro de credenciais e HTTP 401
+
+O painel exibe **o ID, nunca o segredo**. A geração grava a chave completa em
+`PLATFORM_DATA_DIR/credentials/<ID>.key` (diretório padrão `.runtime/platform`,
+arquivo 0600). A rotação gera **outro ID e outro arquivo**, revoga a chave anterior
+e suas sessões; o arquivo antigo é preservado, mas não autentica mais. Não copie
+um UUID, nome, caminho, aspas ou o texto `Bearer` como se fossem a chave.
+O backend do cassino envia `Authorization: Bearer <conteúdo completo do novo arquivo>`.
+Nunca coloque a chave permanente no iframe, console, chat, URL ou argumentos do shell.
+O esquema Bearer aceita caixa indiferente; tokens com aspas ou espaços internos são rejeitados.
+
+Execute na raiz do repositório, com a API rodando, substituindo apenas `ID_NOVO_DO_PAINEL`
+pelo UUID da credencial ativa (não pelo segredo):
+
+```sh
+npm run diagnose:integration -- --credential-id ID_NOVO_DO_PAINEL --client-id 941e6249-4e84-4154-a71e-1b15d9983ca3 --operation-id 6685c19e-9f27-4769-a2c2-772abd4053d0 --currency ARS --player-id demo-001 --parent-origin http://localhost:5173 --channel web --probe
+```
+
+O diagnóstico lê a chave diretamente do arquivo no servidor e confere formato,
+hash persistido, revogação e vínculo cliente/operação/moeda, abrindo SQLite somente
+para leitura. Não altera credenciais, bilhetes, checkpoints ou migrações. `--probe`
+cria somente um código temporário de incorporação, sem mostrá-lo nem apostar; sem
+essa opção, não faz chamadas HTTP. Só permite API HTTP em loopback, não segue
+redirecionamentos e tem timeout de 10 segundos. Não consulta LSports.
+`--key-file /caminho/arquivo.key` testa um arquivo alternativo sem passar seu conteúdo
+na linha de comando; não remove aspas nem normaliza silenciosamente uma chave inválida.
+
+A saída informa a etapa: `credential.read`, `credential.persistence`,
+`authorization.build` ou `embed-session.request`. Uma falha sem HTTP informa
+`httpStatus:null`, tipo de exceção limitado e códigos conhecidos como ENOENT,
+EACCES, ECONNREFUSED ou timeout; nunca a exceção original, headers ou tokens.
+Isso não presume indisponibilidade da API: `/control` responder 200 é compatível
+com erro de entrada/header, credencial desconhecida ou falha de outra requisição.
+Se a conferência local passa e o POST dá 401, confira se **a API em execução usa o
+mesmo PLATFORM_DATA_DIR** e a versão atual, além do arquivo da credencial nova.
+403 indica conferir escopo e domínio autorizado (`http://localhost:5173` exato).
+Compartilhe apenas essas linhas sanitizadas, nunca o arquivo `.key`.
