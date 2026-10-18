@@ -1,0 +1,7 @@
+# Review only. Merge with verified existing POSNET definitions; never use standalone.
+# Do not run compose up/recreate until images, volumes, networks and aliases match.
+services:
+  demo-sso-canary:
+    restart: unless-stopped
+  production-sso-canary:
+    restart: unless-stopped

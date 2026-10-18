@@ -183,3 +183,47 @@ Validación local del colector: `bash -n deploy/homologation/diagnose-docker.sh`
 y `python3 deploy/homologation/test-diagnose-docker.py` (5 tests, Docker/AWS/systemd
 simulados; ninguna operación remota). No se repitieron migraciones ni tests del
 feed porque no cambió el código de aplicación.
+
+## Cotización en AWS Pricing Calculator — campos pendientes
+
+El inventario completo confirma Ohio y ausencia de AWS CLI. Nueva comprobación
+pública de Price List desde el workspace: 403 del proxy; **no hay tarifas actuales
+confirmadas**. El presupuesto numérico anterior sigue siendo indicativo. No pedir
+aprobación del importe como si estuviera cotizado oficialmente.
+
+Abrir https://calculator.aws/#/ y crear dos estimaciones comparables:
+
+| Campo | Actual | Propuesta compartida |
+|---|---|---|
+| Servicio | Amazon EC2 | Amazon EC2 |
+| Región | US East (Ohio), us-east-2 | Misma |
+| Sistema operativo | Linux | Linux |
+| Tenancy | Shared | Shared |
+| Instancias | 1 | 1 |
+| Tipo | c7i-flex.large | m7i.xlarge (4 vCPU, 16 GiB) |
+| Compra | On-Demand; sin Savings Plans/reservas | Igual |
+| Uso | 730 horas/mes, carga continua | Igual |
+| Créditos promocionales | No descontar | No descontar |
+
+Añadir a ambas el inventario **real** de EBS (no inferirlo del filesystem):
+Consola EC2 → instancia → Storage: por volumen anotar tamaño GiB, tipo gp3/gp2/etc,
+IOPS y throughput aprovisionados, cantidad de volúmenes y snapshots/retención
+facturables. Mantener esos parámetros en la propuesta si no cambian.
+En VPC/IPAM o la factura, confirmar cantidad/horas de IPv4 públicas facturadas
+(incluidas Elastic IP), sin crear una IP nueva. Añadir transferencia saliente y
+otros servicios existentes por sus cantidades reales. No añadir NAT, ALB, backups
+nuevos o monitoreo sin autorización; no descontar como ahorro un servicio que
+seguirá facturado. La AZ us-east-2c afecta disponibilidad, no elegir otra región
+para obtener un precio menor.
+
+Guardar enlace/exportación de las estimaciones con fecha, moneda USD, total mensual,
+componente EC2, EBS, IPv4 y transferencia. Cálculo de diferencia mensual:
+`total propuesto − total actual`; para cómputo continuo:
+`730 × (precio/h m7i.xlarge − precio/h c7i-flex.large)`.
+Aclarar impuestos y compromisos existentes fuera de la estimación On-Demand.
+
+Alternativa separada: conservar todos los costos actuales y sumar otra estimación
+EC2 de m7i.xlarge con su propio EBS/IPv4/red necesarios. No suponer que un EBS o
+una IPv4 existente se comparte gratuitamente entre dos instancias. No crearla ahora.
+La previsión anterior de stop/start (5–15 minutos, ventana 20–30) sólo se evalúa
+tras completar POSNET-BOOT-PLAN.md, confirmar IP/arranque/backup y aprobar el importe.

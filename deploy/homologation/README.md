@@ -81,3 +81,10 @@ servicios habilitados de systemd y, si la AWS CLI existente lo permite, precios
 On-Demand oficiales de Ohio. No sustituye la revisión de scripts de arranque;
 `restartPolicy=no` sin mecanismo externo confirmado bloquea el redimensionamiento.
 Validación local: `python3 deploy/homologation/test-diagnose-docker.py`.
+
+La corrección de arranque de los dos backends que atienden las rutas actuales
+está propuesta, **no aplicada**, en [POSNET-BOOT-PLAN.md](POSNET-BOOT-PLAN.md),
+con comandos de backup, cambio de política y reversión. Antes de stop/start,
+comparar Caddy activo vs configuración de inicio con `check-posnet-caddy-boot.sh`.
+Los campos de cotización oficial en AWS Pricing Calculator están al final de
+CAPACITY-REVIEW.md; las tarifas anteriores no se consideran confirmadas.
