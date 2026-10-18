@@ -100,12 +100,12 @@ export class SnapshotScheduler {
         // A completed failure must not keep masquerading as an in-flight reservation.
         // Keep the full original cooldown; recording failure does not permit an early retry.
         const diagnostic = describeFailure(error, name, "http");
-        const {category, reason, httpStatus, errorType, clientCode, networkCode, stage,responseLimitBytes,timeoutMs,memoryBudgetBytes,memoryHeadroomBytes} = diagnostic;
+        const {category, reason, httpStatus, errorType, clientCode, networkCode, stage,responseLimitBytes,timeoutMs,memoryBudgetBytes,memoryHeadroomBytes,snapshotMemory} = diagnostic;
         schedule.lastRequest!.outcome = "failed";
         schedule.lastRequest!.completedAt = new Date(this.now()).toISOString();
-        schedule.lastRequest!.failure = {category,reason,httpStatus,errorType,clientCode,networkCode,stage,responseLimitBytes,timeoutMs,memoryBudgetBytes,memoryHeadroomBytes};
+        schedule.lastRequest!.failure = {category,reason,httpStatus,errorType,clientCode,networkCode,stage,responseLimitBytes,timeoutMs,memoryBudgetBytes,memoryHeadroomBytes,snapshotMemory};
         await save();
-        throw new OperationError({...diagnostic, requesterPid:process.pid, coordinator:schedule.lastRequest});
+        throw new OperationError({...diagnostic, retryAt:new Date(schedule.due[key]).toISOString(), requesterPid:process.pid, coordinator:schedule.lastRequest});
       }
     } finally { await lock.close().catch(() => {}); await rm(lockPath, { force: true }); }
   }

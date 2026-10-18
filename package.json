@@ -27,6 +27,7 @@
     "demo:synthetic": "node --import tsx scripts/synthetic-demo.ts",
     "diagnose:timestamps:utc": "node --import tsx --env-file-if-exists=.env scripts/diagnose-utc-contract.ts",
     "validate:synthetic-ui": "node --import tsx scripts/validate-synthetic-demo.mts",
+    "diagnose:memory": "node --import tsx scripts/diagnose-memory.ts",
     "diagnose:feed:local": "node --import tsx --env-file-if-exists=.env scripts/diagnose-feed.ts"
   },
   "devDependencies": {

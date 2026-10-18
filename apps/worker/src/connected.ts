@@ -382,7 +382,7 @@ export async function session(
           state.set(lane,{lastSnapshotErrorAt:new Date().toISOString()});
           const diagnostic = describeFailure(error, "snapshot.events", "http");
           state.set(lane, { diagnostic, lastSnapshotDiagnostic: diagnostic });
-          if (diagnostic.category !== "rate_limited") throw error;
+          if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded") throw error;
           nextDue["snapshot.events"] = retryTime(diagnostic);
           console.warn(JSON.stringify({ lane, status: "deferred", ...diagnostic }));
         }

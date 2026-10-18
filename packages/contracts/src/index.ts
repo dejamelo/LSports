@@ -204,6 +204,8 @@ export interface SnapshotRequestInspection {
 }
 export interface IntegrationDiagnostic {
   requestInspection?: SnapshotRequestInspection;
+  amqpCloseSignals?: ("connection_forced"|"heartbeat_timeout"|"ack_timeout"|"administrative_close"|"server_shutdown")[];
+  distributionInspection?: {before:boolean;startRequested:boolean;after?:boolean};
   operation:
     | "config"
     | "distribution.status"
@@ -272,6 +274,7 @@ export interface IntegrationDiagnostic {
     | "channel_closed"
     | "consumer_cancelled"
     | "worker_stopped"
+    | "distribution_still_off"
     | "unknown_exception"
     | "unsupported_content_type"
     | "unsupported_content_encoding"
@@ -305,11 +308,12 @@ export interface IntegrationDiagnostic {
   deferred?: boolean;
   rateLimitSource?: "supplier_http" | "local_in_flight" | "local_host_cooldown" | "local_operation_cooldown";
   requesterPid?: number;
-  coordinator?: { packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage" | "responseLimitBytes" | "timeoutMs" | "memoryBudgetBytes" | "memoryHeadroomBytes"> };
+  coordinator?: { packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage" | "responseLimitBytes" | "timeoutMs" | "memoryBudgetBytes" | "memoryHeadroomBytes" | "snapshotMemory"> };
   timeoutMs?: number;
   responseLimitBytes?: number;
   memoryBudgetBytes?: number;
   memoryHeadroomBytes?: number;
+  snapshotMemory?: {heapLimitBytes:number|null;heapUsedBytes:number|null;heapHeadroomBytes:number;availableMemoryBytes:number|null;limitingFactor:"heap"|"available_memory"|"both"|"heap_only"};
   httpStatus?: number;
   providerStatus?: number;
   amqpCode?: number;

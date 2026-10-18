@@ -156,8 +156,10 @@ for (const rootClose of [false, true])
               report.sessionEnds[0].diagnostic?.operation,
               rootClose ? "amqp.connection" : "amqp.channel",
             );
-            if (rootClose)
+            if (rootClose) {
               assert.equal(report.sessionEnds[0].diagnostic?.amqpCode, 320);
+              assert.deepEqual(report.sessionEnds[0].diagnostic?.amqpCloseSignals,["connection_forced"]);
+            }
             assert(!JSON.stringify(report).includes("private broker text"));
             assert.equal(report.sessionEnds[0].id, firstId);
             assert(state.feed().events.every((e) => !e.available));

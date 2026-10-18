@@ -100,7 +100,7 @@ const closedFixture: TradeEvent = {
     },
   ],
 };
-async function harness(flood: boolean) {
+async function harness(flood: boolean, memoryRefusal=false) {
   const state = new TradeState(),
     abort = new AbortController();
   let receive: (m: ConsumeMessage) => void = () => {};
@@ -183,7 +183,8 @@ async function harness(flood: boolean) {
         throw new OperationError({
           operation: "snapshot.events",
           protocol: "http",
-          category: "rate_limited",
+          category: memoryRefusal?"response_limit":"rate_limited",
+          ...(memoryRefusal?{reason:"memory_budget_exceeded" as const}:{}),
           deferred: true,
           retryAt: new Date(retryAt).toISOString(),
           retryAfterMs: 1200,
@@ -324,3 +325,5 @@ test("keepalives do not complete the initial recovery; scheduled retry can compl
       connected.coverage!.prematch.activity!.lastDataDecodedAt!,
   );
 });
+
+test("memory refusal keeps AMQP session alive, ACKs only persisted messages and waits for retry before completing the baseline",async()=>{await harness(true,true);});

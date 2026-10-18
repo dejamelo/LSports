@@ -500,3 +500,16 @@ test("SDK conversion failure is classified instead of unexpected without disclos
 // Protocol tests isolate scheduling; cross-process coordination is exercised separately.
 const clients = (pkg: Parameters<typeof createClients>[0], urls: Parameters<typeof createClients>[1]) =>
   createClients(pkg, urls, { run: (_operation, action) => action() });
+
+test('distribution still off after a successful start response is explicit without extra polling or accepting a connection',async()=>{
+ const requests:string[]=[];
+ const server=await httpFixture(async(req,res)=>{
+  for await(const _ of req){}requests.push(req.url||'');res.setHeader('Content-Type','application/json');
+  res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:req.url==='/Package/GetDistributionStatus'?{IsDistributionOn:false}:{}}));
+ });
+ try{
+  await assert.rejects(()=>clients(config(),{snapshotUrl:server.url,customersUrl:server.url}).startDistribution(),e=>{
+   assert(e instanceof OperationError);assert.equal(e.diagnostic.reason,'distribution_still_off');assert.deepEqual(e.diagnostic.distributionInspection,{before:false,startRequested:true,after:false});return true;
+  });assert.deepEqual(requests,['/Package/GetDistributionStatus','/Distribution/Start','/Package/GetDistributionStatus']);
+ }finally{await server.close();}
+});

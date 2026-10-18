@@ -17,6 +17,7 @@ import type { IntegrationDiagnostic } from "@lsports/contracts";
 export type Operation = IntegrationDiagnostic["operation"];
 export type Protocol = IntegrationDiagnostic["protocol"];
 type Observation = {
+  lane?:import("@lsports/contracts").Lane;
   operation?: Operation;
   rawResponse?: unknown;
   responseInspection?: import("@lsports/contracts").HttpResponseInspection;
@@ -126,9 +127,9 @@ axios.defaults.adapter = async (config) => {
   const observation = observations.getStore();
   if(observation?.operation==="snapshot.events"){
     let capacity:ReturnType<typeof snapshotCapacity>;
-    try{capacity=snapshotCapacity();}catch{throw configError("configuration",["LSPORTS_SNAPSHOT_MAX_RESPONSE_MB"],"Límite snapshot inválido: debe ser un entero entre 1 y 256 MiB.");}
+    try{capacity=snapshotCapacity(process.env,undefined,observation.lane);}catch{throw configError("configuration",[observation.lane==="inplay"?"LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB":"LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB"],"Límite snapshot inválido: debe ser un entero entre 1 y 256 MiB.");}
     observation.responseLimitBytes=capacity.limitBytes;
-    if(!capacity.allowed)throw new OperationError({operation:observation.operation,protocol:"local",category:"response_limit",reason:"memory_budget_exceeded",stage:"request",responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,message:"Snapshot aplazado sin HTTP: espacio insuficiente en heap para el presupuesto de conversión. Revisá capacidad del proceso; no se modifica la proyección."});
+    if(!capacity.allowed)throw new OperationError({operation:observation.operation,protocol:"local",category:"response_limit",reason:"memory_budget_exceeded",stage:"request",responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,snapshotMemory:capacity.memory,deferred:true,message:"Snapshot aplazado sin HTTP: espacio insuficiente en heap para el presupuesto de conversión. Revisá capacidad del proceso; no se modifica la proyección."});
     config.maxContentLength=capacity.limitBytes;
   }
   if (observation) {
@@ -382,7 +383,16 @@ export function describeFailure(
     message =
       "La respuesta HTTP no contiene una estructura válida para esta operación.";
   }
+  const amqpCloseSignals:NonNullable<IntegrationDiagnostic["amqpCloseSignals"]>=[];
+  if(protocol==="amqp"){
+    if(amqpCode===320)amqpCloseSignals.push("connection_forced");
+    if(/heartbeat.*(?:timeout|missed)|missed.*heartbeat/i.test(text))amqpCloseSignals.push("heartbeat_timeout");
+    if(/(?:delivery )?acknowledg.*timed out/i.test(text))amqpCloseSignals.push("ack_timeout");
+    if(/management plugin|closed by administrator|administrative close/i.test(text))amqpCloseSignals.push("administrative_close");
+    if(/broker.*shutdown|server.*shutdown/i.test(text))amqpCloseSignals.push("server_shutdown");
+  }
   return {
+    ...(amqpCloseSignals.length?{amqpCloseSignals}:{}),
     operation,
     protocol,
     category,
@@ -426,8 +436,9 @@ export async function operation<T>(
   name: Operation,
   protocol: Protocol,
   action: () => Promise<T>,
+  context?:{lane:import("@lsports/contracts").Lane},
 ): Promise<T> {
-  const observation: Observation = { operation: name, startedAt: Date.now() };
+  const observation: Observation = { operation: name, startedAt: Date.now(),...context };
   return observations.run(observation, async () => {
     try {
       return await action();
@@ -436,7 +447,7 @@ export async function operation<T>(
       throw new OperationError({ ...diagnostic,
         ...(observation.httpStatus && diagnostic.httpStatus === undefined ? { httpStatus: observation.httpStatus } : {}),
         ...(observation.providerStatus && diagnostic.providerStatus === undefined ? { providerStatus: observation.providerStatus } : {}),
-        ...(name.startsWith("snapshot.") && observation.responseInspection ? { responseInspection: observation.responseInspection } : {}),
+        ...((name.startsWith("snapshot.") || name.startsWith("distribution.")) && observation.responseInspection ? { responseInspection: observation.responseInspection } : {}),
       });
     } finally {
       // Do not retain a full snapshot through an HTTP/AsyncLocalStorage resource.

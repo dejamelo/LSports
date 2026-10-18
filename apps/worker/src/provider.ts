@@ -74,7 +74,7 @@ export function clients(
   scheduling?: Pick<SnapshotScheduler, "run">,
 ): ProviderClients {
   const scheduler = scheduling || new SnapshotScheduler(urls.snapshotUrl, config.packageId);
-  const snapshotRequest = <T>(name: import("./diagnostics.js").Operation, action: () => Promise<T>) => scheduler.run(name, () => operation(name, "http", action));
+  const snapshotRequest = <T>(name: import("./diagnostics.js").Operation, action: () => Promise<T>) => scheduler.run(name, () => operation(name, "http", action,{lane:config.lane}));
   const credentials = {
     packageId: config.packageId,
     username: config.username,
@@ -256,6 +256,8 @@ export function clients(
             operation: "distribution.start",
             protocol: "http",
             category: "invalid_response",
+            reason:"distribution_still_off",
+            distributionInspection:{before:false,startRequested:true,after:false},
             message:
               "La distribución sigue apagada después de solicitar inicio.",
           });

@@ -167,3 +167,41 @@ test("full response evidence is released after success and failure even if an as
     await new Promise<void>((r) => server.close(() => r()));
   }
 });
+
+test('per-lane caps isolate InPlay from legacy global 256 and expose heap vs physical constraints including zero available RAM',()=>{
+ const env={LSPORTS_SNAPSHOT_MAX_RESPONSE_MB:'256',LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'256',LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB:'128'};
+ const sample={heapLimitBytes:2048*MiB,heapUsedBytes:185*MiB,availableMemoryBytes:5000*MiB};
+ const prematch=snapshotCapacity(env,sample,'prematch');const inplay=snapshotCapacity(env,sample,'inplay');
+ assert.equal(prematch.allowed,false);assert.equal(prematch.memory.limitingFactor,'heap');assert.equal(inplay.allowed,true);assert.equal(inplay.limitBytes,128*MiB);
+ assert.equal(snapshotCapacity({LSPORTS_SNAPSHOT_MAX_RESPONSE_MB:'256'},sample,'inplay').limitBytes,128*MiB);
+ assert.equal(snapshotCapacity(env,{...sample,heapLimitBytes:4096*MiB,availableMemoryBytes:1800*MiB},'prematch').memory.limitingFactor,'available_memory');
+ assert.equal(snapshotCapacity(env,{...sample,availableMemoryBytes:0},'inplay').allowed,false);
+ assert.equal(snapshotCapacity(env,{...sample,heapLimitBytes:4096*MiB},'prematch').allowed,true);
+});
+
+test('actual HTTP adapter refuses zero available memory without issuing HTTP or inventing a status',async()=>{
+ let calls=0;const original=process.availableMemory;
+ const server=createServer((_req,res)=>{calls++;res.end('{}');});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  const address=server.address();assert(address&&typeof address!=='string');const url=`http://127.0.0.1:${address.port}`;
+  const api=clients({lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',queue:'_4511_',port:5672,tls:false},{snapshotUrl:url,customersUrl:url},{run:async(_name,action)=>action()});
+  process.availableMemory=()=>0;
+  await assert.rejects(()=>api.snapshot(),e=>{
+   assert(e instanceof OperationError);assert.equal(e.diagnostic.reason,'memory_budget_exceeded');assert.equal(e.diagnostic.protocol,'local');assert.equal(e.diagnostic.httpStatus,undefined);assert.equal(e.diagnostic.snapshotMemory?.availableMemoryBytes,0);assert.equal(e.diagnostic.snapshotMemory?.limitingFactor,'available_memory');return true;
+  });assert.equal(calls,0);
+ }finally{process.availableMemory=original;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
+});
+
+test('official clients use lane context: global 256 is refused at 1800 MiB while InPlay completes under independent 128',async()=>{
+ const keys=['LSPORTS_SNAPSHOT_MAX_RESPONSE_MB','LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB','LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'];
+ const saved=keys.map(k=>process.env[k]);const original=process.availableMemory;let calls=0;
+ const server=createServer(async(req,res)=>{for await(const _ of req){}calls++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}));});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  process.env.LSPORTS_SNAPSHOT_MAX_RESPONSE_MB='256';delete process.env.LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB;delete process.env.LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB;process.availableMemory=()=>1800*MiB;
+  const address=server.address();assert(address&&typeof address!=='string');const url=`http://127.0.0.1:${address.port}`;
+  const make=(lane:'prematch'|'inplay')=>clients({lane,packageId:lane==='prematch'?4511:4510,username:'isolated',password:'',hostname:'unused',vhost:'unused',queue:'unused',port:5672,tls:false},{snapshotUrl:url,customersUrl:url},{run:async(_name,action)=>action()});
+  const inplay=make('inplay');assert.deepEqual(await inplay.snapshot(),[]);assert.equal(inplay.snapshotAudit?.()?.transport?.responseLimitBytes,128*MiB);
+  await assert.rejects(()=>make('prematch').snapshot(),e=>e instanceof OperationError&&e.diagnostic.reason==='memory_budget_exceeded'&&e.diagnostic.responseLimitBytes===256*MiB);
+  assert.equal(calls,1);
+ }finally{process.availableMemory=original;keys.forEach((k,i)=>{if(saved[i]===undefined)delete process.env[k];else process.env[k]=saved[i];});server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
+});

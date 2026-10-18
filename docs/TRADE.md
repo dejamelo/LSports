@@ -1567,3 +1567,39 @@ npm run --silent diagnose:feed:local -- --connections > diagnostico-sessoes-256.
 O anexo não preserva o erro terminal anterior. Não há evidência suficiente para afirmar timeout, heartbeat, erro do broker, carga do PreMatch ou processo duplicado. Encontrou-se uma perda concreta de diagnóstico no código: o callback de conexão ignorava o argumento `close(error)` da amqplib; além disso, `Connection.toClosed()` fecha os canais **antes** de emitir o fechamento da conexão. Nosso callback genérico de canal podia mascarar esse erro/código. Agora o fechamento genérico do canal aguarda uma microtask para permitir a causa da conexão no mesmo turno; um fechamento isolado de canal continua levando a erro/reconexão, sem ACK de mensagens não persistidas. Isso não mantém uma conexão encerrada como disponível.
 
 A projeção e o diagnóstico local agora expõem `session.{id,startedAt}` e `sessionEnds` (máximo oito términos nesta execução). Conservam o primeiro diagnóstico terminal de cada sessão mesmo após cleanup e cooldown, com horários e códigos sanitizados. Os testes cobrem fechamento isolado de canal e fechamento de conexão com código AMQP 320 após os canais, sem interpretar esse código como a causa da captura real. Ambos reiniciam a sessão com baseline pendente; o cooldown continua respeitado. Erros antes da instalação da conexão também são registrados pelo loop externo do worker. O histórico não recupera retroativamente o erro perdido nessa captura, não é restaurado como estado de conexão após reiniciar o processo e não contém payloads ou texto bruto do broker.
+
+### Recusa de memória, tetos independentes e código 320
+
+A captura `diagnostico-sessoes-256-2.json` confirma recusas preventivas antes de HTTP nas duas lanes: orçamento 2.214.592.512 bytes e margens mínimas 1.953.824.768 / 1.956.970.496 bytes. A regra é `min(heap_size_limit - heapUsed, process.availableMemory())`; não usa RAM total. O relatório antigo só guardava esse mínimo, portanto **não permite identificar retrospectivamente se o limitante era heap ou memória disponível do SO**. Agora `snapshotMemory` informa separadamente heap total/usado/restante, memória disponível ao processo e `limitingFactor`. Disponibilidade zero é considerada zero, não desconhecida/ilimitada.
+
+Tetos regulares independentes (inteiros 1..256 MiB):
+
+- `LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB`: padrão 128; a variável antiga `LSPORTS_SNAPSHOT_MAX_RESPONSE_MB` continua como fallback somente para PreMatch.
+- `LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB`: padrão 128, o teto do último snapshot InPlay válido de 442.024 bytes. Não herda o teto global. Outright permanece em 50 MiB.
+
+256 MiB exige 2.112 MiB de margem; 128 exige 1.088 MiB. Com os mínimos da captura, a política permite 128 mas recusa 256. Um teto PreMatch de 192 MiB exigiria 1.600 MiB, porém não há evidência de que a resposta completa caiba nele. Não há ajuste automático do teto ou redução de proteção por causa desses exemplos.
+
+**Falha local corrigida:** o catch de recuperação tratava `memory_budget_exceeded` como fatal, encerrava o AMQP e iniciava outra sessão/distribuição. Agora mantém o consumidor e o processamento/persistência dos deltas, Outright e resultados, sem disponibilizar um baseline incompleto. O retry usa exatamente o prazo reservado no journal, sem HTTP antecipado, remoção de locks ou reinício de distribuição motivado somente por essa recusa. Falhas reais de transporte continuam encerrando e recuperando a sessão. HTTP inválido, timeout, tamanho excedido e mensagens desconhecidas não foram indiscriminadamente transformados em sucesso.
+
+**Antes de novo teste ao fornecedor**, atualizar e executar apenas o diagnóstico local:
+
+```bash
+cd ~/LSports
+git pull --ff-only origin feat/sportsbook-demo
+npm run build
+LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB=256 LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB=128 npm run --silent diagnose:memory > diagnostico-memoria.json
+```
+
+Não abre AMQP, API, SQLite ou SDK HTTP, não grava `.env`, checkpoint ou tickets e não altera assinaturas. O comando retorna código 2 com JSON válido quando uma lane não tem margem, código 1 se a configuração não puder ser lida ou for inválida, e 0 quando ambas passam na medição. É uma medição de um processo Node separado, não do worker já carregado: o worker repete a verificação com seu estado residente antes do HTTP. `totalPhysicalBytes` é apenas contexto; não substitui a margem disponível.
+
+Se `limitingFactor=heap` e a memória disponível física também comportar o orçamento e o restante do sistema, avaliar um heap **limitado** maior num segundo diagnóstico somente leitura:
+
+```bash
+NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=4096" LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB=256 LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB=128 npm run --silent diagnose:memory > diagnostico-memoria-heap4096.json
+```
+
+Isso não adiciona RAM ao Mac. Se o limitante for `available_memory`, aumentar o heap não resolve: liberar aplicações não necessárias ou usar uma máquina com mais memória disponível. Não recomendar iniciar o worker com 256 até verificar o relatório. Se os dois diagnósticos diferirem, guardar ambos; não repetir migrações ou remover locks. Para uma execução posterior autorizada e com capacidade verificada, aplicar as mesmas variáveis e, se necessário, o mesmo `NODE_OPTIONS` ao comando habitual de desenvolvimento; a proteção permanece ativa no worker.
+
+**Encerramentos 320:** AMQP 320 é `CONNECTION_FORCED`, conforme o mapeamento da amqplib. Os dois términos PreMatch às 21:38:43Z / 21:41:38Z não são os términos locais por orçamento de memória (estes estão registrados separadamente). O código confirma fechamento informado pelo broker, mas não seu motivo específico. Novos diagnósticos preservam sinais somente de uma lista fixa quando presentes no texto recebido: `heartbeat_timeout`, `ack_timeout`, `administrative_close`, `server_shutdown`; o código 320 sozinho informa apenas `connection_forced`. Não se loga reply-text bruto, URLs ou credenciais, nem se presume duplicidade de consumidor. Solicitar ao suporte LSports os registros de `connection.close`, iniciador e reply-text sanitizado nesses horários UTC para os pacotes Test 4511/4510, sem pedir cancelamento de assinaturas.
+
+**`distribution.start / invalid_response` às 21:41:46Z:** o relatório anterior não distingue resposta HTTP/SDK inválida do caso em que a distribuição continuou desligada após o pedido de início. O fluxo existente é status → início somente se desligado → verificação de status. Mantivemos o número de chamadas, sem polling adicional. Agora o segundo caso informa `distribution_still_off` e `{before:false,startRequested:true,after:false}`; falhas de resposta incluem inspeção estrutural sanitizada, estágio e códigos quando disponíveis. Não se considera distribuição ligada nem se inicia uma sessão válida apenas porque o POST retornou HTTP 200. O motivo específico daquela ocorrência histórica permanece sem evidência suficiente.

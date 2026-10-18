@@ -45,6 +45,10 @@ export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
         retryAfterMs: diagnostic.retryAfterMs,
         responseLimitBytes:diagnostic.responseLimitBytes,timeoutMs:diagnostic.timeoutMs,
         memoryBudgetBytes:diagnostic.memoryBudgetBytes,memoryHeadroomBytes:diagnostic.memoryHeadroomBytes,
+        snapshotMemory:diagnostic.snapshotMemory,
+        distributionInspection:diagnostic.distributionInspection,
+        amqpCloseSignals:diagnostic.amqpCloseSignals,
+        responseInspection:diagnostic.responseInspection,
         rateLimitSource: diagnostic.rateLimitSource,
         requesterPid: diagnostic.requesterPid,
         coordinator: diagnostic.coordinator ? {
@@ -56,6 +60,7 @@ export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
             category: safeLabel(diagnostic.coordinator.failure.category),reason:safeLabel(diagnostic.coordinator.failure.reason),
             responseLimitBytes:diagnostic.coordinator.failure.responseLimitBytes,timeoutMs:diagnostic.coordinator.failure.timeoutMs,
             memoryBudgetBytes:diagnostic.coordinator.failure.memoryBudgetBytes,memoryHeadroomBytes:diagnostic.coordinator.failure.memoryHeadroomBytes,
+            snapshotMemory:diagnostic.coordinator.failure.snapshotMemory,
             httpStatus:diagnostic.coordinator.failure.httpStatus,errorType:safeLabel(diagnostic.coordinator.failure.errorType),
             clientCode:safeCode(diagnostic.coordinator.failure.clientCode),networkCode:safeCode(diagnostic.coordinator.failure.networkCode),stage:safeLabel(diagnostic.coordinator.failure.stage),
           }:undefined,
