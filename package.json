@@ -23,7 +23,10 @@
     "platform:bootstrap": "node --import tsx --env-file-if-exists=.env scripts/bootstrap-platform.ts",
     "validate:platform-ui": "node --import tsx scripts/validate-platform.mts",
     "diagnose:integration": "node --import tsx --env-file-if-exists=.env scripts/diagnose-integration.ts",
-    "dev:embed": "concurrently -k -n api,worker,demo \"npm run dev -w @lsports/api\" \"node --import tsx --env-file-if-exists=.env apps/worker/src/index.ts\" \"node --import tsx --env-file-if-exists=.env scripts/local-embed-demo.ts\""
+    "dev:embed": "concurrently -k -n api,worker,demo \"npm run dev -w @lsports/api\" \"node --import tsx --env-file-if-exists=.env apps/worker/src/index.ts\" \"node --import tsx --env-file-if-exists=.env scripts/local-embed-demo.ts\"",
+    "demo:synthetic": "node --import tsx scripts/synthetic-demo.ts",
+    "diagnose:timestamps:utc": "node --import tsx --env-file-if-exists=.env scripts/diagnose-utc-contract.ts",
+    "validate:synthetic-ui": "node --import tsx scripts/validate-synthetic-demo.mts"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",

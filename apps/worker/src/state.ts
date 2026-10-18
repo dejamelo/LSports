@@ -1,3 +1,4 @@
+import { timestampOrder } from './timestamp-contract.js';
 import { SettlementType, OutrightScoreStatus } from "trade360-nodejs-sdk";
 import { marketStatusLabel, settlementLabel } from "@lsports/contracts";
 import type {
@@ -39,6 +40,7 @@ export interface Row {
   markets: Map<string, Market>;
   marketAt: Map<string, number>;
   betAt: Map<string, number>;
+  betOrder?: Map<string,string>;
   freshBets?: Set<string>;
   deferredTimestampBets?: Map<string, {marketId:number;selectionId:string;bet:NonNullable<Market["bets"]>[number];inspection:import("@lsports/contracts").TimestampInspection;receivedAt:string}>;
   timestampRecovery?: Map<string, import("@lsports/contracts").TimestampRecovery>;
@@ -221,22 +223,26 @@ export class TradeState {
           const t = timestamp(bet.lastUpdate, at);
           const previousAt = row.betAt.get(betKey) || 0;
           const field = settlementFields.get(betKey);
+          const order = field?.timestamp?.orderingKey || timestampOrder(bet.lastUpdate,t);
+          const savedOrder = row.betOrder?.get(betKey);
+          const previousOrder = savedOrder && BigInt(savedOrder)/1000000n===BigInt(previousAt) ? savedOrder : (BigInt(previousAt)*1000000n).toString();
+          const older = BigInt(order)<BigInt(previousOrder);
           const recovery = row.timestampRecovery?.get(betKey);
           const recovering = recovery?.status === "awaiting_fresh_amqp";
           const replaying = recovery?.status === "awaiting_settlement_replay";
-          const validatesReplay = replaying && event.marketMessageType === 42 && field?.timestamp?.timezone === "explicit" &&
+          const validatesReplay = replaying && event.marketMessageType === 42 && (field?.timestamp?.timezone === "explicit" || field?.timestamp?.contract === "lsports-217525-utc") &&
             field.timestamp.orderingSafe && field.code === recovery.replayCode && t===previousAt && at===Date.parse(recovery.replayReceivedAt || '');
           if(replaying && !validatesReplay)continue;
-          // Only a new, explicitly zoned live quote can validate a quarantined version.
-          const validatesRecovery = recovering && event.marketMessageType === 41 && field?.timestamp?.timezone === "explicit" &&
+          // Only a new live quote with verified UTC ordering can validate a quarantined version.
+          const validatesRecovery = recovering && event.marketMessageType === 41 && (field?.timestamp?.timezone === "explicit" || field?.timestamp?.contract === "lsports-217525-utc") &&
             field.timestamp.orderingSafe && Number.isFinite(Number(bet.price)) && Number(bet.price)>1 &&
-            t>previousAt && t<=at+300000 && at>=Date.parse(recovery.preparedAt);
+            BigInt(order)>BigInt(previousOrder) && t<=at+300000 && at>=Date.parse(recovery.preparedAt);
           if(recovering && !validatesRecovery) continue;
           if (settlementSource && field) {
             const observation: import("@lsports/contracts").SettlementObservation = {
               source: settlementSource, receivedAt: new Date(at).toISOString(), versionAt: new Date(t).toISOString(),
               field: field.field, code: field.code, timestamp: field.timestamp,
-              decision: field.field === "missing" ? "ignored_missing" : field.field === "null" ? "ignored_null" : t < previousAt ? "ignored_older" : "stored",
+              decision: field.field === "missing" ? "ignored_missing" : field.field === "null" ? "ignored_null" : older ? "ignored_older" : "stored",
             };
             const trace = (row.settlementAudit ||= new Map()).get(betKey) || {};
             trace[settlementSource === "amqp.42" ? "last42" : settlementSource === "amqp.41" ? "last41" : "lastSnapshot"] = observation;
@@ -248,10 +254,10 @@ export class TradeState {
             (row.snapshotBets ||= new Map()).set(betKey, {
               receivedAt: new Date(at).toISOString(), versionAt: new Date(t).toISOString(),
               receivedPrice: bet.price !== undefined && Number.isFinite(Number(bet.price)) ? Number(bet.price) : null,
-              decision: t < previousAt ? "older_than_stored" : !hasPrice ? "missing_or_invalid_price" : "confirmed",
+              decision: older ? "older_than_stored" : !hasPrice ? "missing_or_invalid_price" : "confirmed",
             });
           }
-          if (t >= previousAt) {
+          if (!older) {
             row.deferredTimestampBets?.delete(betKey);
             if(validatesReplay) {recovery.status="settlement_replayed";recovery.validatedAt=new Date(at).toISOString();}
             if(validatesRecovery) {recovery.status="validated_amqp";recovery.validatedAt=new Date(at).toISOString();}
@@ -265,9 +271,10 @@ export class TradeState {
             // A current snapshot explicitly reconfirms an unchanged quote. Its LastUpdate
             // describes the last price change, not when the snapshot was requested.
             // A status-only delta must never validate a price read from disk.
-            if (row.restored && hasPrice && (event.marketRecovery || t > previousAt))
+            if (row.restored && hasPrice && (event.marketRecovery || BigInt(order)>BigInt(previousOrder)))
               (row.freshBets ||= new Set()).add(betKey);
             row.betAt.set(betKey, t);
+            (row.betOrder ||= new Map()).set(betKey,order);
           } else {
             this.metrics[lane].staleUpdatesIgnored++;
             if (row.marketReceipt) row.marketReceipt.staleBetUpdates++;
@@ -391,7 +398,7 @@ export class TradeState {
             ...(() => {
               const trace=row.settlementAudit?.get(`${m.id}:${b.id}`);
               const version=row.betAt.get(`${m.id}:${b.id}`);
-              const proof=[trace?.last41,trace?.lastSnapshot].find(p=>p?.timestamp?.orderingSafe===true&&p.timestamp.timezone==='explicit'&&Date.parse(p.versionAt)===version);
+              const proof=[trace?.last41,trace?.lastSnapshot].find(p=>p?.timestamp?.orderingSafe===true&&(p.timestamp.timezone==='explicit'||p.timestamp.contract==='lsports-217525-utc')&&Date.parse(p.versionAt)===version);
               return proof&&unavailableReasons.length===0?{priceVersionAt:proof.versionAt,priceOrderingSafe:true}:{};
             })(),
             label: `${b.name || (row.outright && b.participantId !== undefined ? fixture.participants?.find((p) => p.id === b.participantId)?.name : undefined) || "Selección"}${b.line ? ` (${b.line})` : ""}`,

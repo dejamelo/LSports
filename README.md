@@ -71,3 +71,17 @@ Em produção, servir `apps/web/dist` com fallback SPA para `/sportsbook`, fazer
 Para produção, use supervisor com reinício para API/worker e monitore saúde/freshness. Processos não sobrevivem à publicação de um snapshot do ambiente. O frontend preserva a identidade visual atual; esta etapa não habilita operações com dinheiro real.
 
 [Bilhetes persistentes de teste, atualização no Mac, liquidação e contrato REST para POSNET](docs/TEST-TICKETS.md). Somente pontos fictícios; nenhuma movimentação financeira. O histórico e o comprovante ficam no próprio sportsbook.
+
+### Demonstração sintética isolada
+
+`npm run build && npm run demo:synthetic` inicia uma plataforma exclusivamente de
+teste, sem worker/consultas LSports e sem usar `.env`, `.runtime` ou a operação
+Argentina Demo. Abra http://localhost:5174/demo/synthetic e o painel em
+http://localhost:3101/control. Dados persistentes ficam somente em
+`.local-synthetic-demo/` (ignorado pelo Git); execução em produção é recusada.
+Login de teste e roteiro: [docs/PLATFORM.md](docs/PLATFORM.md#demonstração-sintética-isolada-desenvolvimento).
+
+A confirmação UTC da LSports #217525 está documentada em
+[docs/TRADE.md](docs/TRADE.md#contrato-utc-confirmado--ticket-217525).
+`npm run diagnose:timestamps:utc` inspeciona evidências históricas somente para
+leitura; não repete migrações nem modifica bilhetes.

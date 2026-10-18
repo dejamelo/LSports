@@ -47,6 +47,8 @@ export interface TimestampRecovery {
   previousVersion: string; baselineVersion: string; preparedAt: string; validatedAt?: string;
 }
 export interface TimestampInspection {
+  contract?: "lsports-217525-utc";
+  orderingKey?: string;
   context?: TimestampContext;
   rawLastUpdate: string | number | null;
   rawType: "missing" | "null" | "string" | "number" | "other";

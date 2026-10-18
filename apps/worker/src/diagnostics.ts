@@ -1,3 +1,4 @@
+import { normalizeSdkTimestamps,hasInvalidProviderTimestamp } from './timestamp-contract.js';
 import { marketRequestBody } from "./http-compat.js";
 import { inspectResponse } from "./response-inspection.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -138,6 +139,15 @@ axios.defaults.adapter = async (config) => {
       if ((observation.providerStatus || 0) >= 400 || observation.envelopeError)
         throw new Error("Supplier error envelope");
     }
+    if(observation?.operation==='snapshot.events'){
+      const raw=typeof response.data==='string'?JSON.parse(response.data):response.data;
+      if(hasInvalidProviderTimestamp(raw))throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_timestamp',message:'LastUpdate inválido en snapshot; se conserva el estado anterior.'});
+    }
+    // Preserve original response evidence above; normalize before SDK date conversion.
+    if (observation?.operation?.startsWith('snapshot.') && typeof response.data === 'string') {
+      response.data = response.data.replace(/("(?:LastUpdate|CreationDate|StartDate|StartTime|EndDate|NextFixtureStartTime|ServerTimestamp|lastUpdate|BirthDate)"\s*:\s*)("[^"\\]*")/g, (_match:string,prefix:string,quoted:string)=>prefix+JSON.stringify(normalizeSdkTimestamps({LastUpdate:JSON.parse(quoted)}).LastUpdate));
+    }
+    if (observation?.operation?.startsWith('snapshot.') && response.data && typeof response.data === 'object')response.data=normalizeSdkTimestamps(response.data);
     return response;
   } catch (error) {
     if (observation && axios.isAxiosError(error)) {

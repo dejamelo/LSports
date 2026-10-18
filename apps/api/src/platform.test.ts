@@ -1580,3 +1580,33 @@ test("integration distinguishes credential ID, supports case-insensitive Bearer,
     await t.close();
   }
 });
+
+test('server enforces return ceiling and concurrent player/event amount, count and repeat rules without duplicate reservations', async()=>{
+ const s=await setup();
+ try{
+  const client=await s.create('concurrent-limits'),key=await s.key(client.id);
+  const path=`/api/control/clients/${client.id}/operations/${client.operation.id}`;
+  const limits={minStakeMinor:'100',maxStakeMinor:'1000',maxReturnMinor:'2000',allowRepeatedTickets:true,maxTicketsPerPlayerEvent:null as number|null,maxStakePerPlayerEventMinor:'1000' as string|null,sameEventMultiples:'blocked'};
+  const configure=async(patch:object)=>{const response=await s.request(path,'PATCH',{limits:{...limits,...patch}},s.admin);assert.equal(response.status,200);};
+  await configure({});
+  const input={clientId:client.id,operationId:client.operation.id,currency:'ARS',playerId:'simultaneous',channel:'web',stakeMinor:'600',selections:[{eventId:'prematch:9001',marketId:'160',selectionId:'runner',expectedOdds:2.6233}]};
+  const send=(id:string,patch:object={})=>s.request('/api/integration/v1/tickets','POST',{...input,...patch},undefined,key.value,{'Idempotency-Key':id});
+  assert.equal((await send('return-ceiling',{stakeMinor:'1000'})).data.code,'RETURN_LIMIT');
+  assert.equal((await send('below-minimum',{stakeMinor:'99'})).data.code,'STAKE_BELOW_MINIMUM');
+  assert.equal((await send('above-maximum',{stakeMinor:'1001'})).data.code,'STAKE_ABOVE_MAXIMUM');
+  const responses=await Promise.all(['web','mobile','pos'].map((channel,i)=>send(`concurrent-amount-${i}`,{channel,...(channel==='pos'?{terminalId:'TEST-TERMINAL'}:{})})));
+  assert.equal(responses.filter(r=>r.status===201).length,1);
+  assert.equal(responses.filter(r=>r.data.code==='PLAYER_EVENT_AMOUNT_LIMIT').length,2);
+  const accepted=responses.findIndex(r=>r.status===201),channel=['web','mobile','pos'][accepted];
+  const replay=await send(`concurrent-amount-${accepted}`,{channel,...(channel==='pos'?{terminalId:'TEST-TERMINAL'}:{})});
+  assert.equal(replay.data.id,responses[accepted].data.id);
+  assert.equal((await send('amount-remainder',{stakeMinor:'400'})).status,201);
+  assert.equal((await send('amount-overflow',{stakeMinor:'100'})).data.code,'PLAYER_EVENT_AMOUNT_LIMIT');
+  await configure({maxTicketsPerPlayerEvent:2,maxStakePerPlayerEventMinor:null});
+  const counts=await Promise.all([0,1,2].map(i=>send(`concurrent-count-${i}`,{playerId:'count-test',stakeMinor:'100'})));
+  assert.equal(counts.filter(r=>r.status===201).length,2);assert.equal(counts.filter(r=>r.data.code==='PLAYER_EVENT_TICKET_LIMIT').length,1);
+  await configure({allowRepeatedTickets:false,maxStakePerPlayerEventMinor:null});
+  const repeated=await Promise.all([0,1].map(i=>send(`concurrent-repeat-${i}`,{playerId:'repeat-test',stakeMinor:'100'})));
+  assert.equal(repeated.filter(r=>r.status===201).length,1);assert.equal(repeated.filter(r=>r.data.code==='REPEATED_EVENT_BLOCKED').length,1);
+ }finally{await s.close();}
+});

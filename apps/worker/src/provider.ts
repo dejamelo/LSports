@@ -1,3 +1,4 @@
+import {normalizeSdkTimestamps,attachTimestampPrecision} from './timestamp-contract.js';
 import { inspectSettlements } from "./settlement-evidence.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import { sdkAxios as axios } from "./diagnostics.js";
@@ -215,6 +216,9 @@ export function clients(
         };
         if (evidence.providerRows !== rows.length)
           throw new Error("Invalid snapshot response: row count mismatch");
+        let raw = snapshotResponsePayload();
+        if(typeof raw==='string')raw=IdSafeJsonParser.parse(raw);
+        if(raw && typeof raw==='object' && 'Body' in raw){const body=(raw as any).Body;attachTimestampPrecision(Array.isArray(body)?body:[body],rows);}
         return rows;
       });
     },
@@ -288,11 +292,12 @@ function decodeOutrightSnapshot(sdk: unknown, payload: unknown, kind: "fixtures"
         invalid();
     }
     if (kind === "fixtures") {
-      const competition = TransformerUtil.transform({ Competition: body }, OutrightFixtureUpdate).competition!;
+      const competition = TransformerUtil.transform(normalizeSdkTimestamps({ Competition: body }), OutrightFixtureUpdate).competition!;
       for (const row of competition.events || []) events.push({ fixtureId: row.fixtureId, outright: {
         competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type, fixture: row.outrightFixture } });
     } else {
-      const competition = TransformerUtil.transform({ Competition: body }, OutrightFixtureMarketUpdate).competition!;
+      const competition = TransformerUtil.transform(normalizeSdkTimestamps({ Competition: body }), OutrightFixtureMarketUpdate).competition!;
+      attachTimestampPrecision({Competition:body},{competition});
       for (const [index, row] of (competition.events || []).entries()) {
         if (row.markets?.some(m => m.bets?.some(b => typeof b.id !== "string" || !b.id))) invalid();
         let inspection: ReturnType<typeof inspectSettlements>;

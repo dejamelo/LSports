@@ -6,3 +6,5 @@ dist/
 *.log
 coverage/
 .runtime/
+
+.local-synthetic-demo/

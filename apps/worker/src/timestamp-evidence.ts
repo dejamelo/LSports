@@ -1,3 +1,4 @@
+import {providerTimestamp} from './timestamp-contract.js';
 import type {TimestampInspection} from '@lsports/contracts';
 import {OperationError} from './diagnostics.js';
 const iso=/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})?$/i;
@@ -7,10 +8,13 @@ export function inspectTimestamp(raw:unknown, sdk:unknown):TimestampInspection {
  const milliseconds=sdk instanceof Date?sdk.getTime():NaN;
  const tz=processTimezone;
  const timezone=raw==null?'missing':typeof raw==='number'&&Number.isFinite(raw)?'epoch_milliseconds':match?match[1]?'explicit':'absent':'invalid';
- const expected=timezone==='explicit'?Date.parse(String(raw)):timezone==='epoch_milliseconds'?Number(raw):NaN;
+ const contract=providerTimestamp(raw);
+ const expected=contract?.milliseconds ?? NaN;
  // The wall-clock comparison is diagnostic ONLY, never used as a timezone assumption.
  const wall=timezone==='absent'?Date.parse(String(raw).replace(' ','T')+'Z'):NaN;
  return {
+  contract: contract ? 'lsports-217525-utc' : undefined,
+  orderingKey: contract?.order,
   rawLastUpdate:match?String(raw):typeof raw==='number'&&Number.isFinite(raw)?raw:null,
   rawType:raw===undefined?'missing':raw===null?'null':typeof raw==='string'?'string':typeof raw==='number'?'number':'other',
   timezone, sdkUtc:Number.isFinite(milliseconds)?new Date(milliseconds).toISOString():null,
@@ -25,8 +29,8 @@ export function inspectTimestamp(raw:unknown, sdk:unknown):TimestampInspection {
 export function requireTimestamp(inspection:TimestampInspection, source:'amqp'|'snapshot'):void {
  if(inspection.orderingSafe)return;
  throw new OperationError({operation:source==='amqp'?'feed.decode':'snapshot.outright.markets',protocol:source==='amqp'?'amqp':'http',
-  category:source==='amqp'?'invalid_message':'invalid_response',reason:inspection.timezone==='absent'?'ambiguous_timestamp':'invalid_timestamp',
-  message:inspection.timezone==='absent'?'LastUpdate no declara zona horaria; no se usa la zona local ni se presume UTC. Se conserva el estado anterior.':'LastUpdate inválido o conversión del SDK divergente; no se modifica el estado anterior.',
+  category:source==='amqp'?'invalid_message':'invalid_response',reason:'invalid_timestamp',
+  message:'LastUpdate inválido o conversión del SDK divergente; no se modifica el estado anterior.',
   timestampInspection:inspection,
  });
 }

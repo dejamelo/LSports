@@ -11,6 +11,8 @@ export function localDemoServer(
     apiOrigin?: string;
     credentialId?: string;
     origin?: string;
+    scope?: {clientId:string;operationId:string;currency:string;playerId:string};
+    synthetic?: boolean;
   } = {},
 ) {
   if (process.env.NODE_ENV === "production")
@@ -38,6 +40,7 @@ export function localDemoServer(
     playerId: "demo-001",
     parentOrigin: origin,
     channel: "web",
+    ...options.scope,
   };
   return createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
@@ -56,7 +59,7 @@ export function localDemoServer(
       json(403, { code: "LOCAL_ONLY" });
       return;
     }
-    if (req.method === "GET" && req.url === "/demo/argentina") {
+    if (req.method === "GET" && req.url === (options.synthetic ? "/demo/synthetic" : "/demo/argentina")) {
       const nonce = randomBytes(18).toString("base64");
       res.setHeader(
         "Content-Security-Policy",
@@ -64,7 +67,7 @@ export function localDemoServer(
       );
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(
-        `<!doctype html><html lang="es-AR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Apuesta DEPORTIVA LAT · Argentina Demo</title><style nonce="${nonce}">*{box-sizing:border-box}body{margin:0;background:#0b1424;color:#eef4ff;font:15px system-ui}header{padding:14px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}strong{color:#59dfb1}button{background:#59dfb1;border:0;border-radius:6px;padding:10px;cursor:pointer}iframe{display:block;width:100%;height:calc(100dvh - 110px);min-height:600px;border:0}p{margin:0;padding:8px 20px;color:#bccbe1}</style><header><strong>ADL · Apuesta DEPORTIVA LAT</strong><span>Argentina Demo · ARS · demo-001</span><button id="open">Abrir / renovar sesión</button></header><p id="status" role="status">Demostración local. Billetera y billetes en simulación.</p><iframe id="sportsbook" title="Apuesta DEPORTIVA LAT · Sportsbook Argentina Demo" allow="fullscreen"></iframe><script nonce="${nonce}">const button=document.getElementById('open'),status=document.getElementById('status');async function openSession(){button.disabled=true;status.textContent='Creando sesión de prueba…';try{const response=await fetch('/local-demo/session',{method:'POST'});const data=await response.json();if(response.status!==201||typeof data.iframeUrl!=='string'){status.textContent='No se pudo abrir la sesión. HTTP '+response.status+' · '+data.code;return}document.getElementById('sportsbook').src=data.iframeUrl;status.textContent='Sesión de prueba abierta · ARS · sin dinero real.'}catch{status.textContent='No se pudo completar la solicitud local. Revisá el servidor de demostración.'}finally{button.disabled=false}}button.onclick=openSession;openSession();</script></html>`,
+        `<!doctype html><html lang="es-AR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Apuesta DEPORTIVA LAT · ${options.synthetic ? "PRUEBA SINTÉTICA AISLADA" : "Argentina Demo"}</title><style nonce="${nonce}">*{box-sizing:border-box}body{margin:0;background:#0b1424;color:#eef4ff;font:15px system-ui}header{padding:14px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}strong{color:#59dfb1}button{background:#59dfb1;border:0;border-radius:6px;padding:10px;cursor:pointer}iframe{display:block;width:100%;height:calc(100dvh - 110px);min-height:600px;border:0}p{margin:0;padding:8px 20px;color:#bccbe1}</style><header><strong>ADL · Apuesta DEPORTIVA LAT</strong><span>${options.synthetic ? "PRUEBA SINTÉTICA AISLADA · ARS · test-player" : "Argentina Demo · ARS · demo-001"}</span><button id="open">Abrir / renovar sesión</button></header><p id="status" role="status">Demostración local. Billetera y billetes en simulación.</p>${options.synthetic ? '<p>DATOS SINTÉTICOS · NO LSPORTS · SIN DINERO REAL</p><header><button data-action="win">Liquidar: gana A</button><button data-action="loss">Corregir: gana B</button><button data-action="repeat">Repetir liquidación</button><button data-action="suspend">Suspender nuevos billetes</button><button data-action="resume">Reactivar nuevos billetes</button><button data-action="new">Nuevo evento sintético</button><a href="' + api.origin + '/control" target="_blank" rel="noopener">Panel de prueba</a></header>' : ''}<iframe id="sportsbook" title="Apuesta DEPORTIVA LAT · Sportsbook ${options.synthetic ? "PRUEBA SINTÉTICA" : "Argentina Demo"}" allow="fullscreen"></iframe><script nonce="${nonce}">const button=document.getElementById('open'),status=document.getElementById('status');async function openSession(){button.disabled=true;status.textContent='Creando sesión de prueba…';try{const response=await fetch('/local-demo/session',{method:'POST'});const data=await response.json();if(response.status!==201||typeof data.iframeUrl!=='string'){status.textContent='No se pudo abrir la sesión. HTTP '+response.status+' · '+data.code;return}document.getElementById('sportsbook').src=data.iframeUrl;status.textContent='Sesión de prueba abierta · ARS · sin dinero real.'}catch{status.textContent='No se pudo completar la solicitud local. Revisá el servidor de demostración.'}finally{button.disabled=false}}button.onclick=openSession;${options.synthetic ? "document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const r=await fetch('/synthetic/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:b.dataset.action})});status.textContent=r.ok?'Acción de prueba aplicada; el historial se actualizará.':'No se pudo aplicar la acción de prueba.'}catch{status.textContent='Error de solicitud local.'}finally{b.disabled=false}});" : ""}openSession();</script></html>`,
       );
       return;
     }

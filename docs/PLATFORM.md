@@ -5,7 +5,7 @@
 | Área | Implementado e validado | Limite atual |
 | --- | --- | --- |
 | Sportsbook | React/TypeScript responsivo, espanhol argentino, futebol/Hípica, mercados, bilhete, histórico e comprovante. Interface anterior reutilizada no iframe. | Sem dinheiro real; hardware Android/impressora não homologados. |
-| LSports TRADE | Worker persistente, AMQP, snapshots, tipos Outright 37/39/41/42, diagnóstico, checkpoint, rate limiting e shutdown seguro. | A validação com fornecedor foi feita pelo operador no Mac. Testes desta etapa não consultam a LSports. Fuso HTTP sem timezone continua pendente no chamado 217525; essas datas continuam rejeitadas. |
+| LSports TRADE | Worker persistente, AMQP, snapshots, tipos Outright 37/39/41/42, diagnóstico, checkpoint, rate limiting e shutdown seguro. | A validação com fornecedor foi feita pelo operador no Mac. Testes desta etapa não consultam a LSports. Contrato UTC confirmado no chamado 217525: datas válidas sem fuso são normalizadas antes do SDK; veja docs/TRADE.md. |
 | Bilhetes legados | SQLite, odds aceitas imutáveis, resultados, revisões, histórico e comprovantes preservados. | Permanecem em `TEST_POINTS`. Não foram migrados nem receberam moeda real/cliente/operação. |
 | Controle | `/control`: plataforma e administrador de cliente, cadastro, isolamento, domínios, operações, credenciais, políticas, diagnóstico, risco e auditoria. | Gestão completa de contas, MFA/recuperação e segurança de produção ainda pendentes. |
 | Multimoeda | Cliente → operações → credenciais; ARS/CLP/PYG/USD/VES, país separado, moeda fixa, sessões/bilhetes/limites/relatórios por operação. | Sem câmbio, agregação financeira entre operações ou carteira externa. |
@@ -118,7 +118,7 @@ Não soma moedas nem operações diferentes. Filtros de alertas não restringem 
 
 O histórico de preço só recebe amostras com disponibilidade, feed recente/conectado, versão explícita ordenada e evidência de normalização segura. O worker expõe essa evidência quando existe no histórico de mensagens/snapshot já aceito. Duas versões diferentes e confiáveis são necessárias; não basta observar o mesmo preço repetidamente nem inventar um preço anterior. Se essa evidência não existir (inclusive mercados sem trilha explícita), a regra de variação não é avaliada. O painel informa a limitação. Mantém-se uma janela local de 24 horas de amostras observadas; isso não substitui um histórico completo do fornecedor.
 
-Nenhuma data HTTP sem timezone foi assumida UTC ou deslocada em três horas. Nenhuma migração de timestamps foi repetida. Novas amostras não legitimam versões antigas em quarentena. Início de evento é exibido como já informado pelo feed; ausência é explícita.
+Datas HTTP/AMQP sem timezone agora usam UTC conforme confirmação expressa do fornecedor no chamado 217525, nunca uma subtração fixa. Nenhuma migração de timestamps foi repetida. Novas amostras não legitimam versões antigas em quarentena. Início de evento é exibido como já informado pelo feed; ausência é explícita.
 
 ## Segurança, armazenamento e permissões
 
@@ -294,3 +294,84 @@ redirecionamentos e não publica respostas brutas de erro. Não abra pelo IP da 
 ou por `127.0.0.1`: use a origem autorizada exata `http://localhost:5173`.
 Se a credencial for rotacionada novamente, atualize seu ID no script backend local;
 não coloque o segredo no código. A API continua validando revogação e permissões.
+
+### Demonstração sintética isolada (desenvolvimento)
+
+Esta execução usa o **mesmo iframe, API, armazenamento de bilhetes e painel** com
+um cliente/operação ARS exclusivamente sintéticos. Não inicia o worker LSports,
+não lê `.env`, não consulta o fornecedor, não cria assinaturas e não usa a operação
+Argentina Demo. Todos os nomes e a página identificam **SINTÉTICO / SIN DINERO REAL**.
+O campo interno de transporte `mode=connected` exercita as validações reais de
+admissão; não representa conexão real com a LSports nesta execução.
+
+```sh
+npm run build
+npm run demo:synthetic
+```
+
+- Iframe na página de teste: **http://localhost:5174/demo/synthetic**.
+- Painel de teste: **http://localhost:3101/control**.
+- Login exclusivo de teste: `admin@synthetic.local` / `Solo-pruebas-aisladas-2026`.
+- Cliente: **PRUEBA SINTÉTICA · NO LSPORTS**; operação: **Operación SINTÉTICA ARS**.
+- Jogador fixo do iframe: `test-player`; canal web; moeda ARS.
+
+Os dados persistem exclusivamente em `.local-synthetic-demo/`, ignorado pelo Git,
+com marcador `SYNTHETIC_ONLY`. O runner recusa diretórios existentes sem esse
+marcador, reserva as duas portas antes de abrir armazenamento e recusa
+`NODE_ENV=production`. A API e o servidor da página escutam somente loopback;
+Host e Origin são verificados nos controles locais. O recurso não é incluído
+nas rotas do servidor de produção. A chave da integração sintética é gerada pelo
+fluxo normal e lida somente no backend. Nunca substitua essa chave pela real.
+Não é necessário parar o ambiente real nas portas 3001/5173: as portas são distintas.
+Ao encerrar, use Ctrl+C; a próxima execução restaura o estado sintético e seus
+bilhetes. Não há reset automático nem alteração em `.runtime`, `.env` ou backups.
+
+Roteiro manual:
+
+1. Abra a página de teste, selecione **TEST A**, informe **10 ARS** e simule o
+   bilhete. Abra o histórico, expanda o bilhete e abra/imprima o comprovante.
+2. No painel, abra **Riesgo**. A regra informativa **Importe alto** está ativada
+   acima de **5 ARS**. Confira motivo, métrica, bilhete e escopo; informe responsável,
+   situação e observação, salve o tratamento e confira **Auditoría**.
+3. Na página do iframe, clique **Suspender nuevos billetes**. Uma nova aposta é
+   recusada. Clique **Liquidar: gana A**: o bilhete passa a Ganado, revisão 1,
+   retorno 21 ARS. **Repetir liquidación** mantém essa revisão e retorno.
+4. Clique **Corregir: gana B**: o bilhete TEST A passa a Perdido, revisão 2,
+   retorno zero, preservando a odd aceita. Repetir não acrescenta revisão.
+5. Clique **Reactivar nuevos billetes** e **Nuevo evento sintético** para outro
+   cenário. O botão de novo evento exige liquidar o atual primeiro; os eventos
+   anteriores e seus resultados continuam armazenados e publicados.
+6. Em **Operaciones**, teste configurações e políticas. Os botões mostram
+   salvamento em andamento, sucesso ou erro junto ao formulário; falhas mantêm
+   os valores digitados. Valores monetários do painel são unidades menores:
+   **100 = 1 ARS**. Políticas da plataforma limitam a configuração da operação.
+
+Limites iniciais do exemplo: mínimo 1 ARS, máximo 100 ARS por bilhete,
+retorno potencial bruto máximo 200 ARS, repetição permitida, até 3 bilhetes e
+150 ARS acumulados por jogador/evento; múltiplas correlacionadas bloqueadas.
+O limite de retorno pode impedir uma aposta cujo valor esteja dentro do máximo:
+100 ARS a 2,10 produziria 210 ARS e é recusada. Apostas de 0,50 e 100,01 ARS
+verificam mínimo e máximo. Para quantidade, aceite três de 10 ARS; a quarta é
+recusada. Em um novo evento, duas de 50 ARS e uma tentativa de 60 ARS verificam
+acumulado (a terceira excede 150 ARS). Para bloquear repetição, desmarque a regra
+na operação e teste outro evento. Liquidações não liberam automaticamente os
+contadores históricos; rejeições e reenvios idempotentes não contam novamente.
+Não há dinheiro real, saque, câmbio ou cancelamento automático por risco.
+
+Validação automatizada adicional:
+
+```sh
+npm test
+npm run validate:synthetic-ui
+```
+
+O segundo comando requer Playwright/Chromium disponíveis (como o validador existente;
+não é necessário para executar a demonstração manual). Usa um diretório temporário
+próprio e portas livres, sem tocar no exemplo persistente do operador. Valida
+seleção, admissão, reenvio da mesma requisição com mesmo ID, histórico, comprovante,
+liquidação/correção e revisões idempotentes, tratamento/auditoria de risco,
+suspensão mantendo liquidações, layout mobile e feedback dos dois salvamentos.
+Testes de API cobrem mínimo, máximo, retorno, quantidade, acumulado, repetição,
+concorrência entre canais e isolamento. Um teste de reinício preserva o bilhete
+sintético e a odd aceita. Tudo usa amostras sintéticas; eventos/odds abertos,
+continuidade de cobertura e resultados reais continuam dependendo da LSports.

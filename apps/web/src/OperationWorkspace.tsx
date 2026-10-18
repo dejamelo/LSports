@@ -143,6 +143,45 @@ export default function OperationWorkspace({
     [selected, setSelected] = useState(""),
     [creating, setCreating] = useState(false),
     [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState<"operation" | "policy" | null>(null);
+  const [saveFeedback, setSaveFeedback] = useState<{
+    kind: "operation" | "policy";
+    error: boolean;
+    message: string;
+  } | null>(null);
+  async function save(
+    kind: "operation" | "policy",
+    action: () => Promise<void>,
+  ) {
+    setSaving(kind);
+    setSaveFeedback(null);
+    onNotice("");
+    await run(async () => {
+      try {
+        await action();
+        setSaveFeedback({
+          kind,
+          error: false,
+          message:
+            kind === "operation"
+              ? "Operación guardada."
+              : "Política autorizada guardada.",
+        });
+      } catch (error) {
+        setSaveFeedback({
+          kind,
+          error: true,
+          message:
+            error instanceof Error
+              ? error.message
+              : "No se pudo guardar. Revisá los datos y reintentá.",
+        });
+        throw error;
+      } finally {
+        setSaving(null);
+      }
+    });
+  }
   const [keys, setKeys] = useState<any[]>([]),
     [diagnostic, setDiagnostic] = useState<any>(),
     [policies, setPolicies] = useState<Record<string, any>>({});
@@ -406,7 +445,7 @@ export default function OperationWorkspace({
                 className="control-card control-form"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  void run(async () => {
+                  void save("operation", async () => {
                     await api(path, "PATCH", {
                       name,
                       country,
@@ -477,8 +516,20 @@ export default function OperationWorkspace({
                   </p>
                 )}
                 <button disabled={busy} className="control-primary">
-                  Guardar operación
+                  {saving === "operation"
+                    ? "Guardando operación…"
+                    : "Guardar operación"}
                 </button>
+                {saveFeedback?.kind === "operation" && (
+                  <p
+                    role={saveFeedback.error ? "alert" : "status"}
+                    className={
+                      saveFeedback.error ? "control-error" : "control-notice"
+                    }
+                  >
+                    {saveFeedback.message}
+                  </p>
+                )}
                 <details>
                   <summary>Límites efectivos autorizados</summary>
                   <pre>{JSON.stringify(op.effectiveLimits, null, 2)}</pre>
@@ -489,7 +540,7 @@ export default function OperationWorkspace({
                   className="control-card control-form"
                   onSubmit={(e) => {
                     e.preventDefault();
-                    void run(async () => {
+                    void save("policy", async () => {
                       await api(
                         `${prefix}/limit-policies/${op.currency}`,
                         "PATCH",
@@ -527,8 +578,20 @@ export default function OperationWorkspace({
                     Permitir edición por el administrador del cliente
                   </label>
                   <button className="control-primary" disabled={busy}>
-                    Guardar política autorizada
+                    {saving === "policy"
+                      ? "Guardando política…"
+                      : "Guardar política autorizada"}
                   </button>
+                  {saveFeedback?.kind === "policy" && (
+                    <p
+                      role={saveFeedback.error ? "alert" : "status"}
+                      className={
+                        saveFeedback.error ? "control-error" : "control-notice"
+                      }
+                    >
+                      {saveFeedback.message}
+                    </p>
+                  )}
                 </form>
               )}
             </>

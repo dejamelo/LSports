@@ -17,6 +17,7 @@ export function checkpoint(state: TradeState) {
       timestampRecovery: row.timestampRecovery ? [...row.timestampRecovery] : undefined,
       settlementAudit: row.settlementAudit ? [...row.settlementAudit] : undefined,
       settlementMarkets: row.settlementMarkets ? [...row.settlementMarkets] : undefined,
+      betOrder: row.betOrder ? [...row.betOrder] : undefined,
       markets: [...row.markets], marketAt: [...row.marketAt], betAt: [...row.betAt],
     }))) };
 }
@@ -67,6 +68,7 @@ export async function restore(state: TradeState, path: string) {
           ['marketUpdates', 'betUpdates', 'providerMarketUpdates', 'providerBetUpdates', 'staleBetUpdates'].some(k =>
             typeof (entry.marketReceipt as Record<string, unknown>)[k] !== 'number' || !Number.isFinite((entry.marketReceipt as Record<string, number>)[k]))))
         throw new Error('Invalid saved market counters; original file preserved');
+      if(entry.betOrder !== undefined && (!tuples(entry.betOrder) || entry.betOrder.some(([,v])=>typeof v!=='string'||!/^[-]?[0-9]{1,25}$/.test(v))))throw new Error('Invalid precise timestamp ordering; original preserved');
       const lane = entry.lane as Lane;
       const key = `outright:${entry.outright.competitionId}:${entry.fixtureId}`;
       if (recovered.rows[lane].has(key)) throw new Error('Duplicate outright checkpoint identity');
@@ -78,6 +80,7 @@ export async function restore(state: TradeState, path: string) {
         outrightScore: entry.outrightScore as unknown as Row["outrightScore"],
         fixture: entry.fixture as unknown as Row["fixture"], outright: entry.outright as unknown as Row["outright"],
         livescore: entry.livescore as unknown as Row["livescore"], marketReceipt: entry.marketReceipt as unknown as Row["marketReceipt"],
+        betOrder: entry.betOrder === undefined ? undefined : new Map(entry.betOrder as [string,string][]),
         markets: new Map(entry.markets) as Map<string, Market>,
         marketAt: new Map(entry.marketAt) as Map<string, number>, betAt: new Map(entry.betAt) as Map<string, number>,
       });

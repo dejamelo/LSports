@@ -1,3 +1,4 @@
+> **Atualização contratual em 18/10/2026:** as restrições históricas abaixo sobre ausência de fuso foram substituídas pela confirmação escrita UTC do ticket #217525. Consulte a seção “Contrato UTC confirmado” ao final. Migrações históricas permanecem offline e não devem ser repetidas.
 # LSports TRADE — integração Test
 
 ## Estado da validação
@@ -1258,3 +1259,56 @@ Para validar: confira o histórico e as odds aceitas dos dois bilhetes; pression
 Se a versão **anterior** deixar um lock na primeira parada, mantenha API/worker parados e use apenas `npm run recover:timestamps -- --inspect`. Somente se o relatório confirmar API fechada e `lock.owner:"not_running"`, use `npm run recover:timestamps -- --recover-lock --expected-pid PID_DO_INSPECT`. Esse comando verifica novamente o owner, cria backups e arquiva o lock; **não aplica a migração de timestamps**. Não reutilize um PID antigo nem apague arquivos `.lock`/`.reclaim` manualmente. Backups, checkpoint e bilhetes existentes são preservados.
 
 SIGKILL, queda de energia ou encerramento forçado do terminal não permitem executar handlers; um lock residual nesses casos requer a recuperação offline verificada. A rejeição dos timestamps HTTP sem timezone continua vigente; nenhuma conversão UTC ou deslocamento fixo foi introduzido.
+
+## Contrato UTC confirmado — ticket #217525
+
+**Fonte:** confirmação escrita da LSports, por **Szymon Luka**, comunicada pelo
+operador em **18/10/2026**: todos os timestamps HTTP e AMQP são UTC, com ou sem
+sufixo Z. Esta é a evidência contratual que faltava; não é inferência a partir
+do SDK nem um teste novo com a conta do fornecedor.
+
+O adaptador passa a acrescentar Z **somente a datas válidas sem fuso**, antes de
+qualquer conversão Date do SDK. Offsets explícitos são preservados e continuam
+representando seu instante original. Datas inválidas, inclusive calendários
+impossíveis, continuam rejeitadas. Campos ausentes mantêm a política existente de
+fallback para envelope/início de snapshot; ausência de valor não é convertida
+em “agora” arbitrariamente. As requisições HTTP, assinaturas e Retry-After não mudam.
+
+`2026-10-18T14:39:04.0173136` e `2026-10-18T14:39:04.0173136Z` passam a ter a mesma
+versão UTC e a mesma chave inteira de ordenação, independentemente de TZ.
+A conversão JS/SDK mantém milissegundos para exibição, mas o adaptador conserva
+até nove casas decimais em uma chave de nanossegundos inteira, persistida junto
+ao índice de versões de seleções. Isso permite rejeitar atualizações antigas
+mesmo quando diferem em 100 nanossegundos dentro do mesmo milissegundo. A precisão
+que já foi perdida em checkpoints históricos não é inventada nem recuperada
+por subtração de três horas.
+
+A quarentena **somente por ausência de fuso** deixa de ser aplicada a novas
+respostas/mensagens válidas. Inspeções novas trazem
+`contract:"lsports-217525-utc"`, `orderingKey`, valor bruto e IDs de contexto.
+Quarentenas e versões históricas já gravadas **não são reprocessadas nem
+reescritas automaticamente**. Uma nova confirmação válida do fornecedor segue
+as regras normais de versão/freshness; uma odd salva em disco não se torna atual
+pela mudança do parser. Mercados/resultados liquidados continuam bloqueando novas
+apostas; códigos numéricos de liquidação permanecem a única base de resultado.
+
+Antes de qualquer recuperação adicional dos dados persistidos, execute somente:
+
+```sh
+npm run diagnose:timestamps:utc
+```
+
+Esse comando lê o checkpoint configurado em `LSPORTS_STATE_FILE` (padrão
+`.runtime/trade-feed.json`), sem abrir bilhetes, adquirir/remover locks, consultar o
+fornecedor ou gravar arquivos. Informa fixture/mercado/seleção, origem,
+`historicalConversionMatches`, `storedMatchesContract` e quarentenas com evidência
+bruta disponível. Diferença indica necessidade de análise — não autorização para
+reaplicar preço/settlement. Checkpoints sem valor bruto não permitem comprovar a
+conversão histórica; ausência de candidatos não prova que todo histórico está
+correto. Não execute novamente a migração anterior nem remova `.runtime`.
+
+Testes usam o parser e o SDK instalados, snapshots HTTP locais e processos com
+TZ `UTC`, `America/Sao_Paulo` e `Europe/Berlin`: equivalência do exemplo, offsets,
+precisão submilissegundo, proteção contra versões antigas, persistência/reinício,
+rejeição de datas inválidas e manutenção do bloqueio de seleção liquidada.
+Nenhum teste desta entrega consulta a LSports ou modifica os bilhetes do Mac.

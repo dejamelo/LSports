@@ -1,3 +1,4 @@
+import {providerTimestamp,normalizeSdkTimestamps,attachTimestampPrecision,hasInvalidProviderTimestamp} from './timestamp-contract.js';
 import { inspectSettlements } from "./settlement-evidence.js";
 import { createHash } from "node:crypto";
 import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
@@ -46,15 +47,12 @@ const scalar = (value: unknown) =>
       ? String(value)
       : undefined;
 const date = (value: unknown) => {
-  const ms =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/i.test(value)
-        ? Date.parse(value)
-        : NaN;
-  return Number.isFinite(ms) && ms > 0 && ms <= 8640000000000000
-    ? ms
-    : undefined;
+ const parsed=providerTimestamp(value); return parsed && parsed.milliseconds>0 ? parsed.milliseconds : undefined;
+};
+const transform = <T extends import("trade360-nodejs-sdk").BaseEntity>(value: unknown, entity: new (...args:any[])=>T):T => {
+ if(hasInvalidProviderTimestamp(value))throw new OperationError({operation:'feed.decode',protocol:'amqp',category:'invalid_message',reason:'invalid_timestamp',message:'LastUpdate inválido; no se aplica la actualización.'});
+ const parsed=TransformerUtil.transform(normalizeSdkTimestamps(value),entity);
+ attachTimestampPrecision(value,parsed);return parsed;
 };
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 export function decodeMessage(
@@ -411,7 +409,7 @@ export function decodeMessage(
   try {
     const value = (body || {}) as Record<string, unknown>;
     if (type === 37) {
-      const competition = TransformerUtil.transform(value, OutrightFixtureUpdate).competition;
+      const competition = transform(value, OutrightFixtureUpdate).competition;
       if (!competition || !Array.isArray(competition.events)) throw new Error("Invalid competition");
       events = competition.events.map((event) => ({
         fixtureId: event.fixtureId,
@@ -422,7 +420,7 @@ export function decodeMessage(
         throw new Error("Conversion lost events");
     }
     if (type === 39) {
-      const competition = TransformerUtil.transform(value, OutrightScoreUpdate).competition;
+      const competition = transform(value, OutrightScoreUpdate).competition;
       if (!competition || !Array.isArray(competition.events)) throw new Error("Invalid score competition");
       events = competition.events.map(event => ({ fixtureId: event.fixtureId,
         outright: {competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type},
@@ -433,8 +431,8 @@ export function decodeMessage(
     }
     if (type === 41 || type === 42) {
       const competition = type === 41
-        ? TransformerUtil.transform(value, OutrightFixtureMarketUpdate).competition
-        : TransformerUtil.transform(value, OutrightSettlementsUpdate).competition;
+        ? transform(value, OutrightFixtureMarketUpdate).competition
+        : transform(value, OutrightSettlementsUpdate).competition;
       if (!competition || !Array.isArray(competition.events)) throw new Error("Invalid competition");
       events = competition.events.map((event, index) => ({
         fixtureId: event.fixtureId,
@@ -448,19 +446,19 @@ export function decodeMessage(
     }
     if (type === 1)
       events =
-        TransformerUtil.transform(value, FixtureMetadataUpdate).events || [];
+        transform(value, FixtureMetadataUpdate).events || [];
     if (type === 2)
-      events = (TransformerUtil.transform(value, LivescoreUpdate).events ||
+      events = (transform(value, LivescoreUpdate).events ||
         []) as TradeEvent[];
     if (type === 3)
-      events = TransformerUtil.transform(value, MarketUpdate).events || [];
+      events = transform(value, MarketUpdate).events || [];
     if (type === 35)
-      events = TransformerUtil.transform(value, SettlementUpdate).events || [];
+      events = transform(value, SettlementUpdate).events || [];
     if (type === 32)
-      interrupted = !!TransformerUtil.transform(value, HeartbeatUpdate)
+      interrupted = !!transform(value, HeartbeatUpdate)
         .feedInterrupted?.length;
     if (type === 31) {
-      const keepAlive = TransformerUtil.transform(
+      const keepAlive = transform(
         value,
         KeepAliveUpdate,
       ).keepAlive;
