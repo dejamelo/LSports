@@ -88,3 +88,10 @@ con comandos de backup, cambio de política y reversión. Antes de stop/start,
 comparar Caddy activo vs configuración de inicio con `check-posnet-caddy-boot.sh`.
 Los campos de cotización oficial en AWS Pricing Calculator están al final de
 CAPACITY-REVIEW.md; las tarifas anteriores no se consideran confirmadas.
+
+El operador confirmó aplicación correcta de las dos políticas originfix, sin
+restart. El siguiente plan, aún no autorizado, está en
+[EC2-RESIZE-RUNBOOK.md](EC2-RESIZE-RUNBOOK.md). Incluye consulta sólo lectura desde
+CloudShell para precio oficial/EIP/EBS, puertas pendientes para los otros siete
+containers con política no, cambio EC2 y recuperación. No ejecutar la sección
+stop/modify/start durante el diagnóstico.
