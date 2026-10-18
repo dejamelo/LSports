@@ -357,7 +357,9 @@ export async function session(
     // A reconnect must establish its own regular snapshot baseline; a previous
     // session's lastSnapshotAt is not proof that this connection recovered.
     let regularSnapshotReady = false;
+    const requireOpen=()=>{if(closed || signal.aborted)throw failure || transportEnd("worker_stopped");};
     const recover = async () => {
+      requireOpen();
       bufferingForSnapshot = true;
       state.set(lane, {
         phase: "recovering",
@@ -365,7 +367,9 @@ export async function session(
         message: "Recuperando snapshot; cuotas bloqueadas.",
       });
       await processing;
+      requireOpen();
       await save();
+      requireOpen();
       let rows: import("./state.js").TradeEvent[] | undefined;
       if (Date.now() >= nextDue["snapshot.events"]) {
         const started = Date.now();
@@ -395,6 +399,7 @@ export async function session(
         ["snapshot.outright.fixtures", api.outrightFixtures, "fixtures"],
         ["snapshot.outright.markets", api.outrightMarkets ? () => api.outrightMarkets!(state.outrightFixtureIds(lane)) : undefined, "marketEvents"],
       ] as const) {
+        requireOpen();
         if (!action || Date.now() < nextDue[name]) continue;
         outrightRecovery.diagnostics = outrightRecovery.diagnostics?.filter(d => d.operation !== name);
         const startedOutright = Date.now();

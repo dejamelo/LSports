@@ -185,3 +185,14 @@ for (const rootClose of [false, true])
       );
     },
   );
+
+test('broker close during recovery persistence prevents a later snapshot reservation in the dead session',{timeout:6000},async()=>{
+ const state=new TradeState();const abort=new AbortController();let consumed=false,closed=false,calls=0;
+ const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(){consumed=true;return {consumerTag:'existing'};},ack(){},nack(){}});
+ const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel;},async close(){connection.emit('close');}});
+ const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',queue:'_4511_',port:5672,tls:false};
+ await assert.rejects(()=>session(pkg,{packages:[pkg],snapshotUrl:'https://unused.invalid',customersUrl:'https://unused.invalid',recoveryMs:300000,staleMs:90000},state,async()=>{
+  if(consumed&&!closed){closed=true;channel.emit('close');connection.emit('close',Object.assign(new Error('private broker reason'),{code:320}));}
+ },abort.signal,{connect:(async()=>connection) as unknown as typeof amqp.connect,clientFactory:()=>({async startDistribution(){},async distributionStatus(){return {isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async catalog(){return [];},async snapshot(){calls++;return [];}})}),e=>e instanceof OperationError&&e.diagnostic.amqpCode===320);
+ assert.equal(calls,0);assert.equal(state.connections.prematch.lastSnapshotAttemptAt,undefined);assert.equal(state.connections.prematch.sessionEnds?.[0].diagnostic.amqpCode,320);
+});

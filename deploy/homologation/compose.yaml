@@ -1,7 +1,7 @@
 name: adl-homologation
 services:
   api:
-    image: adl-homologation:review
+    image: ${ADL_IMAGE:-adl-homologation:review}
     build:
       context: ../..
       dockerfile: Dockerfile.homologation
@@ -13,14 +13,19 @@ services:
       PLATFORM_ENABLED: "true"
       HOST: 0.0.0.0
       PORT: "3001"
+      NODE_OPTIONS: --max-old-space-size=512
       LSPORTS_STATE_FILE: /app/.runtime/feed/trade-feed.json
       PLATFORM_DATA_DIR: /app/.runtime/platform
+      TEST_TICKETS_DB: /app/.runtime/platform/legacy-test-tickets.sqlite
     command: [node, --import, tsx, apps/api/src/index.ts]
+    ports: ["127.0.0.1:${ADL_API_LOOPBACK_PORT:-13001}:3001"]
+    mem_limit: ${ADL_API_MEMORY_LIMIT:-768m}
+    cpus: ${ADL_API_CPUS:-0.5}
     volumes:
       - feed-data:/app/.runtime/feed:ro
       - platform-data:/app/.runtime/platform
     read_only: true
-    tmpfs: [/tmp]
+    tmpfs: [/tmp:size=67108864,mode=1777]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 60s
@@ -40,7 +45,8 @@ services:
       driver: json-file
       options: { max-size: 10m, max-file: "3" }
   worker:
-    image: adl-homologation:review
+    profiles: [feed-consumer]
+    image: ${ADL_IMAGE:-adl-homologation:review}
     build:
       context: ../..
       dockerfile: Dockerfile.homologation
@@ -51,9 +57,18 @@ services:
       DATA_MODE: connected
       PLATFORM_ENABLED: "true"
       PLATFORM_DATA_DIR: /app/.runtime/platform
+      TEST_TICKETS_DB: /app/.runtime/platform/legacy-test-tickets.sqlite
       LSPORTS_ENVIRONMENT: Test
+      NODE_OPTIONS: --max-old-space-size=3072
+      ADL_CAPACITY_APPROVED: ${ADL_CAPACITY_APPROVED:-no}
+      ADL_MAC_WORKER_STOPPED: ${ADL_MAC_WORKER_STOPPED:-no}
+      ADL_SUPPLIER_NOT_BEFORE_UTC: ${ADL_SUPPLIER_NOT_BEFORE_UTC:-}
+      LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB: ${ADL_PREMATCH_SNAPSHOT_MB:-256}
+      LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB: ${ADL_INPLAY_SNAPSHOT_MB:-128}
       LSPORTS_STATE_FILE: /app/.runtime/feed/trade-feed.json
-    command: [node, --import, tsx, apps/worker/src/index.ts]
+    command: [node, --import, tsx, scripts/homologation-worker.ts]
+    mem_limit: ${ADL_WORKER_MEMORY_LIMIT:-4g}
+    cpus: ${ADL_WORKER_CPUS:-2.0}
     volumes:
       - feed-data:/app/.runtime/feed
       - platform-data:/app/.runtime/platform
@@ -61,17 +76,22 @@ services:
       api:
         condition: service_healthy
     read_only: true
-    tmpfs: [/tmp]
+    tmpfs: [/tmp:size=67108864,mode=1777]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 60s
-    restart: unless-stopped
+    restart: "no"
     logging:
       driver: json-file
       options: { max-size: 10m, max-file: "3" }
   proxy:
+    profiles: [standalone-proxy]
     image: caddy:2-alpine
-    env_file: ${API_ENV_FILE:-./api.env}
+    environment:
+      HOMOLOGATION_HOST: ${HOMOLOGATION_HOST:-sportsbook-stage.example.invalid}
+      ADMIN_ALLOWED_CIDRS: ${ADMIN_ALLOWED_CIDRS:-127.0.0.1/32 ::1/128}
+    mem_limit: 128m
+    cpus: 0.25
     ports: ["80:80", "443:443"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

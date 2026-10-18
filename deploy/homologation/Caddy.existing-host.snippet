@@ -1,0 +1,19 @@
+# Proposed NEW site only. Review against existing Caddy configuration; do not overwrite it.
+# For a host Caddy use 127.0.0.1:13001 (match ADL_API_LOOPBACK_PORT).
+# For container Caddy + compose.existing-caddy.yaml use adl-homologation-api:3001.
+sportsbook-stage.example.invalid {
+  header {
+    Strict-Transport-Security "max-age=31536000"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+  }
+  @privateAdmin {
+    path /control /api/control/*
+    not remote_ip 127.0.0.1/32 ::1/128
+  }
+  respond @privateAdmin 403
+  @developmentOnly path /demo/* /local-demo/* /synthetic/*
+  respond @developmentOnly 404
+  reverse_proxy 127.0.0.1:13001
+  # No access log containing temporary embed-session URLs.
+}

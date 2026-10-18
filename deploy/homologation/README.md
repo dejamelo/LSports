@@ -1,133 +1,67 @@
-# Homologação ADL · preparação, sem deploy executado
+# ADL / LSports · homologação AWS preparada, sem deploy
 
-Objetivo: publicar o build do iframe e o painel/API na mesma origem HTTPS,
-usando LSports **Test** e carteira exclusivamente em **simulação**. O Compose
-é para **um único host**, uma API e um worker. Não escale réplicas: o modelo atual
-usa SQLite, arquivos de projeção, locks e coordenação de snapshots no mesmo volume.
-Os helpers de demonstração local/sintética não são publicados.
+Iframe, painel e API com feed LSports Test e bilhetes/carteira exclusivamente simulados. Projeto independente do POSNET Lottery. Nenhum serviço AWS foi acessado ou alterado nesta entrega; não há destino SSH, AWS CLI/credenciais ou conector AWS disponíveis no workspace. Não é possível declarar RAM/CPU/disco suficientes sem o diagnóstico do host.
 
-## O que ainda precisa ser definido/provisionado
+## 1. Primeiro: inventário somente leitura
 
-- Host Linux com Docker/Compose, disco persistente, backup/restauração e domínio
-  DNS apontando para ele; portas 80/443 para HTTPS; acesso administrativo por VPN
-  ou CIDRs conhecidos. O exemplo bloqueia o painel fora de loopback até configurar
-  `ADMIN_ALLOWED_CIDRS`.
-- Origem pública HTTPS exata em `PLATFORM_PUBLIC_ORIGIN`, domínio do Caddy e
-  origens HTTPS autorizadas do cassino de homologação. Não use localhost como
-  origem do cassino remoto.
-- Credenciais LSports no servidor e autorização/allowlist de egress do host para
-  os endpoints HTTP/AMQP Test existentes. AMQPS somente se listener/porta forem
-  confirmados pelo fornecedor; o exemplo preserva o listener Test já utilizado.
-- **Um só consumidor ativo dos pacotes/filas.** Não rode este worker ao mesmo
-  tempo que o Mac nas mesmas filas: consumidores concorrentes dividem mensagens.
-  Combine a transferência ou peça um ambiente/filas de teste separados, sem
-  criar assinaturas pagas. Este é um bloqueio operacional antes de homologar o feed.
-- Conta administrativa de homologação, cliente/operação de teste separados,
-  domínios autorizados e chave permanente entregue somente ao backend do cassino.
-  O backend solicita `/api/integration/v1/embed-sessions`; o browser recebe apenas
-  a URL temporária. `/demo/argentina`, `/demo/synthetic` e o Vite não são publicados.
-- Eventos Test abertos com odds recomendadas atualizadas e testes remotos de
-  iframe, CSP, sessão temporária, limites, risco, resultados e correções. TLS/IP,
-  DNS e conectividade real do fornecedor ainda precisam ser validados no host.
-- Alertas e monitoramento para worker parado, erro de feed, snapshots parciais,
-  Retry-After, disco e liquidações pendentes; retenção/rotação de logs sem segredos.
-  O healthcheck da API verifica somente que o painel é servido, não a conexão LSports.
+No Mac, depois de atualizar esta branch, substituir usuário/host e executar **um único comando**:
 
-Não copie `.env`, `.runtime`, bilhetes, backups ou banco do Mac para estes volumes
-por conta própria. Nada aqui migra dados existentes. Uma transferência futura exige
-plano separado, backup consistente e validação das permissões e escopos.
+```bash
+ssh USUARIO@HOST_AWS 'bash -s' < deploy/homologation/diagnose-host.sh > diagnostico-aws.txt
+```
 
-## Arquivos
+O script local é enviado ao shell remoto: não precisa clonar ou instalar nada no servidor. Mede RAM disponível/swap, CPU/carga atual, disco/inodes, portas, Docker/Compose, serviços, containers e limites já existentes, redes e destinos de volumes. Não imprime env/config/logs de containers, credenciais ou argumentos de processos. Não executa instalação, prune, restart, reload ou mudanças de configuração. Não usa sudo; falta de permissão deve ser resolvida pela coleta com um operador autorizado, nunca alterando o daemon ou grupos automaticamente. A coleta não mede picos históricos: comparar com métricas existentes do período de maior uso do POSNET antes de aprovar capacidade.
 
-- `Dockerfile.homologation`: Node 24, dependências pelo lockfile, build, usuário
-  sem privilégios. O runtime usa TypeScript/tsx, por isso mantém as dependências
-  necessárias em vez de removê-las com `omit=dev`.
-- `.dockerignore`: exclui segredos, chaves, bancos, backups e dados locais do contexto.
-  O Dockerfile copia explicitamente somente manifests e diretórios de código.
-- `compose.yaml`: API, worker e Caddy; API/worker com raiz somente leitura,
-  volumes persistentes, tmpfs, SIGTERM e prazo de encerramento de 60 segundos.
-- O worker escreve o volume do feed e liquida bilhetes no volume da plataforma;
-  a API lê o feed em montagem somente leitura e administra o banco da plataforma.
-  Só o worker recebe credenciais do fornecedor. O Caddy recebe apenas configurações
-  públicas de origem/CIDRs, nunca credenciais LSports ou de bootstrap.
-- `Caddyfile`: HTTPS, painel restrito por IP, bloqueio dos helpers locais e proxy.
-  O CSP `frame-ancestors` continua sendo definido pela aplicação por cliente.
-- `api.env.example`, `worker.env.example`, `bootstrap.env.example`: modelos sem
-  segredos. Cópias `*.env` e `secrets/` são ignoradas pelo Git e pelo build.
+## 2. Proposta de capacidade — condicional ao inventário
 
-## Preparação para revisão (sem iniciar serviços)
+| Componente ADL | Teto RAM | Heap Node | CPU máxima | Persistência |
+|---|---:|---:|---:|---|
+| Worker único | 4 GiB | old-space 3 GiB | 2 vCPU | feed/checkpoint/journal + plataforma |
+| API/painel/iframe | 768 MiB | old-space 512 MiB | 0,5 vCPU | plataforma; feed somente leitura |
+| Caddy atual | reutilizado | — | medir atual | volumes/configuração atuais preservados |
+| Proxy opcional, somente se não existir Caddy | 128 MiB | — | 0,25 vCPU | certificados/configuração próprios |
 
-Copie os modelos para `api.env`, `worker.env` e, quando necessário, `bootstrap.env`
-no próprio host e proteja-os com permissões 600. Preencha os valores no servidor,
-nunca em argumentos de linha de comando, chats ou arquivos versionados.
+Aumentar o heap não é solução para a falta de RAM física observada no Mac. Estes são limites **novos para containers isolados na AWS**, não alterações no Mac ou na instância. O worker admite PreMatch 256 MiB / InPlay 128 MiB somente se a margem real satisfizer `min(heap restante, memória disponível)` >= `8 × teto + 64 MiB`. Para PreMatch são 2.112 MiB; estado residente e aplicação consomem memória adicional. O teto do container não garante essa margem no host.
 
-Validação estrutural usando somente modelos:
+Condição inicial conservadora: memória **disponível adicional** para os tetos ADL (4,75 GiB sem novo proxy) + pelo menos 1 GiB de folga do host, sem consumir reservas/picos do POSNET; CPU livre para ADL sem saturar os serviços atuais; pelo menos 10 GiB de disco/inodes livres após considerar imagens, dados e backups. São critérios de triagem, não certificação de carga. Se a infraestrutura não comportar isso, **não iniciar** e não criar/redimensionar recursos: apresentar a insuficiência para decisão posterior. Limites são ajustáveis no arquivo de proposta somente após medir; não reduzir a proteção do snapshot para fazê-lo caber.
 
-```sh
+## 3. Isolamento e segredos
+
+- Sempre usar `docker compose -p adl-homologation ...`; nunca reutilizar projeto, volumes ou diretórios do POSNET.
+- Compose principal inicia somente API por padrão. Worker está no profile `feed-consumer`, exige gates explícitos e tem restart automático desativado. Após reboot/OOM, investigar e verificar novamente o corte antes de iniciá-lo. O loop interno do worker continua persistente/reconecta falhas de transporte.
+- API publica somente `127.0.0.1:13001`, condicionado a essa porta estar livre. O Compose padrão não publica 80/443. O proxy novo é um profile separado `standalone-proxy`, que **não deve ser usado** se essas portas/Caddy já pertencem aos serviços atuais.
+- Caddy de host: novo site a partir de `Caddy.existing-host.snippet`, apontando a loopback. Caddy em container: `compose.existing-caddy.yaml` conecta somente a nova API à rede já existente, com alias `adl-homologation-api`; o novo site aponta a esse alias na porta 3001. Não sobrescrever o Caddyfile atual, não remover rotas POSNET, não abrir portas, não recarregar Caddy nesta preparação.
+- `deploy.env.example`: parâmetros não secretos, imagem identificada por commit, limites e gates. `api.env.example`: origem pública HTTPS. `worker.env.example`: endpoints/filas atuais Test e credenciais somente do worker. `bootstrap.env.example`: conta inicial administrativa, arquivo temporário.
+- Arquivos reais em `/etc/adl-homologation/` com diretório 700 e arquivos 600, fora do Git. Não colocar senha em argumentos, chat, imagem ou navegador. Proxy recebe apenas hostname/CIDRs; API não recebe credenciais LSports.
+- Containers sem privilégios, raiz somente leitura, tmpfs limitado, logs JSON com rotação 10 MiB × 3 por serviço. Volumes nomeados `feed-data` e `platform-data`, prefixados pelo projeto. `TEST_TICKETS_DB` aponta para um arquivo separado no volume de plataforma: a API não tenta criar SQLite na montagem de feed somente leitura. Não montar `.runtime` ou banco do POSNET.
+- Homologação usa nova plataforma/cliente/operações de teste; não copia bancos, chaves, bilhetes, backups ou `.env` do Mac. Os bilhetes e odds já existentes permanecem no Mac. Uma migração desses dados exigiria outro plano auditado, não executado aqui.
+
+## 4. Plano de corte: Mac → AWS, sem consumidores simultâneos
+
+1. Aprovar capacidade com o inventário e picos atuais. Confirmar domínio, CIDRs administrativos, porta livre e forma do Caddy. Montar arquivos reais protegidos e construir a imagem fora do pico do POSNET, preferencialmente em CI/outro ambiente. Não criar recursos pagos nem fazer resize.
+2. Preparar API/volumes/conta administrativa de homologação, **sem profile do consumidor**, somente após autorização de deploy. `/control` saudável não prova feed conectado. Registrar backup inicial consistente e recuperação; snapshots EBS/S3 novos não estão autorizados.
+3. No Mac, registrar diagnóstico de conexões, maior `retryAt` e prazos de operações bem-sucedidas (última tentativa + intervalo); suspender novas apostas simuladas se necessário. Encerrar seu worker pelo Ctrl+C normal, aguardar persistência e `worker.shutdown` com lock liberado. Verificar que o PID proprietário não está rodando. Não matar todos os processos Node nem apagar locks.
+4. Confirmar no operador/painel que não há outro consumidor desses mesmos pacotes/filas. Não usar `stopDistribution`, cancelar assinaturas ou criar filas. Os gates da AWS são **confirmações do operador**, não detecção remota/fencing automático do Mac.
+5. Definir `ADL_CAPACITY_APPROVED=yes`, `ADL_MAC_WORKER_STOPPED=yes` e `ADL_SUPPLIER_NOT_BEFORE_UTC` como barreira UTC posterior a **todos** os cooldowns/Retry-After e intervalos já reservados no Mac. Não copiar arquivos `.lock`; não iniciar com journal vazio para antecipar consultas. Se esses prazos não puderem ser apurados, não iniciar. Verificar relógio UTC/NTP do host.
+6. Só após essa revisão/autorização, iniciar um único worker com profile `feed-consumer`. O launcher bloqueia falta de confirmação, horário prematuro, configuração inválida ou memória insuficiente antes de importar o worker/provedor. A checagem de memória é repetida depois da restauração, antes de cada HTTP.
+7. Validar conexões, snapshot regular realmente concluído, handoff, status/odds e processamento do tipo 40. Não aceitar preços antigos, mercados encerrados ou HTTP 200 como único sucesso. Validar bilhetes simulados novos, idempotência e settlement/correção. Não declarar conexão real validada antes disso.
+
+Rollback: suspender novas aceitações AWS, manter liquidação até resolver os bilhetes de homologação pendentes, fazer backup consistente e parar o worker AWS normalmente. Confirmar ausência do consumidor AWS antes de reativar o Mac, respeitando também os prazos AWS. Não sobrepor bancos diferentes ou abandonar bilhetes pendentes. Local file locks não impedem consumidores em hosts diferentes; não prometer failover automático.
+
+## 5. Validação estrutural sem segredos nem deploy
+
+```bash
 API_ENV_FILE=./api.env.example WORKER_ENV_FILE=./worker.env.example \
-  docker compose -f deploy/homologation/compose.yaml config --quiet
-npm run build
-npm test
+  docker compose -p adl-homologation -f deploy/homologation/compose.yaml config --quiet
+API_ENV_FILE=./api.env.example WORKER_ENV_FILE=./worker.env.example ADL_CADDY_NETWORK=rede-existente-exemplo \
+  docker compose -p adl-homologation -f deploy/homologation/compose.yaml \
+  -f deploy/homologation/compose.existing-caddy.yaml config --quiet
 ```
 
-Evite imprimir `docker compose config` completo com arquivos reais: ele pode
-resolver variáveis secretas. Para construir uma imagem de revisão, sem publicar:
+Usar `config --quiet` com arquivos reais; imprimir config completa ou `docker inspect` sem seleção pode revelar segredos. Não executar `compose up`, bootstrap, reload, `down -v`, prune ou alteração de serviços nesta etapa. O Dockerfile continua usando lockfile, TLS verificado e usuário sem privilégios; suporte a CA pública via build secret já está preparado. A imagem da revisão atual ainda deve ser construída e identificada pelo commit antes da publicação.
 
-```sh
-docker build -f Dockerfile.homologation -t adl-homologation:review .
-```
+## 6. Custos e pendências antes de publicar
 
-Se a rede de build usa uma CA corporativa, mantenha a verificação TLS habilitada
-e passe **um certificado público confiável**, sem copiá-lo para o repositório:
+**Recursos pagos novos propostos nesta etapa: nenhum.** Se couber no host e nos volumes já provisionados, não se propõe custo fixo incremental de EC2/EBS, ALB, NAT, novo IP público ou nova instância. Isso não garante fatura adicional zero: tráfego de saída, DNS e backups/monitoramento eventualmente contratados dependem da região, franquias e serviços existentes. Instâncias burstable (por exemplo T3/T4g) em modo Unlimited também podem cobrar créditos excedentes de CPU, mesmo sem resize; confirmar família/política de créditos antes de aprovar a carga. Caddy/Compose não exigem licença paga; certificados ACME não têm tarifa do Caddy. Nenhum CloudWatch/S3/EBS snapshot ou recurso novo foi criado. Antes de qualquer recurso pago, apresentar preço e obter autorização.
 
-```sh
-docker build --secret id=build_ca,src=/caminho/ca-publica.pem \
-  -f Dockerfile.homologation -t adl-homologation:review .
-```
-
-O mount de build é temporário e não é gravado na imagem. Não use `strict-ssl=false`
-ou `NODE_TLS_REJECT_UNAUTHORIZED=0`.
-
-## Sequência futura de publicação — não executada nesta entrega
-
-Depois de definir os itens acima, revisar os arquivos reais no host e autorizar
-publicação, construir uma imagem identificada pelo commit e iniciar o Compose.
-Não iniciar um segundo worker nas filas utilizadas no Mac. Em seguida, executar
-bootstrap uma única vez a partir do arquivo protegido, por exemplo:
-
-```sh
-docker compose -f deploy/homologation/compose.yaml run --rm --no-deps \
-  --env-from-file ./deploy/homologation/bootstrap.env \
-  api node --import tsx scripts/bootstrap-platform.ts
-```
-
-Eliminar `bootstrap.env` após confirmação; não incluir sua senha em `api.env`.
-Acessar `https://DOMINIO/control` somente da rede administrativa autorizada,
-cadastrar o cassino/operação de homologação e sua origem de incorporação, gerar
-credencial do backend e testar a sessão no domínio real. Cookies administrativos
-usam Secure; sessões do iframe usam Bearer temporário em memória, sem depender de
-cookies de terceiros. O processo de startup da API recusa produção sem plataforma
-autenticada, modo conectado e origem HTTPS exata.
-
-Validar feed e liquidação com evidências novas; não confundir a tela de login 200
-com aprovação da integração. Aguardar o agendamento normal dos snapshots, respeitar
-`retryAt`, manter mercados liquidados fechados e conferir backups/restauração e
-encerramento antes de ampliar uso. Nunca remover locks automaticamente. Após uma
-queda forçada, examinar o proprietário do lock dentro do contexto correto do
-container/volume e preparar recuperação offline auditada; PIDs de namespaces
-Docker não equivalem aos do host.
-
-Para produção comercial ainda faltam, além da homologação remota, o contrato e a
-integração de carteira real (saldo/débito/crédito/estorno/conciliação), requisitos
-operacionais/comerciais e validação dos canais/terminais reais. Esta configuração
-não habilita dinheiro real.
-
-## Validação desta entrega
-
-Build da aplicação e 134 testes aprovados; regressão do painel/iframe no navegador
-com dados isolados aprovada. Compose validado usando somente os arquivos de exemplo.
-Caddy validado em execução efêmera de `caddy validate`, sem rede e sem portas publicadas.
-Imagem de revisão construída com sucesso; neste ambiente foi necessário fornecer
-a CA pública da rede como secret temporário de build, mantendo TLS verificado.
-Nenhum `compose up`, publicação de imagem, deploy, bootstrap de homologação ou teste
-real das credenciais/DNS/certificado/egress LSports foi executado.
+Pendente: inventário AWS real, folga sobre picos POSNET, região/arquitetura, egress/allowlists atuais, domínio/CIDRs, estratégia de backup no armazenamento existente, orçamento de retenção e autorização de deploy. O fechamento AMQP 320 do Mac e `distribution_still_off` são questões separadas: pedir ao fornecedor o motivo sanitizado nos horários UTC documentados, sem atribuir ao orçamento de memória ou alegar que mudar de host resolve. O objetivo permanece feed real **Test** e bilhetes simulados; carteira real não está habilitada.

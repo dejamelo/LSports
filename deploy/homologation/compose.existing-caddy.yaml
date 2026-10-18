@@ -1,0 +1,12 @@
+# ONLY if the existing Caddy is a container. Use its already existing network.
+# Creates no proxy, publishes no 80/443 and does not modify POSNET containers.
+services:
+  api:
+    networks:
+      default: {}
+      caddy-existing:
+        aliases: [adl-homologation-api]
+networks:
+  caddy-existing:
+    external: true
+    name: ${ADL_CADDY_NETWORK:?Set the existing Caddy Docker network after the read-only audit}
