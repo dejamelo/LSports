@@ -40,14 +40,14 @@ export function inspectSettlements(raw:unknown, converted:Market[], source: "amq
  }
  return {fields,counts,rejected};
 }
-const sources=new Set(['amqp.41','amqp.42','snapshot.outright.markets']);
+const sources=new Set(['amqp.40','amqp.41','amqp.42','snapshot.outright.markets']);
 export function validObservation(v:unknown):v is SettlementObservation {
  return object(v)&&sources.has(String(v.source))&&Number.isFinite(Date.parse(String(v.receivedAt)))&&Number.isFinite(Date.parse(String(v.versionAt)))&&
   ['missing','null','integer'].includes(String(v.field))&&(v.field==='integer'?Number.isInteger(v.code):v.code===null)&&
   ['stored','ignored_missing','ignored_null','ignored_older'].includes(String(v.decision));
 }
 export function validTrace(v:unknown):v is SettlementTrace {
- return object(v)&&Object.keys(v).every(k=>['last41','last42','lastSnapshot','lastNumeric'].includes(k)&&validObservation(v[k]));
+ return object(v)&&Object.keys(v).every(k=>['last40','last41','last42','lastSnapshot','lastNumeric'].includes(k)&&validObservation(v[k]));
 }
 export function validMarketEvidence(v:unknown):boolean {
  return object(v)&&Object.keys(v).every(k=>sources.has(k)&&object(v[k])&&

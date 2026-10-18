@@ -60,6 +60,7 @@ export const safeFeedDiagnostic = (diagnostic?: IntegrationDiagnostic) =>
         deliveryDisposition:diagnostic.deliveryDisposition,
         messageMetadata: diagnostic.messageMetadata ? {
           messageType:diagnostic.messageMetadata.messageType,
+          entityShape:diagnostic.messageMetadata.entityShape,
           messageTypeName:safeName(diagnostic.messageMetadata.messageTypeName),
           wireBytes:diagnostic.messageMetadata.wireBytes,decodedBytes:diagnostic.messageMetadata.decodedBytes,
           redelivered:diagnostic.messageMetadata.redelivered,

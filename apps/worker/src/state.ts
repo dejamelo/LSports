@@ -16,12 +16,12 @@ import type { Fixture, Livescore, Market, OutrightFixtureEvent, OutrightScoreUpd
 type OutrightScore = NonNullable<NonNullable<NonNullable<OutrightScoreUpdate["competition"]>["events"]>[number]["outrightScore"]>;
 export interface TradeEvent {
   fixtureId: number;
-  outright?: { competitionId: number; competitionName?: string; competitionType?: number; fixture?: NonNullable<OutrightFixtureEvent["outrightFixture"]> };
+  outright?: { competitionId: number; competitionName?: string; competitionType?: number; leagueSeason?: {id:number;name?:string;type?:number}; fixtureName?:string; fixture?: NonNullable<OutrightFixtureEvent["outrightFixture"]> };
   fixture?: Fixture;
   livescore?: Livescore;
   outrightScore?: OutrightScore;
   markets?: Market[];
-  marketMessageType?: 41 | 42;
+  marketMessageType?: 40 | 41 | 42;
   marketRecovery?: boolean;
   localReplay?: boolean;
   settlementInspection?: ReturnType<typeof import("./settlement-evidence.js").inspectSettlements>;
@@ -134,7 +134,7 @@ export class TradeState {
     else if(events>0){
       activity.lastDataDecodedAt=now;
       if([1,2,37,39].includes(type))activity.lastEventDecodedAt=now;
-      if([3,41].includes(type))activity.lastMarketDecodedAt=now;
+      if([3,40,41].includes(type))activity.lastMarketDecodedAt=now;
       if([35,42].includes(type))activity.lastSettlementDecodedAt=now;
     }
     m.messagesByType[String(type)] = (m.messagesByType[String(type)] || 0) + 1;
@@ -268,7 +268,7 @@ export class TradeState {
               decision: field.field === "missing" ? "ignored_missing" : field.field === "null" ? "ignored_null" : older ? "ignored_older" : "stored",
             };
             const trace = (row.settlementAudit ||= new Map()).get(betKey) || {};
-            trace[settlementSource === "amqp.42" ? "last42" : settlementSource === "amqp.41" ? "last41" : "lastSnapshot"] = observation;
+            trace[settlementSource === "amqp.42" ? "last42" : settlementSource === "amqp.41" ? "last41" : settlementSource === "amqp.40" ? "last40" : "lastSnapshot"] = observation;
             if (field.field === "integer") trace.lastNumeric = observation;
             row.settlementAudit.set(betKey, trace);
           }
@@ -421,7 +421,7 @@ export class TradeState {
             ...(() => {
               const trace=row.settlementAudit?.get(`${m.id}:${b.id}`);
               const version=row.betAt.get(`${m.id}:${b.id}`);
-              const proof=[trace?.last41,trace?.lastSnapshot].find(p=>p?.timestamp?.orderingSafe===true&&(p.timestamp.timezone==='explicit'||p.timestamp.contract==='lsports-217525-utc')&&Date.parse(p.versionAt)===version);
+              const proof=[trace?.last40,trace?.last41,trace?.lastSnapshot].find(p=>p?.timestamp?.orderingSafe===true&&(p.timestamp.timezone==='explicit'||p.timestamp.contract==='lsports-217525-utc')&&Date.parse(p.versionAt)===version);
               return proof&&unavailableReasons.length===0?{priceVersionAt:proof.versionAt,priceOrderingSafe:true}:{};
             })(),
             label: `${b.name || (row.outright && b.participantId !== undefined ? fixture.participants?.find((p) => p.id === b.participantId)?.name : undefined) || "Selección"}${b.line ? ` (${b.line})` : ""}`,

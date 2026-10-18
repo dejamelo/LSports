@@ -64,12 +64,12 @@ export interface SettlementFieldEvidence {
 }
 export interface SettlementObservation {
   timestamp?: TimestampInspection;
-  source: "amqp.41" | "amqp.42" | "snapshot.outright.markets";
+  source: "amqp.40" | "amqp.41" | "amqp.42" | "snapshot.outright.markets";
   receivedAt: string; versionAt: string;
   field: "missing" | "null" | "integer"; code: number | null;
   decision: "stored" | "ignored_missing" | "ignored_null" | "ignored_older";
 }
-export interface SettlementTrace {last41?: SettlementObservation; last42?: SettlementObservation; lastSnapshot?: SettlementObservation; lastNumeric?: SettlementObservation}
+export interface SettlementTrace {last40?: SettlementObservation;last41?: SettlementObservation; last42?: SettlementObservation; lastSnapshot?: SettlementObservation; lastNumeric?: SettlementObservation}
 export interface SettlementMarketCounts {marketId: number; rootBets: number; rootNumeric: number; rootNull: number; rootMissing: number; providerBets: number; providerNumeric: number}
 export type SettlementMarketEvidence = Partial<Record<SettlementObservation["source"], SettlementMarketCounts & {receivedAt: string}>>;
 export interface OutrightMarketResult {
@@ -322,6 +322,7 @@ export interface IntegrationDiagnostic {
   deliveryDisposition?: "requeue_requested" | "unacknowledged_until_close";
 }
 export interface FeedMessageMetadata {
+  entityShape?: {competition:"object"|"missing_or_invalid";seasons:number|null;flatEventsPresent:boolean;seasonEvents:(number|null)[]};
   wireBytes: number;
   decodedBytes?: number;
   contentType: string;
