@@ -137,3 +137,38 @@ Ver CAPACITY-REVIEW.md. La API pública de precios sigue bloqueada por 403 desde
 este workspace y AWS CLI no está instalada en el servidor. No instalarla para
 el diagnóstico ni presentar los precios previos como confirmados. Completar AWS
 Pricing Calculator y aprobar importe/ventana antes de cambiar EC2.
+
+## Comando único para ejecución por el operador
+
+El anexo `comprovacao-caddy-boot.jsonl` confirmó comparación `equal` y
+`boot_gate=config_matches_now`: archivo del host/montado idénticos y configuración
+activa equivalente a la adaptada para inicio, en el momento de la captura.
+No fue un reinicio real. No cambiar Caddy entre esta comprobación y la ventana.
+
+`apply-posnet-restart-policy.sh` implementa la propuesta anterior: valida IDs,
+salud y aliases; crea backup seleccionado 0700/0600, con rollback, antes de cualquier
+update; verifica identidad, imagen, Config/HostConfig (hashes sin secretos),
+mounts/redes/puertos/PID/StartedAt antes y después. No hace restart/stop/start,
+recreate, pull ni cambios Caddy. Sólo actualiza RestartPolicy de los dos originfix.
+Una repetición con política ya aplicada sólo verifica y guarda otro backup.
+Un error identifica etapa y posibilidad de aplicación parcial; no borra backups
+ni hace rollback automático.
+
+Desde el checkout actualizado del Mac, sustituir `DESTINO_SSH_EXISTENTE` por el
+alias/destino ya usado con sus opciones SSH habituales. El destino no figura en
+los anexos del diagnóstico; no adivinarlo ni crear una conexión nueva:
+
+```bash
+ssh DESTINO_SSH_EXISTENTE 'sudo -n bash -s' < deploy/homologation/apply-posnet-restart-policy.sh
+```
+
+Guardar la ruta de backup emitida. En caso de falla, detenerse: el backup contiene
+`before.json`, `rollback.json` y los after/intent que hayan podido persistirse.
+`rollback.json` lista comandos Docker de reversión por ID con la política original;
+revisarlos en el servidor. Si ambas eran `no`, la reversión explícita de la sección
+3 aplica sin restart; no ejecutar automáticamente comandos desde JSON sin revisarlos.
+No considerar una falla como rollback completado. Confirmar las dos políticas
+antes de cualquier decisión de stop/start EC2.
+
+Validación local de esta rutina: cuatro pruebas, Docker simulado: éxito, error de
+backup sin updates, falla parcial de segunda actualización e idempotencia.
