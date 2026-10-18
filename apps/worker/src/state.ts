@@ -35,6 +35,8 @@ export interface Row {
   marketAt: Map<string, number>;
   betAt: Map<string, number>;
   freshBets?: Set<string>;
+  // Session evidence only: a checkpoint must never restore quote confirmation.
+  snapshotBets?: Map<string, import("@lsports/contracts").SnapshotQuoteObservation>;
 }
 const statusLabels: Record<number, string> = {
   0: "Sin estado",
@@ -191,12 +193,25 @@ export class TradeState {
         for (const bet of market.bets || []) {
           const betKey = `${key}:${bet.id}`;
           const t = timestamp(bet.lastUpdate, at);
-          if (t >= (row.betAt.get(betKey) || 0)) {
+          const previousAt = row.betAt.get(betKey) || 0;
+          const hasPrice = bet.price !== undefined && Number.isFinite(Number(bet.price)) && Number(bet.price) > 1;
+          if (event.marketRecovery) {
+            (row.snapshotBets ||= new Map()).set(betKey, {
+              receivedAt: new Date(at).toISOString(), versionAt: new Date(t).toISOString(),
+              receivedPrice: bet.price !== undefined && Number.isFinite(Number(bet.price)) ? Number(bet.price) : null,
+              decision: t < previousAt ? "older_than_stored" : !hasPrice ? "missing_or_invalid_price" : "confirmed",
+            });
+          }
+          if (t >= previousAt) {
             bets.set(bet.id, {
               ...bets.get(bet.id),
               ...defined(bet),
             } as typeof bet);
-            if (row.restored && t > (row.betAt.get(betKey) || 0)) (row.freshBets ||= new Set()).add(betKey);
+            // A current snapshot explicitly reconfirms an unchanged quote. Its LastUpdate
+            // describes the last price change, not when the snapshot was requested.
+            // A status-only delta must never validate a price read from disk.
+            if (row.restored && hasPrice && (event.marketRecovery || t > previousAt))
+              (row.freshBets ||= new Set()).add(betKey);
             row.betAt.set(betKey, t);
           } else {
             this.metrics[lane].staleUpdatesIgnored++;
@@ -252,6 +267,11 @@ export class TradeState {
                 nameSource: b.name !== undefined ? "selection" as const : participantName !== undefined ? "participant" as const : "not_reported" as const,
                 status: b.betStatusId ?? b.status ?? null, providerStatus: b.status ?? null, betStatusId: b.betStatusId ?? null,
                 settlement: b.settlement ?? null, resultKnown: known,
+                quoteRecovery: {
+                  awaitingFreshQuote: !!row.restored && !row.freshBets?.has(`${m.id}:${b.id}`),
+                  snapshotSeen: !!row.snapshotBets?.has(`${m.id}:${b.id}`),
+                  snapshot: row.snapshotBets?.get(`${m.id}:${b.id}`),
+                },
                 resultDescription: b.settlement == null ? "Liquidación no informada" : known ? settlementLabel(b.settlement) : "Código de liquidación desconocido" };
             }),
           })),
@@ -310,6 +330,14 @@ export class TradeState {
         }));
         const marketDiagnostic = diagnosticByKey.get(prefix);
         if (marketDiagnostic) {
+          for (const diagnosticMarket of marketDiagnostic.markets || []) {
+            const published = markets.find(m => m.id === `${prefix}:${diagnosticMarket.id}`);
+            for (const diagnosticSelection of diagnosticMarket.selections) {
+              const selection = published?.selections.find(s => s.id === `${prefix}:${diagnosticMarket.id}:${diagnosticSelection.id}`);
+              if (selection) Object.assign(diagnosticSelection, {odds: selection.odds, available: selection.available,
+                unavailableReasons: selection.unavailableReasons});
+            }
+          }
           marketDiagnostic.fixtureStatus = status;
           marketDiagnostic.fixtureStatusLabel = statusLabels[status ?? 0] || "Estado desconocido";
           marketDiagnostic.selectableSelections = markets.reduce((n, m) => n + m.selections.filter((s) => s.available).length, 0);

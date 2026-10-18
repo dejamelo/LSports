@@ -32,6 +32,12 @@ export interface EventParticipant {
   type?: number;
   extraData?: { name?: string; value?: string }[];
 }
+export interface SnapshotQuoteObservation {
+  receivedAt: string;
+  versionAt: string;
+  receivedPrice: number | null;
+  decision: "confirmed" | "older_than_stored" | "missing_or_invalid_price";
+}
 export interface OutrightMarketResult {
   id: number | null;
   name: string | null;
@@ -49,6 +55,14 @@ export interface OutrightMarketResult {
     settlement: number | null;
     resultKnown: boolean;
     resultDescription: string;
+    odds?: number;
+    available?: boolean;
+    unavailableReasons?: string[];
+    quoteRecovery?: {
+      awaitingFreshQuote: boolean;
+      snapshotSeen: boolean; // observed in a snapshot during this process session; see receivedAt
+      snapshot?: SnapshotQuoteObservation;
+    };
   }[];
 }
 export interface OutrightMarketDiagnostic {

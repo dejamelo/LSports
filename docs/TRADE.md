@@ -980,3 +980,29 @@ en esa prueba es deliberadamente sintético y **no representa el resultado real*
 del fixture. Sin acceso al checkpoint del Mac, no se declara aquí el nombre de la
 ganadora real ni el resultado real de Vegas Vickie. No se hicieron nuevas consultas
 al proveedor para esta validación.
+
+### Odds Outright após reinício: confirmação pelo snapshot
+
+O checkpoint preserva os participantes, mercados e odds, mas não confirma que as odds continuam disponíveis. Cada reinício começa com as seleções restauradas bloqueadas. A recuperação atual confirma uma seleção quando o snapshot de mercados retorna **explicitamente uma odd válida** e sua versão `LastUpdate` é igual ou posterior à armazenada. O mesmo `LastUpdate` significa que o preço não mudou; não é motivo para rejeitar uma confirmação recebida no snapshot atual. Versões anteriores continuam ignoradas. Uma atualização AMQP de preço mais recente também confirma a seleção; mensagem apenas de status, heartbeat ou fixture não confirma uma odd lida do disco.
+
+Seleções ausentes, sem preço válido ou recebidas com versão anterior permanecem bloqueadas se ainda não tiveram confirmação nesta sessão. Nenhum resultado vazio, HTTP 429, `Body:null` ou checkpoint antigo habilita odds. Conexão, fixture, mercado, status da seleção e settlement continuam sendo verificados mesmo após confirmar a cotação. Os limites, `retryAt`, assinaturas e filas permanecem os mesmos.
+
+Para comparar os dados recebidos com a API no Mac, após atualizar/reiniciar e aguardar a recuperação permitida pelo `retryAt`, abra:
+
+```
+http://localhost:3001/api/diagnostics/outright/20540564
+```
+
+Em `matches[].markets[]` encontre o mercado `id:160`. Cada seleção inclui `odds`, `available`, `unavailableReasons` e `quoteRecovery`:
+
+- `awaitingFreshQuote:true`: a cotação restaurada ainda não foi confirmada.
+- `snapshotSeen`: essa seleção foi observada em um snapshot **nesta sessão**. Não se restaura essa evidência do checkpoint.
+- `snapshot.receivedAt` e `versionAt`: recebimento da observação e versão usada para ordenação (`LastUpdate`, ou instante da consulta quando ausente). Compare também `lastMarketSnapshotAt` e o diagnóstico de recuperação da conexão; uma observação anterior não afirma que o último snapshot incluiu a seleção.
+- `snapshot.receivedPrice`: preço individual recebido, sem payload completo ou credenciais.
+- `snapshot.decision:"confirmed"`: preço explícito válido, versão igual ou mais recente; consulte `available` e os motivos para outros bloqueios.
+- `older_than_stored`: snapshot anterior à versão já salva; não substituiu a odd.
+- `missing_or_invalid_price`: o snapshot incluiu a seleção sem uma odd válida; não confirmou o preço salvo.
+
+Se o snapshot inclui dez preços válidos de versão igual, as dez cotações devem ser confirmadas; se somente uma seleção está presente, as nove ausentes permanecem protegidas. Consulte também `/api/events`: IDs, odds e disponibilidade devem coincidir com o diagnóstico. Não apague `.runtime`, SQLite ou arquivos de cooldown e não execute `diagnose:trade` repetidamente para antecipar a recuperação.
+
+A regressão automatizada usa apenas um servidor HTTP local e amostras explicitamente sintéticas em diretório temporário: SDK oficial → restauração de checkpoint → uma atualização AMQP → snapshot com dez preços inalterados → API HTTP com dez seleções habilitadas → segundo reinício/snapshot parcial → apenas a seleção confirmada habilitada. Também verifica snapshot vazio/anterior, mensagem sem preço, suspensão, liquidação, conexão e preservação integral de um bilhete de teste já registrado. Isso não comprova o conteúdo do snapshot real de Madrid no Mac.
