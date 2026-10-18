@@ -1055,3 +1055,35 @@ A evidência é persistida no checkpoint, sem payloads completos ou credenciais.
 Se a evidência recente confirmar ausência de códigos, complementar o chamado LSports 217525 com: ambiente **Test**, pacote **PreMatch 4511**, fixture **20540564**, competitionId observado, mercado **Race Winner 160**, IDs originais de Bet/Participant das sete seleções (incluindo Green Hussar), timestamps UTC e contagens por origem. Informar que Sibarita recebeu `Settlement:2`, Napoles/Darro `Settlement:1`, enquanto as sete restantes vieram sem código (distinguir campo omitido de null). Anexar somente o trecho sanitizado desses campos e das observações; não enviar `.env`, senhas, URLs autenticadas ou payload completo.
 
 Solicitação concreta: "Confirmem a liquidação das sete seleções do mercado 160 e reenviem os códigos explícitos de Settlement pelos respectivos Bet IDs na mensagem OutrightSettlementsUpdate (42), ou disponibilizem-nos no snapshot `/Prematch/GetOutrightFixtureMarkets` com `packageId:4511` e `fixtures:[20540564]`. Confirmem se há settlement apenas em ProviderMarkets e qual resultado recomendado deveria ser publicado no nível principal. Não solicitamos novas assinaturas." Se a evidência indicar `ignored_older`, pedir também confirmação de `LastUpdate` e ordenação para esses Bet IDs. Sem observações recentes, não é possível atribuir a falta ao fornecedor só pelo `settlement:null` da projeção.
+
+### Ordenação de LastUpdate e diferença de três horas
+
+AMQP Outright e snapshot passam pelo mesmo `TransformerUtil`/`@Type(() => Date)` do SDK. Não existe ajuste de três horas entre esses dois caminhos na aplicação. Reproduzimos no SDK oficial com processos Node independentes:
+
+| Valor bruto | Processo UTC | Processo America/Sao_Paulo |
+| --- | --- | --- |
+| `2026-10-18T14:02:17.025Z` | `14:02:17.025Z` | `14:02:17.025Z` |
+| `2026-10-18T14:02:17.025-03:00` | `17:02:17.025Z` | `17:02:17.025Z` |
+| `2026-10-18T14:02:17.025` (sem zona) | `14:02:17.025Z` | `17:02:17.025Z` |
+
+Portanto, a dupla normalizada `14:02Z`/`17:02Z` não identifica sozinha a causa. Pode ser diferença real entre valores com offset explícito, string sem fuso interpretada pelo horário local do Node, ou uso de fontes de versão diferentes quando `LastUpdate` não veio. Não subtraímos três horas, não presumimos que uma data sem zona seja UTC e não mudamos o `TZ` do Mac.
+
+Cada nova `settlementTrace.last41.timestamp`, `last42.timestamp` ou `lastSnapshot.timestamp` registra:
+
+- `rawLastUpdate` e `rawType`: apenas data ISO reconhecida/número ou null; conteúdo arbitrário é omitido. `rawType:missing` é distinto de null.
+- `timezone`: `explicit`, `absent`, `missing`, `epoch_milliseconds` ou `invalid`.
+- `sdkUtc`: conversão efetivamente produzida pelo SDK.
+- `normalizedUtc`: instante definido por zona explícita/epoch; fica null quando a zona está ausente. Não é uma correção por offset.
+- `hostTimezone` e `hostOffsetMinutes`: ambiente do processo e offset na data convertida (inclusive DST).
+- `wallClockToSdkDeltaMinutes`: diferença diagnóstica entre os números do relógio sem zona e a conversão SDK. Nunca é usada como ajuste do dado.
+- `orderingSafe`, `orderingSource`: indica se a versão é inequívoca; na ausência de LastUpdate, indica fallback para timestamp do envelope ou início da consulta, conforme a origem já mostrada na observação.
+
+Datas explícitas devem representar exatamente o mesmo instante no SDK. Strings sem fuso, valores inválidos ou conversão divergente geram diagnóstico **antes de aplicar os mercados**. No snapshot isso deixa a recuperação parcial, preserva os dados existentes e não confirma odds antigas. No AMQP a mensagem não é ACKada e permanece para reprocessamento via requeue; o feed pode pausar com `restart_required`, sem descarte. O erro traz `reason:ambiguous_timestamp`/`invalid_timestamp` e `timestampInspection` sanitizado na conexão/recuperação Outright. Timestamps textuais do envelope usados como fallback também precisam declarar zona; epoch do transporte continua aceito. Não são feitas novas consultas nem alterados limites/cooldowns.
+
+**Limite da validação histórica:** checkpoints que já gravaram um `Date` convertido perderam a grafia original. Um `17:02Z` salvo pode ser um instante legítimo ou a interpretação local de `14:02` sem zona; não é seguro reduzir essa versão automaticamente. Nenhum checkpoint ou resultado de bilhete é reescrito por essa proteção. Se uma versão adiantada já persistida continuar fazendo uma mensagem UTC posterior parecer antiga, a auditoria mostrará `ignored_older`; precisamos comparar os valores brutos antes de corrigir o legado. Este ajuste previne novas versões ambíguas, mas não comprova nem repara por inferência o histórico do Mac.
+
+No caso Parislongchamp 20545283 / Sangomar, depois da atualização/reinício normal, abra `/api/diagnostics/outright/20545283` e compare as observações `last41` e `lastSnapshot`, suas datas `receivedAt`, `versionAt` e o bloco `timestamp`. Se o snapshot for rejeitado, veja `connections.prematch.outrightRecovery.diagnostics[].timestampInspection` (ou o diagnóstico do feed em caso AMQP). Não altere `.env`, não apague `.runtime`, não force consultas antecipadas e não use `TZ=UTC` como correção sem confirmar a semântica do fornecedor. Anotações anteriores à atualização não possuem o valor bruto e não permitem reconstruí-lo.
+
+Se `timezone:absent`, solicitar à LSports o fuso contratual de `Bets[].LastUpdate` no AMQP 41/42 e no endpoint `/Prematch/GetOutrightFixtureMarkets`, idealmente com emissão consistente de `Z` ou offset explícito. Informar pacote Test 4511, fixture 20545283, mercado 160, Bet ID de Sangomar e os campos sanitizados acima. Se ambos forem explícitos e representarem instantes diferentes, pedir explicação da diferença nos valores emitidos; não convertê-los artificialmente para o mesmo instante.
+
+Os testes executam o SDK real sob UTC, America/Sao_Paulo e Europe/Berlin: igualdade entre timestamps equivalentes com offsets diferentes; snapshot antigo sem substituir uma odd recente; AMQP com versão posterior aceito; snapshot ambíguo sem alterar a odd; diagnóstico HTTP 200 não tratado como recuperação válida; e requeue para versão ambígua AMQP. São amostras isoladas, sem acesso ao feed ou aos arquivos do Mac.

@@ -1,8 +1,9 @@
+import { inspectTimestamp, requireTimestamp } from "./timestamp-evidence.js";
 import type {Market} from 'trade360-nodejs-sdk';
 import type {SettlementFieldEvidence, SettlementMarketCounts, SettlementObservation, SettlementTrace} from '@lsports/contracts';
 const object=(v:unknown):v is Record<string,unknown> => !!v&&typeof v==='object'&&!Array.isArray(v);
 // Compare the actual supplier JSON with the official entity conversion. Never log payloads.
-export function inspectSettlements(raw:unknown, converted:Market[]):{fields:SettlementFieldEvidence[];counts:SettlementMarketCounts[]} {
+export function inspectSettlements(raw:unknown, converted:Market[], source: "amqp" | "snapshot" = "amqp"):{fields:SettlementFieldEvidence[];counts:SettlementMarketCounts[]} {
  if(!Array.isArray(raw)||raw.length!==converted.length)throw new Error('Settlement conversion mismatch');
  const fields:SettlementFieldEvidence[]=[], counts:SettlementMarketCounts[]=[];
  for(let i=0;i<raw.length;i++){
@@ -14,12 +15,14 @@ export function inspectSettlements(raw:unknown, converted:Market[]):{fields:Sett
   for(let j=0;j<bets.length;j++){
    const bet=bets[j], parsed=sdk.bets![j];
    if(!object(bet)||String(bet.Id)!==parsed.id)throw new Error('Settlement selection identity mismatch');
+   const timestamp=inspectTimestamp(bet.LastUpdate,parsed.lastUpdate);
+   requireTimestamp(timestamp,source);
    const field=!Object.hasOwn(bet,'Settlement')?'missing':bet.Settlement===null?'null':'integer';
    if(field==='integer'&&(!Number.isInteger(bet.Settlement)||parsed.settlement!==bet.Settlement))throw new Error('Settlement numeric value invalid or lost');
    if(field==='missing'&&parsed.settlement!==undefined)throw new Error('Settlement invented during conversion');
    if(field==='null'&&parsed.settlement!=null)throw new Error('Settlement null conversion mismatch');
    summary[field==='integer'?'rootNumeric':field==='null'?'rootNull':'rootMissing']++;
-   fields.push({marketId:sdk.id!,selectionId:parsed.id,field,code:field==='integer'?Number(bet.Settlement):null});
+   fields.push({marketId:sdk.id!,selectionId:parsed.id,timestamp,field,code:field==='integer'?Number(bet.Settlement):null});
   }
   // Provider-specific results are counted, never promoted into the recommended selection.
   for(const provider of Array.isArray(market.ProviderMarkets)?market.ProviderMarkets:[]){

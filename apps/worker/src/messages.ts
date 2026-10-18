@@ -49,7 +49,7 @@ const date = (value: unknown) => {
   const ms =
     typeof value === "number"
       ? value
-      : typeof value === "string"
+      : typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/i.test(value)
         ? Date.parse(value)
         : NaN;
   return Number.isFinite(ms) && ms > 0 && ms <= 8640000000000000
@@ -467,7 +467,8 @@ export function decodeMessage(
       if (Array.isArray(keepAlive?.activeEvents))
         keepAliveActiveEvents = keepAlive.activeEvents.length;
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof OperationError) throw new OperationError({...error.diagnostic, messageMetadata: structuredClone(metadata)});
     fail(
       "entity_conversion",
       "entity",

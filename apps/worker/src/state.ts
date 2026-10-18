@@ -216,7 +216,7 @@ export class TradeState {
           if (settlementSource && field) {
             const observation: import("@lsports/contracts").SettlementObservation = {
               source: settlementSource, receivedAt: new Date(at).toISOString(), versionAt: new Date(t).toISOString(),
-              field: field.field, code: field.code,
+              field: field.field, code: field.code, timestamp: field.timestamp,
               decision: field.field === "missing" ? "ignored_missing" : field.field === "null" ? "ignored_null" : t < previousAt ? "ignored_older" : "stored",
             };
             const trace = (row.settlementAudit ||= new Map()).get(betKey) || {};

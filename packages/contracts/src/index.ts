@@ -38,10 +38,21 @@ export interface SnapshotQuoteObservation {
   receivedPrice: number | null;
   decision: "confirmed" | "older_than_stored" | "missing_or_invalid_price";
 }
+export interface TimestampInspection {
+  rawLastUpdate: string | number | null;
+  rawType: "missing" | "null" | "string" | "number" | "other";
+  timezone: "missing" | "epoch_milliseconds" | "explicit" | "absent" | "invalid";
+  sdkUtc: string | null; normalizedUtc: string | null;
+  hostTimezone: string; hostOffsetMinutes: number;
+  wallClockToSdkDeltaMinutes: number | null;
+  orderingSafe: boolean; orderingSource: "envelope_or_snapshot_start" | "last_update";
+}
 export interface SettlementFieldEvidence {
+  timestamp?: TimestampInspection;
   marketId: number; selectionId: string; field: "missing" | "null" | "integer"; code: number | null;
 }
 export interface SettlementObservation {
+  timestamp?: TimestampInspection;
   source: "amqp.41" | "amqp.42" | "snapshot.outright.markets";
   receivedAt: string; versionAt: string;
   field: "missing" | "null" | "integer"; code: number | null;
@@ -229,6 +240,8 @@ export interface IntegrationDiagnostic {
     | "sdk_conversion"
     | "sdk_validation"
     | "invalid_snapshot"
+    | "ambiguous_timestamp"
+    | "invalid_timestamp"
     | "unknown_exception"
     | "unsupported_content_type"
     | "unsupported_content_encoding"
@@ -276,6 +289,7 @@ export interface IntegrationDiagnostic {
     | "transport_headers"
     | "entity";
   messageMetadata?: FeedMessageMetadata;
+  timestampInspection?: TimestampInspection;
   retryPolicy?: "restart_required";
   deliveryDisposition?: "requeue_requested" | "unacknowledged_until_close";
 }

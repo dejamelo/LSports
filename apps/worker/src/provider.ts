@@ -292,7 +292,7 @@ function decodeOutrightSnapshot(sdk: unknown, payload: unknown, kind: "fixtures"
       for (const [index, row] of (competition.events || []).entries()) {
         if (row.markets?.some(m => m.bets?.some(b => typeof b.id !== "string" || !b.id))) invalid();
         events.push({ fixtureId: row.fixtureId, outright: { competitionId: competition.id!, competitionName: competition.name, competitionType: competition.type }, markets: row.markets, marketRecovery: true,
-          settlementInspection: (() => { try { return inspectSettlements(body.Events[index].Markets, row.markets || []); } catch { return invalid(); } })() });
+          settlementInspection: (() => { try { return inspectSettlements(body.Events[index].Markets, row.markets || [], "snapshot"); } catch (error) { if (error instanceof OperationError) throw error; return invalid(); } })() });
       }
     }
   }
