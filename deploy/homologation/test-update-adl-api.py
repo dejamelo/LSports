@@ -1,4 +1,4 @@
-import copy, importlib.util, sqlite3, tempfile, unittest
+import copy, importlib.util, sqlite3, tempfile, unittest, io, tarfile
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('update',Path(__file__).with_name('update-adl-api.py'));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class UpdateTests(unittest.TestCase):
@@ -28,6 +28,26 @@ class UpdateTests(unittest.TestCase):
         db.execute('CREATE TABLE other(secret)')
         with self.assertRaisesRegex(RuntimeError,'UNREVIEWED_SCHEMA_ADDITION'):m.compatible_schema(old,m.schema(db))
         db.close()
+    def test_git_archive_directory_entries_are_valid_but_links_and_escape_are_not(self):
+        def archive(kind,name='apps/api/src/index.ts'):
+            raw=io.BytesIO()
+            with tarfile.open(fileobj=raw,mode='w') as t:
+                d=tarfile.TarInfo('apps/');d.type=tarfile.DIRTYPE;t.addfile(d)
+                f=tarfile.TarInfo(name)
+                if kind=='link':f.type=tarfile.SYMTYPE;f.linkname='/etc/passwd';t.addfile(f)
+                else:f.size=4;t.addfile(f,io.BytesIO(b'test'))
+            raw.seek(0);return raw
+        with tempfile.TemporaryDirectory() as d:
+            m.receive_source(archive('file'),Path(d));self.assertEqual((Path(d)/'apps/api/src/index.ts').read_bytes(),b'test')
+            for raw in [archive('link'),archive('file','../outside')]:
+                with self.assertRaisesRegex(RuntimeError,'ARCHIVE_PATH_REJECTED'):m.receive_source(raw,Path(d))
+    def test_version_attestation_and_progress_are_required(self):
+        code=Path(__file__).with_name('update-adl-api.py').read_text()
+        self.assertIn('org.opencontainers.image.revision',code)
+        self.assertIn('INSTALLED_IMAGE_VERSION_MISMATCH',code)
+        self.assertIn('INSTALLED_SOURCE_MISMATCH',code)
+        self.assertIn('installedSourceVerified=True',code)
+        self.assertIn("emit(stage=stage,status='running')",code)
     def test_no_worker_or_caddy_commands(self):
         code=Path(__file__).with_name('update-adl-api.py').read_text()
         self.assertNotIn("'down'",code);self.assertNotIn("'stop'",code);self.assertNotIn("'restart'",code);self.assertNotIn("'reload'",code)

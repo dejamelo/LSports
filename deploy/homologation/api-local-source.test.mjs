@@ -35,6 +35,16 @@ test('full entrypoint from separate directory honors explicit repo/commit and in
  try{git('init','-q');git('config','user.name','Test');git('config','user.email','test@example.invalid');await fs.writeFile(path.join(repo,'a'),'one');git('add','.');git('commit','-qm','one');const sha=git('rev-parse','HEAD').trim();
  const runner=path.join(repo,'separate-runner');await fs.mkdir(runner);for(const name of ['update-adl-api.mjs','api-local-source.mjs'])await fs.copyFile(new URL(name,import.meta.url),path.join(runner,name));
  const output=execFileSync(process.execPath,[path.join(runner,'update-adl-api.mjs'),'--repo',repo,'--commit',sha,'--preserve-local-changes','--inspect-local'],{cwd:os.tmpdir(),encoding:'utf8'});
- const result=JSON.parse(output.trim());assert.equal(result.environment,'local_checkout_before_ssh');assert.equal(result.intendedCommit,sha);assert.equal(result.remoteChangesRequested,false);assert.equal(result.backup,null);
+ const result=output.trim().split('\n').map(JSON.parse).find(r=>r.stage==='local_source_comparison');assert.equal(result.environment,'local_checkout_before_ssh');assert.equal(result.intendedCommit,sha);assert.equal(result.remoteChangesRequested,false);assert.equal(result.backup,null);
  }finally{await fs.rm(repo,{recursive:true,force:true});}
+});
+
+test('real invocation through symlinked temporary directory cannot silently skip main',async()=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'adl-entry-symlink-'));const real=path.join(root,'real'),alias=path.join(root,'alias');await fs.mkdir(real);await fs.symlink(real,alias);
+ try{for(const name of ['update-adl-api.mjs','api-local-source.mjs'])await fs.copyFile(new URL(name,import.meta.url),path.join(real,name));
+ // Invalid option proves main ran before Git/SSH, even when argv uses an alias.
+ const {spawnSync}=await import('node:child_process');
+ const r=spawnSync(process.execPath,[path.join(alias,'update-adl-api.mjs'),'--invalid-option'],{encoding:'utf8'});
+ assert.equal(r.status,2);const first=JSON.parse(r.stdout.trim().split('\n')[0]);assert.equal(first.stage,'executor_start');assert.equal(first.entrypointVerified,true);assert.equal(JSON.parse(r.stderr.trim()).reason,'INVALID_OPTION');
+ }finally{await fs.rm(root,{recursive:true,force:true});}
 });

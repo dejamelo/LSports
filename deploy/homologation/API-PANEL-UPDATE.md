@@ -144,3 +144,27 @@ Para incorporar uma edição local à publicação, revisá-la e criar um commit
 separado posteriormente; não reaplicar patches automaticamente. Para consulta
 sem SSH, acrescentar `--inspect-local` ao mesmo executor (faz a cópia protegida
 quando necessário). Não compartilhar os arquivos `.private` no chat.
+
+
+## Saída silenciosa do executor temporário (b1c3ac6)
+
+Reprodução local comprovada: invocar o arquivo por um diretório symlink fazia
+`process.argv[1] !== fileURLToPath(import.meta.url)`; o guard não chamava main e
+encerrava com código zero e nenhum byte de saída. No macOS, `/var` versus
+`/private/var` é um caso típico. Não há evidência de uma implantação naquele
+silêncio; conferir somente a versão real na execução corrigida.
+
+O guard agora compara `realpath` dos dois caminhos. Há teste de invocação real
+por symlink, com opção inválida exigindo saída 2 e erro sanitizado; importações
+para testes continuam sem executar o deploy. O executor registra `executor_start`,
+comparação/backup, SSH, etapas remotas, heartbeat a cada 20 s e `executor_exit`.
+
+Também foi corrigida a aceitação dos diretórios normais presentes no `git archive`:
+continuam proibidos symlinks, arquivos privados e traversal. Antes de confirmar a
+API instalada, o servidor verifica ID da imagem executada contra o build, label
+`org.opencontainers.image.revision` e hashes de TODOS os arquivos-fonte enviados
+contra os arquivos dentro do container. Não importa módulos da aplicação para
+essa prova; usa apenas fs/crypto. Divergência exige rollback da API.
+O resultado `complete` inclui `installedCommit`, `installedImageId` e
+`installedSourceVerified:true`, além de saúde e HTTPS. Esses valores e o backup
+formam o recibo real; um container running sozinho não confirma a versão.

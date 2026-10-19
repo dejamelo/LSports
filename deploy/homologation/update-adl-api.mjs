@@ -15,7 +15,14 @@ export function productionSource(name){
  (/^(apps|packages)\//.test(name)&& !/(^|\/)(node_modules|dist|test-fixtures|\.runtime|\.local-synthetic-demo|backups)(\/|$)|(^|\/)\.env|\.test\.|synthetic|\.(sqlite|pem|key|log)(\.|$)/i.test(name)) ||
  ['scripts/bootstrap-platform.ts','scripts/recover-platform-access.ts'].includes(name);
 }
+export async function isEntrypoint(argvPath,moduleUrl){
+ if(!argvPath)return false;
+ return await fs.realpath(path.resolve(argvPath))===await fs.realpath(fileURLToPath(moduleUrl));
+}
+let activeStage='executor_start';
+const progress=(stage,extra={})=>{activeStage=stage;console.log(JSON.stringify({operation:'adl.api_update',stage,status:'running',...extra}));};
 async function main(){
+ progress('executor_start',{entrypointVerified:true});
  const options=process.argv.slice(2);let repo=ROOT,ref='HEAD',preserve=false,inspect=false;
  for(let i=0;i<options.length;i++){
   if(options[i]==='--repo'&&options[i+1])repo=path.resolve(options[++i]);
@@ -27,6 +34,7 @@ async function main(){
  if(ref.startsWith('-'))throw Error('INVALID_COMMIT_REF');
  const sha=(await exec('git',['rev-parse','--verify',ref+'^{commit}'],{cwd:repo})).stdout.trim();
  if(!/^[a-f0-9]{40}$/.test(sha))throw Error('COMMIT_INVALID');
+ progress('local_source_backup',{intendedCommit:sha});
  const local=await inspectLocalSource(repo,sha,path.join(os.homedir(),'Library','Application Support','ADL','Backups','LocalSource'));
  console.log(JSON.stringify({stage:'local_source_comparison',status:local.trackedChanges.length?'preserved':'clean',...local,remoteChangesRequested:false}));
  if(inspect)return;
@@ -37,9 +45,10 @@ async function main(){
  const source=(await exec('git',['show',sha+':deploy/homologation/update-adl-api.py'],{cwd:repo,maxBuffer:1024*1024})).stdout;
  const args=['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com'];
  const lines=[];
+ progress('ssh_api_update',{intendedCommit:sha});
  const ssh=spawn('ssh',[...args,'sudo -n python3 -c '+quote(source)+' '+quote(sha)],{stdio:['pipe','pipe','pipe']});
  ssh.stderr.resume();let pending='';
- ssh.stdout.on('data',chunk=>{pending+=chunk;let end;while((end=pending.indexOf('\n'))>=0){const line=pending.slice(0,end);pending=pending.slice(end+1);try{const d=JSON.parse(line);lines.push(d);console.log(JSON.stringify(d));}catch{/* no raw SSH output */}}});
+ ssh.stdout.on('data',chunk=>{pending+=chunk;let end;while((end=pending.indexOf('\n'))>=0){const line=pending.slice(0,end);pending=pending.slice(end+1);try{const d=JSON.parse(line);lines.push(d);if(d.stage)activeStage=d.stage;console.log(JSON.stringify(d));}catch{/* no raw SSH output */}}});
  const names=(await exec('git',['ls-tree','-r','--name-only','-z',sha],{cwd:repo,maxBuffer:4*1024*1024})).stdout.split('\0').filter(Boolean).filter(productionSource);
  const archive=spawn('git',['archive','--format=tar',sha,...names],{cwd:repo,stdio:['ignore','pipe','pipe']});archive.stderr.resume();
  const exit=p=>new Promise((r,j)=>{p.on('error',j);p.on('close',r);});
@@ -47,6 +56,7 @@ async function main(){
  const codes=await finished;
  if(codes.some(c=>c!==0)||!lines.some(l=>l.stage==='complete'&&l.status==='ok'))throw Error('REMOTE_UPDATE_NOT_CONFIRMED');
  const result=lines.findLast(l=>l.stage==='complete');
+ progress('mac_domain_access',{intendedCommit:sha,installedCommit:result.installedCommit,installedImageId:result.installedImageId,installedSourceVerified:result.installedSourceVerified});
  const origin='https://sportbook.apuestadeportiva.lat';
  const page=await fetch(origin+'/control',{signal:AbortSignal.timeout(15000)});
  const access=await fetch(origin+'/api/control/status',{signal:AbortSignal.timeout(15000)});
@@ -66,4 +76,9 @@ async function main(){
   console.log(JSON.stringify({stage:'first_access',status:'ok',protectedFile:file,note:'Read locally, do not paste into chat. Change password in panel after login.'}));
  }
 }
-if(process.argv[1]===fileURLToPath(import.meta.url))main().catch(e=>{console.error(JSON.stringify({operation:'adl.api_update',status:'blocked',reason:/^[A-Z_]+$/.test(e.message)?e.message:'EXECUTION_FAILED_SEE_REMOTE_STAGE',note:'No raw errors/secrets. Preserve private backup and inspect reported rollback; workers are never targeted.'}));process.exitCode=2;});
+if(await isEntrypoint(process.argv[1],import.meta.url)){
+ const timer=setInterval(()=>console.log(JSON.stringify({operation:'adl.api_update',stage:activeStage,status:'waiting',heartbeat:true})),20000);
+ try{await main();console.log(JSON.stringify({operation:'adl.api_update',stage:'executor_exit',status:process.exitCode?'not_confirmed':'complete',exitCode:process.exitCode||0}));}
+ catch(e){console.error(JSON.stringify({operation:'adl.api_update',stage:activeStage,status:'blocked',reason:/^[A-Z_]+$/.test(e.message)?e.message:'EXECUTION_FAILED_SEE_REMOTE_STAGE',note:'No raw errors/secrets. Preserve private backup and inspect reported rollback; workers are never targeted.'}));process.exitCode=2;}
+ finally{clearInterval(timer);}
+}

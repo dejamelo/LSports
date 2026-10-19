@@ -69,8 +69,16 @@ for(const id of p.allOperationIds()){const op=p.operation(id);if(existsSync(`/ch
 if(existsSync('/check/legacy-test-tickets.sqlite'))new TicketStore('/check/legacy-test-tickets.sqlite').close();
 console.log(JSON.stringify({adminPresent:p.hasPlatformAdmin(),operations:p.allOperationIds().length}));p.close();
 '''
+def receive_source(stream,context):
+    with tarfile.open(fileobj=stream,mode='r|') as archive:
+        for item in archive:
+            require((item.isfile() or item.isdir()) and not item.name.startswith('/') and '..' not in Path(item.name).parts,'ARCHIVE_PATH_REJECTED')
+            require(item.name.split('/')[0] in ('apps','packages','scripts','package.json','package-lock.json','tsconfig.json'),'SOURCE_SCOPE_REJECTED')
+            require(not re.search(r'(^|/)(\.env[^/]*|\.runtime|node_modules|backups|\.local-synthetic-demo)(/|$)|\.(sqlite|pem|key|log)(\.|$)|synthetic|\.test\.',item.name,re.I),'PRIVATE_OR_TEST_SOURCE_REJECTED')
+            archive.extract(item,context,filter='data')
+
 def main():
-    stage='preflight';backup=None;mutated=False;oldmeta=None;base=None;protected=None
+    stage='preflight';emit(stage=stage,status='running');backup=None;mutated=False;oldmeta=None;base=None;protected=None
     try:
         require(os.geteuid()==0,'ROOT_REQUIRED');os.umask(0o077)
         lock=open(SECURE/'api-update.lock','a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -97,23 +105,18 @@ def main():
             return v
         private(backup/'rollback.compose.private.json',json.dumps(literal(before)).encode())
         context=backup/'context';context.mkdir()
-        stage='receive_source'
-        with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
-            for item in archive:
-                require(item.isfile() and not item.name.startswith('/') and '..' not in Path(item.name).parts,'ARCHIVE_PATH_REJECTED')
-                require(item.name.split('/')[0] in ('apps','packages','scripts','package.json','package-lock.json','tsconfig.json'),'SOURCE_SCOPE_REJECTED')
-                require(not re.search(r'(^|/)(\.env[^/]*|\.runtime|node_modules|backups|\.local-synthetic-demo)(/|$)|\.(sqlite|pem|key|log)(\.|$)|synthetic|\.test\.',item.name,re.I),'PRIVATE_OR_TEST_SOURCE_REJECTED')
-                archive.extract(item,context,filter='data')
+        stage='receive_source';emit(stage=stage,status='running')
+        receive_source(sys.stdin.buffer,context)
         # Reuse installed dependencies only if the exact lockfile matches.
         oldlock=run(['docker','exec','--user','0:0',ids[0],'sha256sum','/app/package-lock.json']).decode().split()[0]
         require(hashlib.sha256((context/'package-lock.json').read_bytes()).hexdigest()==oldlock,'DEPENDENCY_LOCK_CHANGED_FULL_BUILD_REQUIRED')
         parent='adl-api-parent:'+api['Image'].split(':')[1];run(['docker','image','tag',api['Image'],parent])
         image='adl-api-ui:'+sha
-        dockerfile=f'''FROM {parent}\nUSER root\nCOPY apps /app/apps\nCOPY packages /app/packages\nCOPY scripts /app/scripts\nCOPY package.json package-lock.json tsconfig.json /app/\nRUN chmod a+r /app/package.json /app/package-lock.json /app/tsconfig.json && find /app/apps /app/packages /app/scripts -type d -exec chmod 0755 {{}} + && find /app/apps /app/packages /app/scripts -type f -exec chmod a+r {{}} + && find /app/apps /app/packages -type f -name '*.test.*' -delete && find /app/scripts -type f -name '*synthetic*' -delete && rm -f /app/scripts/validate-* /app/scripts/local-embed-demo* && NODE_OPTIONS=--max-old-space-size=768 npm run build -w @lsports/web\nUSER node\n'''
-        private(context/'Dockerfile',dockerfile.encode());stage='build_api_image'
+        dockerfile=f'''FROM {parent}\nLABEL org.opencontainers.image.revision={sha}\nUSER root\nCOPY apps /app/apps\nCOPY packages /app/packages\nCOPY scripts /app/scripts\nCOPY package.json package-lock.json tsconfig.json /app/\nRUN chmod a+r /app/package.json /app/package-lock.json /app/tsconfig.json && find /app/apps /app/packages /app/scripts -type d -exec chmod 0755 {{}} + && find /app/apps /app/packages /app/scripts -type f -exec chmod a+r {{}} + && find /app/apps /app/packages -type f -name '*.test.*' -delete && find /app/scripts -type f -name '*synthetic*' -delete && rm -f /app/scripts/validate-* /app/scripts/local-embed-demo* && NODE_OPTIONS=--max-old-space-size=768 npm run build -w @lsports/web\nUSER node\n'''
+        private(context/'Dockerfile',dockerfile.encode());stage='build_api_image';emit(stage=stage,status='running')
         env=dict(os.environ,DOCKER_BUILDKIT='0')
         run(['docker','build','--network','none','--pull=false','--memory','1g','--memory-swap','1g','--cpu-quota','100000','-t',image,str(context)],timeout=900,log=log,env=env)
-        stage='online_database_backup';data=backup/'platform';data.mkdir()
+        stage='online_database_backup';emit(stage=stage,status='running');data=backup/'platform';data.mkdir()
         files=sorted(platform.rglob('*.sqlite'))
         require(any(p.name=='control.sqlite' for p in files),'CONTROL_DATABASE_REQUIRED')
         for src in files:
@@ -123,7 +126,7 @@ def main():
         check=backup/'compatibility';shutil.copytree(data,check)
         for p in [check,*check.rglob('*')]:os.chown(p,1000,1000)
         schemas={str(p.relative_to(data)):schema(sqlite3.connect(p)) for p in data.rglob('*.sqlite')}
-        stage='offline_compatibility'
+        stage='offline_compatibility';emit(stage=stage,status='running')
         run(['docker','run','--rm','--network','none','--memory','512m','--read-only','--tmpfs','/tmp:size=64m','--cap-drop','ALL','--security-opt','no-new-privileges:true','-v',str(check)+':/check','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',PROBE],log=log)
         afterfiles={str(p.relative_to(check)) for p in check.rglob('*.sqlite')}
         require(afterfiles==set(schemas),'DATABASE_SET_CHANGED_REQUIRES_MAINTENANCE')
@@ -135,7 +138,7 @@ def main():
         private(backup/'compatibility.json',json.dumps({'compatible':True,'additiveTables':additions}).encode())
         with sqlite3.connect(data/'control.sqlite') as db:
             admins=db.execute("SELECT id,email,password,role,client_id FROM admins WHERE role='platform_admin' ORDER BY id").fetchall()
-        stage='compose_gate'
+        stage='compose_gate';emit(stage=stage,status='running')
         overlay=SECURE/('compose.api-ui-'+sha+'.yaml')
         content=('services:\n  api:\n    image: '+image+'\n').encode()
         if overlay.exists():require(overlay.read_bytes()==content,'OVERLAY_CONFLICT')
@@ -143,10 +146,21 @@ def main():
         after=json.loads(run(base+['-f',str(overlay),'--profile','*','config','--format','json']))
         compare_models(before,after,image)
         require((SECURE/'deployment.json').read_bytes()==oldmeta,'DEPLOYMENT_CHANGED_EXTERNALLY')
-        stage='api_replace';mutated=True
+        stage='api_replace';emit(stage=stage,status='running');mutated=True
         newbase=base+['-f',str(overlay)]
         run(newbase+['up','-d','--no-deps','--no-build','--pull','never','api'],timeout=120,log=log)
-        stage='health_and_https';status=health()
+        stage='installed_version';emit(stage=stage,status='running');status=health()
+        current_ids=run(['docker','ps','-q','--filter','label=com.docker.compose.project=adl-homologation','--filter','label=com.docker.compose.service=api']).decode().split()
+        require(len(current_ids)==1,'INSTALLED_API_COUNT_INVALID')
+        installed=json.loads(run(['docker','inspect',current_ids[0]]))[0]
+        built=json.loads(run(['docker','image','inspect',image]))[0]
+        require(installed['Image']==built['Id'] and (built['Config'].get('Labels') or {}).get('org.opencontainers.image.revision')==sha,'INSTALLED_IMAGE_VERSION_MISMATCH')
+        source_hashes={str(p.relative_to(context)):hashlib.sha256(p.read_bytes()).hexdigest() for p in context.rglob('*') if p.is_file() and p.name!='Dockerfile'}
+        verify="const fs=require('fs'),crypto=require('crypto');let raw='';process.stdin.on('data',x=>raw+=x);process.stdin.on('end',()=>{const items=Object.entries(JSON.parse(raw));const valid=items.every(([p,h])=>crypto.createHash('sha256').update(fs.readFileSync('/app/'+p)).digest('hex')===h);console.log(JSON.stringify({valid,count:items.length}));process.exitCode=valid?0:2;});"
+        verified=json.loads(run(['docker','exec','-i','--user','0:0',current_ids[0],'node','-e',verify],input=json.dumps(source_hashes).encode(),log=log))
+        require(verified.get('valid') is True,'INSTALLED_SOURCE_MISMATCH')
+        emit(stage='installed_version',status='ok',installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,verifiedSourceFiles=verified['count'])
+        stage='health_and_https';emit(stage=stage,status='running')
         code,html=request('/control');require(code==200 and b'<html' in html.lower(),'LOCAL_PANEL_FAILED')
         assets=re.findall(rb'(?:src|href)=[\"\'](/assets/[a-zA-Z0-9_.-]+\.js)[\"\']',html)
         require(bool(assets),'BUILT_ASSET_MISSING')
@@ -159,8 +173,8 @@ def main():
         require(admins==current,'ADMIN_CHANGED_DURING_UPDATE')
         meta['composeOverrides']=list(dict.fromkeys(meta.get('composeOverrides',[])+[str(overlay)]));meta['apiUiCommit']=sha;meta['apiUiBackup']=str(backup)
         atomic(SECURE/'deployment.json',json.dumps(meta).encode())
-        private(backup/'success.json',json.dumps({'commit':sha,'adminPresent':bool(admins),'image':image}).encode())
-        emit(stage='complete',status='ok',backup=str(backup),commit=sha,httpsVerified=True,applicationVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
+        private(backup/'success.json',json.dumps({'commit':sha,'adminPresent':bool(admins),'image':image,'installedImageId':installed['Image'],'installedSourceVerified':True}).encode())
+        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,httpsVerified=True,applicationVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
         return 0
     except Exception as e:
         code=str(e) if isinstance(e,RuntimeError) and re.fullmatch('[A-Z_]+',str(e)) else 'PRIVATE_ERROR_SEE_STAGE'
