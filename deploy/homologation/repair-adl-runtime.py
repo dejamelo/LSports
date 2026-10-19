@@ -8,6 +8,42 @@ def probe(image,root=False):
 def access_defect(user,root):
     return user['uid']!=0 and any(x.get('code')=='EACCES' for x in user['paths']) and all(x['readable'] for x in root['paths'])
 
+def build_signals(data):
+    text=data.decode(errors='replace').lower()
+    rules={
+        'image_id_interpreted_as_registry_reference':'docker.io/library/sha256:' in text,
+        'registry_access_rejected':'pull access denied' in text or 'insufficient_scope' in text,
+        'build_permission_denied':'permission denied' in text,
+        'build_disk_full':'no space left on device' in text,
+        'build_parent_missing':'no such image' in text,
+        'build_step_failed':'did not complete successfully' in text,
+    }
+    return [code for code,found in rules.items() if found]
+
+def previous_build_evidence(image_id):
+    result=[]
+    for folder in sorted(BACKUPS.glob('adl-runtime-repair-*'),key=lambda p:p.stat().st_mtime,reverse=True):
+        if folder.is_symlink() or not folder.is_dir():continue
+        manifest=folder/'image.before.private.json';log=folder/'build.private.log'
+        if manifest.is_symlink() or log.is_symlink():continue
+        try:
+            if manifest.stat().st_size>1024*1024:continue
+            if json.loads(manifest.read_bytes()).get('Id')!=image_id:continue
+            result.append({'backup':str(folder),'signals':build_signals(read_tail(log)),'logExists':log.is_file()})
+        except (OSError,ValueError):continue
+        if len(result)==3:break
+    return result
+
+def pin_local_parent(image_id):
+    if not re.fullmatch('sha256:[0-9a-f]{64}',image_id):raise ValueError()
+    tag='adl-runtime-base:'+image_id.split(':')[1]
+    existing=subprocess.run(['docker','image','inspect',tag],capture_output=True,timeout=30,check=False)
+    if existing.returncode==0:
+        if json.loads(existing.stdout)[0]['Id']!=image_id:raise ValueError('parent_tag_conflict')
+    else:run(['docker','image','tag',image_id,tag])
+    if json.loads(run(['docker','image','inspect',tag]))[0]['Id']!=image_id:raise ValueError()
+    return tag
+
 def runtime_main():
     stage='runtime_inspect';backup=None;mutation=False
     try:
@@ -26,7 +62,7 @@ def runtime_main():
         info=json.loads(run(['docker','image','inspect',image]))[0];image_id=info['Id']
         user=probe(image_id);root=probe(image_id,True)
         emit(stage=stage,status='ok',apiContainers=apis,apiLogSignals=signals,sourceAccess=user,rootSourceAccess=root,
-             sourcePermissionDefect=access_defect(user,root),rawLogPrinted=False,providerRequests=0,workerStarted=False,posnetChanged=False)
+             sourcePermissionDefect=access_defect(user,root),previousBuildEvidence=previous_build_evidence(image_id),rawLogPrinted=False,providerRequests=0,workerStarted=False,posnetChanged=False)
         if '--apply' not in sys.argv:return 0
         stage='evidence_gate'
         if any(w['running'] for w in workers) or len(apis)!=1:raise ValueError()
@@ -44,10 +80,14 @@ def runtime_main():
         private(backup/'api.before.private.log',logs.stdout+logs.stderr)
         stage='derive_image'
         context=backup/'context';context.mkdir(mode=0o700)
-        private(context/'Dockerfile',('FROM '+image_id+'\n'+FIX).encode())
+        parent=pin_local_parent(image_id)
+        private(context/'Dockerfile',('FROM '+parent+'\n'+FIX).encode())
         fixed=original+'-source-access-v1'
-        # Pin to immutable local image; no registry or npm requests, no mounted data.
+        # BuildKit parses FROM sha256:<id> as a registry name, not a local image ID.
+        # Use a verified local tag; keep the original image and all prior backups.
         run(['docker','build','--network','none','--pull=false','-t',fixed,str(context)],timeout=120,log=backup/'build.private.log')
+        stage='derived_image_verification'
+        if json.loads(run(['docker','image','inspect',parent]))[0]['Id']!=image_id:raise ValueError()
         fixed_id=json.loads(run(['docker','image','inspect',fixed]))[0]['Id']
         if not all(p['readable'] for p in probe(fixed_id)['paths']):raise ValueError()
         stage='model_validation'
@@ -77,7 +117,7 @@ def runtime_main():
         return 0
     except Exception:
         emit(stage=stage,status='failed' if mutation else 'blocked',backup=str(backup) if backup else None,apiMutationRequested=mutation,
-             workerStarted=False,posnetChanged=False,rawLogPrinted=False,
+             workerStarted=False,posnetChanged=False,rawLogPrinted=False,buildLogSignals=build_signals(read_tail(backup/'build.private.log')) if backup else [],
              note='No raw exceptions printed. Preserve private backups, images, volumes and saved composeOverrides; do not rerun preparation or start AWS worker.')
         return 2
 

@@ -27,4 +27,17 @@ class RuntimeAccess(unittest.TestCase):
   self.assertNotIn('chown',scope['FIX'])
   self.assertNotIn('/app/.runtime',scope['FIX'])
   self.assertIn("if after!=expected:raise ValueError()",source)
+ def test_build_log_sanitization(self):
+  signals=scope['build_signals'](b'load metadata for docker.io/library/sha256:abcd pull access denied secret-token')
+  self.assertEqual(signals,['image_id_interpreted_as_registry_reference','registry_access_rejected'])
+  self.assertNotIn('secret',str(signals))
+ def test_conflicting_parent_tag_blocks(self):
+  original_run=scope['subprocess'].run
+  class Result:
+   returncode=0
+   stdout=b'[{"Id":"sha256:wrong"}]'
+  scope['subprocess'].run=lambda *a,**kw:Result()
+  try:
+   with self.assertRaisesRegex(ValueError,'parent_tag_conflict'):scope['pin_local_parent']('sha256:'+'a'*64)
+  finally:scope['subprocess'].run=original_run
 if __name__=='__main__':unittest.main()

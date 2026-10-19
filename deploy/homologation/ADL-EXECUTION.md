@@ -263,3 +263,29 @@ original prepare script or manually start the AWS worker.
 Future full image builds normalize these same source permissions in
 Dockerfile.homologation; secrets, env and runtime trees are outside that operation.
 The AWS cause and startup remain unvalidated until the operator runs this command.
+
+#### Derived-image build correction
+
+A second defect was reproduced with the actual Docker builder: `FROM sha256:<ID>`
+is parsed as `docker.io/library/sha256:<ID>`, causing registry resolution and
+access rejection even with `--pull=false` and `--network none` (the latter only
+restricts RUN networking). The first repair script used that incorrect FROM form.
+
+The corrected script tags the already-present image as
+`adl-runtime-base:<full-image-hash>`, verifies that tag's image ID, builds from the
+local tag, and verifies the parent ID again afterwards. Conflicting tags block
+rather than being overwritten. No package install or pull is requested. The
+original image, previous backup and failed build log remain intact.
+
+The inspect report now includes `previousBuildEvidence`, restricted to backups
+whose private image manifest matches the current source image ID. Only fixed
+build-error categories are printed. New build failures expose `buildLogSignals`;
+derived-image verification has its own stage. An unrecognized cause remains
+blocked with no API mutation. This enables checking the remote log without sharing
+it. The Docker reproduction establishes the script defect, not the remote log's
+contents; confirm the latter in the report.
+
+Resume with the same `repair-adl-runtime.mjs --apply` command above after pulling.
+It creates a fresh protected backup, retaining all previous backups. Success still
+requires API HTTP 200 and healthy; AWS worker remains stopped. No preparation,
+resize, volume recreation, POSNET changes or Mac worker changes are involved.
