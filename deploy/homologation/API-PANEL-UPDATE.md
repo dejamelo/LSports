@@ -168,3 +168,16 @@ essa prova; usa apenas fs/crypto. Divergência exige rollback da API.
 O resultado `complete` inclui `installedCommit`, `installedImageId` e
 `installedSourceVerified:true`, além de saúde e HTTPS. Esses valores e o backup
 formam o recibo real; um container running sozinho não confirma a versão.
+
+### Inicializar somente o administrador após deploy confirmado
+
+`initialize-adl-admin.mjs --repo <checkout>` usa exclusivamente a rotina
+`--bootstrap` de d6d3d3a, sem build, upload de fontes, Compose, migração ou ações
+nos workers. Requer TTY; em bloco heredoc redirecionar a entrada do Node de
+`/dev/tty`. Pede email, gera senha aleatória e guarda arquivo privado no Mac antes
+do envio cifrado por SSH. O backend verifica que não há administrador e a criação
+é transacional; nunca redefine o administrador existente. Só confirma após
+`initialized:true`. Se a resposta se perder, manter o arquivo marcado pendente e
+verificar o acesso usando esse mesmo arquivo; não substituir credenciais por
+suposição. A senha não é emitida no terminal/logs. O arquivo `.confirmed.json`
+separado registra apenas confirmação e data, sem a senha.
