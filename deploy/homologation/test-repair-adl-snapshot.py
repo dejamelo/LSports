@@ -16,7 +16,7 @@ class Repair(unittest.TestCase):
   deferred={'operation':'snapshot.events','category':'rate_limited','coordinator':{'failure':error}}
   self.assertEqual(NS['snapshot_plan'](caps,{'inplay':[deferred]})[0],{'inplay':256})
   self.assertTrue(NS['snapshot_volume_failures']({'inplay':[deferred]})['inplay'])
- def test_graceful_worker_only_apply_preserves_journal_image_overrides_and_memory(self,current_memory=4294967296):
+ def test_graceful_worker_only_apply_preserves_journal_image_overrides_and_memory(self,current_memory=4294967296,model_as_text=False):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);secure=root/'secure';secure.mkdir();(secure/'deploy.env').write_text('ADL_WORKER_MEMORY_LIMIT=2g\n');releases=root/'releases';releases.mkdir();release=releases/('a'*40);release.mkdir();backups=root/'backups';backups.mkdir();directory=root/'volume';directory.mkdir()
    override=secure/'old.json';override.write_text('{}');meta={'release':str(release),'composeOverrides':[str(override)]};(secure/'deployment.json').write_text(json.dumps(meta))
@@ -39,10 +39,10 @@ class Repair(unittest.TestCase):
     if 'up' in args:running=True;container_memory=4294967296
     return b''
    def model(args):
-    value={'services':{'api':{'image':'api-unchanged'},'worker':{'mem_limit':current_memory,'image':'unchanged','environment':{'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB':'256','LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'128','NODE_OPTIONS':'--max-old-space-size=3072'}}}}
+    value={'services':{'api':{'image':'api-unchanged'},'worker':{'mem_limit':str(current_memory) if model_as_text else current_memory,'image':'unchanged','environment':{'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB':'256','LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'128','NODE_OPTIONS':'--max-old-space-size=3072'}}}}
     for arg in args:
      if str(arg).startswith(str(secure/'compose.snapshot-')):
-      change=json.loads(Path(arg).read_bytes())['services']['worker'];value['services']['worker']['environment'].update(change['environment']);value['services']['worker']['mem_limit']=change['mem_limit']
+      change=json.loads(Path(arg).read_bytes())['services']['worker'];value['services']['worker']['environment'].update(change['environment']);value['services']['worker']['mem_limit']=str(change['mem_limit']) if model_as_text else change['mem_limit']
     return value
    old={k:NS.get(k) for k in ['SECURE','RELEASES','BACKUPS','states','run','model','control_status','feed_evidence','os','snapshot_host_memory']};NS.update(os=types.SimpleNamespace(**{**os.__dict__,'geteuid':lambda:0}),SECURE=secure,RELEASES=releases,BACKUPS=backups,states=states,run=run,model=model,control_status=lambda:200,feed_evidence=lambda *a:{'recentErrors':[]},snapshot_host_memory=lambda:1024**3)
    request={'handoff':handoff,'freshAuditAt':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z'),'sourceHashes':hashes}
@@ -53,10 +53,10 @@ class Repair(unittest.TestCase):
     self.assertEqual(code,2);self.assertIn('HOST_HEADROOM_INSUFFICIENT',out.getvalue());self.assertTrue(running);self.assertFalse(any(c[:2]==['docker','kill'] for c in calls))
     NS['snapshot_host_memory']=lambda:12*1024**3;out=io.StringIO()
     with contextlib.redirect_stdout(out):code=NS['repair_snapshot'](request)
-    self.assertEqual(code,0,out.getvalue());self.assertTrue(running);self.assertEqual(journal.read_bytes(),original)
+    self.assertEqual(code,0,out.getvalue());comp=next(json.loads(line) for line in out.getvalue().splitlines() if json.loads(line).get('stage')=='snapshot_repair.memory_comparison');self.assertEqual(comp['compose'],{'type':'str' if model_as_text else 'int','value':str(current_memory) if model_as_text else current_memory});self.assertEqual(comp['docker'],{'type':'int','value':current_memory});self.assertTrue(running);self.assertEqual(journal.read_bytes(),original)
     self.assertEqual(len([c for c in calls if c[:2]==['docker','kill']]),1);self.assertTrue(all('SIGTERM' in c for c in calls if c[:2]==['docker','kill']))
     starts=[c for c in calls if 'up' in c];self.assertEqual(len(starts),1);self.assertEqual(starts[0][-1],'worker');self.assertIn('--no-deps',starts[0]);self.assertIn('--no-build',starts[0])
-    current=json.loads((secure/'deployment.json').read_bytes());self.assertEqual(current['composeOverrides'][0],str(override));effective=model(starts[0]);self.assertEqual(effective['services']['worker']['environment']['LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'],'256');self.assertEqual(effective['services']['worker']['image'],'unchanged');self.assertEqual(effective['services']['worker']['mem_limit'],4294967296)
+    current=json.loads((secure/'deployment.json').read_bytes());self.assertEqual(current['composeOverrides'][0],str(override));effective=model(starts[0]);self.assertEqual(effective['services']['worker']['environment']['LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'],'256');self.assertEqual(effective['services']['worker']['image'],'unchanged');self.assertEqual(NS['snapshot_memory_bytes'](effective['services']['worker']['mem_limit']),4294967296)
     self.assertEqual(len(json.loads(receipt.read_bytes())['capacityRestarts']),1)
    finally:NS.update(old)
  def test_two_gib_container_is_reconciled_to_four_gib_without_touching_posnet(self):
@@ -67,4 +67,17 @@ class Repair(unittest.TestCase):
   result=NS['snapshot_sizing'](2*GiB,2*GiB,cg,6*GiB,{},caps)
   self.assertTrue(result['resize']);self.assertEqual(result['targetMemoryBytes'],4*GiB);self.assertEqual(result['conversionBudgetBytes'],2112*1024**2)
   with self.assertRaisesRegex(RuntimeError,'OUTSIDE_APPROVED_PLAN'):NS['snapshot_sizing'](8*GiB,8*GiB,cg,12*GiB,{},caps)
+ def test_compose_decimal_string_and_docker_integer_are_equivalent_through_full_repair(self):
+  self.test_graceful_worker_only_apply_preserves_journal_image_overrides_and_memory(4294967296,model_as_text=True)
+ def test_memory_parser_only_accepts_exact_positive_integer_bytes(self):
+  for value in (4294967296,'4294967296',2147483648,'2147483648'):
+   with self.subTest(value=value):self.assertEqual(NS['snapshot_memory_bytes'](value),int(value))
+  for value in (None,True,False,0,'0',-1,'-1','4g','4 GiB','unlimited',' 4294967296','4294967296.0',4294967296.0,float('nan'),'04294967296','+4294967296','４２９４９６７２９６',str(2**63)):
+   with self.subTest(type=type(value).__name__):
+    with self.assertRaisesRegex(RuntimeError,'WORKER_MEMORY_LIMIT_UNVERIFIED'):NS['snapshot_memory_bytes'](value)
+ def test_memory_operand_redacts_unexpected_text_and_model_normalization_preserves_other_fields(self):
+  report=NS['snapshot_memory_operand']('MUST_NEVER_PRINT');self.assertNotIn('MUST_NEVER_PRINT',json.dumps(report));self.assertTrue(report['valueRedacted'])
+  before={'services':{'api':{'mem_limit':'805306368'},'worker':{'mem_limit':'4294967296','environment':{'preserved':'yes'},'volumes':['preserved']}}}
+  original=copy.deepcopy(before);after=NS['snapshot_memory_model'](before)
+  self.assertEqual(before,original);self.assertEqual(after['services']['worker']['mem_limit'],4294967296);self.assertEqual(after['services']['api'],before['services']['api']);self.assertEqual(after['services']['worker']['volumes'],['preserved'])
 if __name__=='__main__':unittest.main()

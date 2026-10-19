@@ -449,3 +449,25 @@ Somente essa evidência permite elevar uma lane de 128 para 256 MiB. PreMatch j�
 Dados insuficientes não são convertidos em afirmação de qual feed falhou. O limite
 novo é confirmado em Docker após a recriação, com mesma imagem e overrides anteriores
 preservados. O mesmo comando --repair-snapshot continua a validação, sem migrar de novo.
+
+### `WORKER_MEMORY_LIMIT_UNVERIFIED` com preflight de 4 GiB
+
+Correção da evidência: os 2 GiB informados anteriormente foram uma leitura incorreta
+da captura; o usuário confirmou preflight de 4294967296 bytes (4 GiB). Não registrar
+que houve redimensionamento de container para 4 GiB sem a execução real comprovar.
+
+O preflight e seu gate JS aceitavam representação decimal como texto, mas o reparo
+Python exigia `type(value) is int` antes de mostrar os operandos. Assim, o mesmo
+valor em JSON string era recusado. O reparo agora publica `memory_comparison` antes
+da validação, com tipo/valor seguros de Compose e HostConfig.Memory, e normaliza
+somente inteiro positivo ou texto decimal canônico de bytes. Campos inesperados
+são redigidos; zero, ausência, booleanos, floats, unidades textuais e valores inválidos
+continuam bloqueados. Domínio aprovado 2/4 GiB, RAM disponível, cgroup e cooldowns
+continuam sendo verificados separadamente.
+
+A comparação do modelo completo normaliza somente `worker.mem_limit`; nenhuma outra
+configuração, API, rede, volume ou segredo é normalizado ou descartado. O mesmo
+`--repair-snapshot` retoma a inspeção/correção dimensionada e validação, sem migrar
+novamente. Testes incluem Compose com bytes em string / Docker em inteiro, fluxo de
+reparo simulado completo, rejeições estritas e proteção dos demais campos. Isso não
+substitui a confirmação real dos operandos e feeds na AWS.

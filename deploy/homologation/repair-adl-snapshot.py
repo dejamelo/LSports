@@ -1,4 +1,28 @@
 """Dimensioned, evidence-gated snapshot limit repair. Never touches POSNET or journals."""
+def snapshot_memory_operand(value):
+    # Only bounded numeric representations may be echoed. Unexpected text stays private.
+    report={'type':type(value).__name__}
+    if value is None or type(value) is bool:report['value']=value
+    elif type(value) is int and -(2**63)<=value<=2**63-1:report['value']=value
+    elif type(value) is float and math.isfinite(value) and abs(value)<=2**63-1:report['value']=value
+    elif isinstance(value,str) and re.fullmatch(r'[0-9]{1,19}',value):report['value']=value
+    else:report['valueRedacted']=True
+    return report
+
+def snapshot_memory_bytes(value):
+    # Compose config JSON can serialize bytes as a decimal string; Docker uses an int.
+    # Do not coerce booleans, floats, units, unlimited/zero, missing or malformed values.
+    if type(value) is int:result=value
+    elif isinstance(value,str) and re.fullmatch(r'[1-9][0-9]{0,18}',value):result=int(value)
+    else:raise RuntimeError('WORKER_MEMORY_LIMIT_UNVERIFIED')
+    require(0<result<=2**63-1,'WORKER_MEMORY_LIMIT_UNVERIFIED')
+    return result
+
+def snapshot_memory_model(value):
+    result=copy.deepcopy(value)
+    result['services']['worker']['mem_limit']=snapshot_memory_bytes(result['services']['worker'].get('mem_limit'))
+    return result
+
 def snapshot_file_hash(path):
     digest=hashlib.sha256()
     with path.open('rb') as source:
@@ -50,12 +74,17 @@ def repair_snapshot(request):
         workers=states('worker');require(len(workers)==1 and workers[0]['running'],'REPAIR_REQUIRES_ONE_RUNNING_WORKER')
         require(control_status()==200,'API_NOT_HEALTHY')
         worker=json.loads(run(['docker','inspect',workers[0]['id']]))[0];before=model(base)
-        model_limit=before['services']['worker']['mem_limit'];container_limit=worker['HostConfig']['Memory']
-        require(type(model_limit) is int and type(container_limit) is int,'WORKER_MEMORY_LIMIT_UNVERIFIED')
+        model_raw=before['services']['worker'].get('mem_limit');container_raw=worker.get('HostConfig',{}).get('Memory')
+        emit(operation='cutover.aws',stage='snapshot_repair.memory_comparison',status='inspected',compose=snapshot_memory_operand(model_raw),docker=snapshot_memory_operand(container_raw),workerStopped=False,backup=None,posnetChanged=False)
+        model_limit=snapshot_memory_bytes(model_raw);container_limit=snapshot_memory_bytes(container_raw)
+        before=snapshot_memory_model(before)
         layers=[];initial=base[:base.index('-f')+4]
         # Report only numeric worker limits, never Compose output or env-file contents.
         for count in range(len(initial),len(base)+1,2):
-            layers.append({'layer':len(layers),'memoryLimitBytes':model(base[:count])['services']['worker']['mem_limit']})
+            raw=model(base[:count])['services']['worker'].get('mem_limit')
+            try:normalized=snapshot_memory_bytes(raw)
+            except RuntimeError:normalized=None
+            layers.append({'layer':len(layers),'operand':snapshot_memory_operand(raw),'memoryLimitBytes':normalized})
         deploy_values=dict(line.split('=',1) for line in (SECURE/'deploy.env').read_text().splitlines() if line and not line.startswith('#') and '=' in line)
         memory_var=deploy_values.get('ADL_WORKER_MEMORY_LIMIT')
         var_bytes={'2g':2147483648,'4g':4294967296,'2147483648':2147483648,'4294967296':4294967296}.get((memory_var or '').lower())
@@ -127,7 +156,7 @@ def repair_snapshot(request):
         if proposed_options!=options:env['NODE_OPTIONS']=proposed_options
         change={'mem_limit':sizing['targetMemoryBytes'],'environment':env}
         overlay=SECURE/('compose.snapshot-'+backup.name+'.json');private(overlay,json.dumps({'services':{'worker':change}}).encode())
-        after=model(base+['-f',str(overlay)]);expected=copy.deepcopy(before);expected['services']['worker']['environment'].update(env);expected['services']['worker']['mem_limit']=sizing['targetMemoryBytes'];require(after==expected,'UNEXPECTED_COMPOSE_MODEL_CHANGE')
+        after=snapshot_memory_model(model(base+['-f',str(overlay)]));expected=copy.deepcopy(before);expected['services']['worker']['environment'].update(env);expected['services']['worker']['mem_limit']=sizing['targetMemoryBytes'];require(after==expected,'UNEXPECTED_COMPOSE_MODEL_CHANGE')
         meta['composeOverrides']=[*meta.get('composeOverrides',[]),str(overlay)]
         tmp=SECURE/(backup.name+'.deployment.tmp');private(tmp,json.dumps(meta).encode());durable_replace(tmp,SECURE/'deployment.json')
         # Refresh only validation-session time; preserve receipts and the historical migration.
@@ -139,7 +168,7 @@ def repair_snapshot(request):
         run(base+['-f',str(overlay),'--profile','feed-consumer','up','-d','--force-recreate','--no-deps','--no-build','--pull','never','worker'],timeout=90,log=backup/'start.private.log')
         require(len(states('worker'))==1,'RESTART_CONTAINER_COUNT_UNEXPECTED')
         actual=json.loads(run(['docker','inspect',states('worker')[0]['id']]))[0]
-        require(actual['HostConfig']['Memory']==sizing['targetMemoryBytes'] and actual['Image']==image,'RESTART_LIMIT_OR_IMAGE_MISMATCH')
+        require(snapshot_memory_bytes(actual['HostConfig']['Memory'])==sizing['targetMemoryBytes'] and actual['Image']==image,'RESTART_LIMIT_OR_IMAGE_MISMATCH')
         emit(operation='cutover.aws',stage=stage,status='ok',changed=True,actualMemoryBytes=actual['HostConfig']['Memory'],laneLimitsMB=wanted,workerStarted=True,backup=str(backup),journalsModified=False,composeOverridesPreserved=True,posnetChanged=False)
         return 0
     except Exception as error:
