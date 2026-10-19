@@ -51,7 +51,9 @@ services:
       context: ../..
       dockerfile: Dockerfile.homologation
     init: true
-    env_file: ${WORKER_ENV_FILE:-./worker.env}
+    env_file:
+      - path: ${WORKER_ENV_FILE:-./worker.env}
+        format: raw
     environment:
       NODE_ENV: production
       DATA_MODE: connected

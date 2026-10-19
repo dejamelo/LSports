@@ -22,10 +22,11 @@ test("worker connects to configured queue, buffers deltas during snapshot, persi
     async consume(
       queue: string,
       callback: typeof onMessage,
-      options: { noAck: boolean },
+      options: { noAck: boolean; exclusive: boolean },
     ) {
       assert.equal(queue, "_4511_");
       assert.equal(options.noAck, false);
+      assert.equal(options.exclusive, true);
       onMessage = callback;
       return { consumerTag: "test" };
     },
@@ -465,10 +466,11 @@ test("type 37 preserves every participant and persists before ACK, including dup
     async consume(
       queue: string,
       callback: typeof onMessage,
-      options: { noAck: boolean },
+      options: { noAck: boolean; exclusive: boolean },
     ) {
       assert.equal(queue, "_4511_");
       assert.equal(options.noAck, false);
+      assert.equal(options.exclusive, true);
       onMessage = callback;
       return { consumerTag: "test" };
     },
@@ -589,10 +591,11 @@ test("type 37 publication failure requests requeue without ACK", async () => {
     async consume(
       queue: string,
       callback: typeof onMessage,
-      options: { noAck: boolean },
+      options: { noAck: boolean; exclusive: boolean },
     ) {
       assert.equal(queue, "_4511_");
       assert.equal(options.noAck, false);
+      assert.equal(options.exclusive, true);
       onMessage = callback;
       return { consumerTag: "test" };
     },

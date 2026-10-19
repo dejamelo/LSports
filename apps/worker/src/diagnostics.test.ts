@@ -513,3 +513,13 @@ test('distribution still off after a successful start response is explicit witho
   });assert.deepEqual(requests,['/Package/GetDistributionStatus','/Distribution/Start','/Package/GetDistributionStatus']);
  }finally{await server.close();}
 });
+
+test('exclusive-consumer conflicts are distinguished from passwords and never expose raw replies', () => {
+  const error = Object.assign(new Error('ACCESS_REFUSED - queue private-user:secret@broker in exclusive use'), {code:403});
+  const diagnostic = describeFailure(error, 'amqp.consume', 'amqp');
+  assert.equal(diagnostic.reason, 'consumer_conflict');
+  assert.equal(diagnostic.category, 'configuration');
+  assert.equal(diagnostic.amqpCode,403);
+  assert(!JSON.stringify(diagnostic).includes('private-user'));
+  assert(!JSON.stringify(diagnostic).includes('secret@'));
+});

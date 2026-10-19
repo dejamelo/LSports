@@ -29,7 +29,8 @@
     "validate:synthetic-ui": "node --import tsx scripts/validate-synthetic-demo.mts",
     "diagnose:processes": "node --import tsx scripts/diagnose-process-memory.ts",
     "diagnose:memory": "node --import tsx scripts/diagnose-memory.ts",
-    "diagnose:feed:local": "node --import tsx --env-file-if-exists=.env scripts/diagnose-feed.ts"
+    "diagnose:feed:local": "node --import tsx --env-file-if-exists=.env scripts/diagnose-feed.ts",
+    "cutover:audit": "node --import tsx --env-file-if-exists=.env scripts/audit-aws-cutover.ts"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",

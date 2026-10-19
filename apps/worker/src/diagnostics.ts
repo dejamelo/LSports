@@ -318,6 +318,10 @@ export function describeFailure(
     category = "authentication_rejected";
     message =
       "El proveedor rechazó la autenticación del paquete. Revisá usuario, contraseña y asociación al package ID.";
+  } else if (protocol === "amqp" && operation === "amqp.consume" && [403,405].includes(code || 0) && /exclusive(?:\s+consumer|\s+use)|in\s+exclusive\s+use/i.test(text)) {
+    category = "configuration";
+    reason = "consumer_conflict";
+    message = "La cola ya tiene un consumidor o acceso exclusivo. No se inicia otro consumidor ni se cambia la cola; verificá el cierre del worker anterior.";
   } else if (protocol === "amqp" && code === 403) {
     category = "authentication_or_permission";
     message =

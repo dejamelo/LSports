@@ -273,6 +273,7 @@ export interface IntegrationDiagnostic {
     | "connection_closed"
     | "channel_closed"
     | "consumer_cancelled"
+    | "consumer_conflict"
     | "worker_stopped"
     | "distribution_still_off"
     | "unknown_exception"

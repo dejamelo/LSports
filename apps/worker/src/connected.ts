@@ -347,7 +347,7 @@ export async function session(
           if (bufferingForSnapshot) buffered.push(msg);
           else processing = processing.then(() => processMessage(msg));
         },
-        { noAck: false },
+        { noAck: false, exclusive: true },
       ),
     );
     const nextDue: Record<string, number> = { "snapshot.events": 0,

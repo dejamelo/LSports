@@ -1,4 +1,14 @@
-# ADL / LSports · homologação AWS preparada, sem deploy
+# ADL / LSports · implantação AWS autorizada em etapas
+
+**Estado atual prevalece sobre as notas históricas abaixo:** EC2 m7i.xlarge já
+validada pelo operador; POSNET retornou saudável. Domínio autorizado
+`sportbook.apuestadeportiva.lat` (sem s após sport), A cadastrado para
+77.113.150.100. Homologação AWS separada; Argentina Demo e bilhetes ficam no Mac.
+Não repetir redimensionamento ou migrações. Ver [ADL-EXECUTION.md](ADL-EXECUTION.md)
+para comando de preparação da API isolada, DNS, HTTPS e corte único com cooldown.
+Credenciais/chave estão no Mac; execução remota precisa das saídas do operador.
+
+## Histórico da preparação inicial
 
 Iframe, painel e API com feed LSports Test e bilhetes/carteira exclusivamente simulados. Projeto independente do POSNET Lottery. Nenhum serviço AWS foi acessado ou alterado nesta entrega; não há destino SSH, AWS CLI/credenciais ou conector AWS disponíveis no workspace. Não é possível declarar RAM/CPU/disco suficientes sem o diagnóstico do host.
 
