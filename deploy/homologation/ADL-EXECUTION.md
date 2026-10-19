@@ -690,3 +690,12 @@ Review each lane's `diagnostic`, session ends, `startupLogs.records` and
 ends after collection; it never enters the full recovery wait loop. This cloud
 checkout cannot access the Mac SSH key, so actual AWS startup causes remain
 unverified until the collected report is available. Preserve the Mac shutdown.
+
+Entrypoint correction after `aeba9c1`: `--startup-report` was accepted by the
+resumable executor but missing from the complete entrypoint's dispatch list.
+Consequently the legacy `--pid`-only parser rejected the full command with
+`EXPECTED_EXPLICIT_OWNER_PID` before collecting anything. Dispatch now reaches
+the existing strict owner/parent validator. CLI subprocess tests cover the full
+invocation at a mocked executor boundary, every supported resumable mode, and
+invalid/missing identities through the real entrypoint. These tests make no SSH
+or supplier requests and do not validate live feed recovery.
