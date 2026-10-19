@@ -213,7 +213,7 @@ export interface IntegrationDiagnostic {
   snapshotValidation?:SnapshotValidationInspection;
   requestInspection?: SnapshotRequestInspection;
   amqpCloseSignals?: ("connection_forced"|"heartbeat_timeout"|"ack_timeout"|"administrative_close"|"server_shutdown")[];
-  distributionInspection?: {before:boolean;startRequested:boolean;after?:boolean};
+  distributionInspection?: {before:boolean;startRequested:boolean;after?:boolean;startMessage?:'activated'|'already_active'|'missing'|'unrecognized';propagationDelayMs?:number};
   operation:
     | "config"
     | "distribution.status"

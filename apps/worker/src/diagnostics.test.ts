@@ -509,7 +509,7 @@ test('distribution still off after a successful start response is explicit witho
  });
  try{
   await assert.rejects(()=>clients(config(),{snapshotUrl:server.url,customersUrl:server.url}).startDistribution(),e=>{
-   assert(e instanceof OperationError);assert.equal(e.diagnostic.reason,'distribution_still_off');assert.deepEqual(e.diagnostic.distributionInspection,{before:false,startRequested:true,after:false});return true;
+   assert(e instanceof OperationError);assert.equal(e.diagnostic.reason,'distribution_still_off');assert.deepEqual(e.diagnostic.distributionInspection,{before:false,startRequested:true,after:false,startMessage:'missing',propagationDelayMs:2000});return true;
   });assert.deepEqual(requests,['/Package/GetDistributionStatus','/Distribution/Start','/Package/GetDistributionStatus']);
  }finally{await server.close();}
 });
@@ -522,4 +522,24 @@ test('exclusive-consumer conflicts are distinguished from passwords and never ex
   assert.equal(diagnostic.amqpCode,403);
   assert(!JSON.stringify(diagnostic).includes('private-user'));
   assert(!JSON.stringify(diagnostic).includes('secret@'));
+});
+
+
+test('distribution follows official propagation delay BEFORE post-start status; HTTP request and response contract are preserved',async()=>{
+ const {StartMessage,DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS}=await import('trade360-nodejs-sdk');const pkg=config();const requests:string[]=[];let startAt=0,checks=0,verifiedAt=0;
+ const server=await httpFixture(async(req,res)=>{let text='';for await(const b of req)text+=b;const body=JSON.parse(text);assert.equal(req.method,'POST');assert.equal(body.packageId,4511);assert.equal(body.username,pkg.username);assert.equal(body.password,pkg.password);assert.equal(req.headers.authorization,undefined);requests.push(req.url||'');res.setHeader('Content-Type','application/json');
+  if(req.url==='/Distribution/Start'){startAt=Date.now();res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:{Message:StartMessage.activated}}));}
+  else{checks++;if(checks>1)verifiedAt=Date.now();const active=checks>1&&verifiedAt-startAt>=DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS;res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:{IsDistributionOn:active,Consumers:[],NumberMessagesInQueue:0,MessagesPerSecond:0}}));}
+ });try{await clients(pkg,{snapshotUrl:server.url,customersUrl:server.url}).startDistribution();assert.ok(verifiedAt-startAt>=2000);assert.deepEqual(requests,['/Package/GetDistributionStatus','/Distribution/Start','/Package/GetDistributionStatus']);}finally{await server.close();}
+});
+
+test('distribution response Message is never an activation boolean or an unsanitized error; status remains authoritative',async()=>{
+ const pkg=config(),secret='PRIVATE_RESPONSE_'+randomUUID();const server=await httpFixture(async(req,res)=>{for await(const _ of req){}res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:req.url==='/Distribution/Start'?{Message:secret}:{IsDistributionOn:false}}));});
+ try{await assert.rejects(clients(pkg,{snapshotUrl:server.url,customersUrl:server.url}).startDistribution(),e=>{assert.ok(e instanceof OperationError);assert.equal(e.diagnostic.reason,'distribution_still_off');assert.equal(e.diagnostic.distributionInspection?.startMessage,'unrecognized');assert.equal(e.diagnostic.distributionInspection?.propagationDelayMs,2000);assert.ok(!JSON.stringify(e.diagnostic).includes(secret));return true;});}finally{await server.close();}
+});
+
+test('distribution already on does not POST start or stop; non-boolean status is rejected',async()=>{
+ for(const value of [true,'false']){const requests:string[]=[];const server=await httpFixture(async(req,res)=>{for await(const _ of req){}requests.push(req.url||'');res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:{IsDistributionOn:value}}));});
+  try{const call=clients(config(),{snapshotUrl:server.url,customersUrl:server.url}).startDistribution();if(value===true)await call;else await assert.rejects(call);assert.deepEqual(requests,['/Package/GetDistributionStatus']);}finally{await server.close();}
+ }
 });

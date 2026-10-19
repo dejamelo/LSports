@@ -221,7 +221,10 @@ def safe_feed_diagnostic(value):
         if isinstance(value.get(key),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',value[key]):out[key]=value[key]
     if type(value.get('deferred')) is bool:out['deferred']=value['deferred']
     if isinstance(value.get('amqpCloseSignals'),list):out['amqpCloseSignals']=[v for v in value['amqpCloseSignals'] if isinstance(v,str) and v in {'connection_forced','heartbeat_timeout','ack_timeout','administrative_close','server_shutdown'}]
-    if isinstance(value.get('distributionInspection'),dict):out['distributionInspection']={k:v for k,v in value['distributionInspection'].items() if k in ('before','startRequested','after') and type(v) is bool}
+    if isinstance(value.get('distributionInspection'),dict):
+        inspection=value['distributionInspection'];out['distributionInspection']={k:v for k,v in inspection.items() if k in ('before','startRequested','after') and type(v) is bool}
+        if inspection.get('startMessage') in ('activated','already_active','missing','unrecognized'):out['distributionInspection']['startMessage']=inspection['startMessage']
+        if inspection.get('propagationDelayMs')==2000:out['distributionInspection']['propagationDelayMs']=2000
     validation=value.get('snapshotValidation')
     if isinstance(validation,dict):
         allowed={'phase':{'inventory','batch','verify'},'code':{'inventory_not_array','inventory_limit','inventory_invalid_ids','inventory_envelope','inventory_sdk_mismatch','batch_invalid_fixture','batch_id_mismatch','inventory_changed'},'attribution':{'local_bound','provider_contract','sdk_or_adapter','inventory_changed','not_proven'}}

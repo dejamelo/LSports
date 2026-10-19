@@ -134,3 +134,7 @@ final de ADL-EXECUTION.md. Não repetir prepare-adl-aws, DNS, envs ou o corte Ma
 
 Inventário sem avanço após 5069beb: [INVENTORY-RECOVERY.md](INVENTORY-RECOVERY.md)
 (`--inventory-repair`, sem repetir migração ou aumentar limites).
+
+Revisão da ativação e mensagem preliminar para o ticket 217525:
+[SUPPORT-217525-DISTRIBUTION.md](SUPPORT-217525-DISTRIBUTION.md). Correção preparada,
+sem reinício/implantação automática.

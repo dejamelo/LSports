@@ -26,6 +26,8 @@ import {
   GetInPlayEventRequestDto,
   StatusResponseBody,
   StartResponseBody,
+  StartMessage,
+  DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS,
   GetSubscriptionsRequestDto,
   GetFixtureScheduleRequestDto,
 } from "trade360-nodejs-sdk";
@@ -273,9 +275,17 @@ export function clients(
     async startDistribution() {
       let status = await this.distributionStatus();
       if (!status.isDistributionOn) {
-        await operation("distribution.start", "http", () =>
-          distribution.startDistribution(StartResponseBody),
-        );
+        const startMessage=await operation("distribution.start", "http", async () => {
+          const response=await distribution.startDistribution(StartResponseBody);
+          // SDK StartResponseBody has Message, NOT IsDistributionOn. Keep only
+          // official enum classifications: never echo an arbitrary provider message.
+          return response?.message===StartMessage.activated?'activated' as const:
+            response?.message===StartMessage.alreadyActive?'already_active' as const:
+            response?.message==null?'missing' as const:'unrecognized' as const;
+        });
+        // Official DistributionUtil.start waits for propagation BEFORE checkStatus.
+        // The existing session delay runs after this method and cannot replace it.
+        await new Promise<void>(resolve=>setTimeout(resolve,DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS));
         status = await this.distributionStatus();
         if (!status?.isDistributionOn)
           throw new OperationError({
@@ -283,7 +293,7 @@ export function clients(
             protocol: "http",
             category: "invalid_response",
             reason:"distribution_still_off",
-            distributionInspection:{before:false,startRequested:true,after:false},
+            distributionInspection:{before:false,startRequested:true,after:false,startMessage,propagationDelayMs:DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS},
             message:
               "La distribución sigue apagada después de solicitar inicio.",
           });
