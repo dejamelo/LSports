@@ -315,3 +315,10 @@ Preflight e copy-config concluídos pelo operador: espaço suficiente, estimativ
 SHA-256 verificado. Evidência detalhada em MAC-BACKUP-WINDOW.md. Não repetir.
 Autorização financeira mantida; **aguardar confirmação do início** antes de
 encerrar os serviços. Backup offline dos volumes permanece próximo passo da janela.
+
+Tentativa de redimensionamento bloqueada por FreeTierRestrictionError; operador
+religou EC2 e retornou os 12. Backup offline e cópia verificada já concluídos.
+Próxima ação: validação somente leitura de saúde/HTTP e SSO manual, conforme
+MAC-BACKUP-WINDOW.md. Não declarar m7i.xlarge ativa nem parar novamente até
+concluir validação, tratar restrição de plano AWS e combinar novo início.
+Autorização financeira mantida, sem nova solicitação do mesmo valor.

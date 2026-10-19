@@ -84,4 +84,20 @@ class TransferTest(unittest.TestCase):
             self.assertEqual(sum(c[1]=='start' for c in calls),2)
             self.assertNotIn('EC2', ' '.join(' '.join(c) for c in calls))
 
+    def test_validate_only_checks_health_and_never_exposes_health_logs(self):
+        with tempfile.TemporaryDirectory() as root:
+            backup=Path(root)/'posnet-resize-config-test';backup.mkdir();items=[]
+            for n,cid in enumerate(sorted(w.EXPECTED)):
+                name=sorted(w.CADDYS)[n] if n<3 else '/app-'+str(n)
+                item={'Id':cid,'Name':name,'Image':'original','Mounts':[], 'State':{'Running':True,'Health':{'Status':'healthy','Log':[{'ExitCode':0,'Output':'PRIVATE_VALUE'}]}},'HostConfig':{},'NetworkSettings':{}}
+                items.append(item);(backup/(cid+'.inspect.private.json')).write_text(json.dumps([item]))
+            (backup/'manifest.private.json').write_text(json.dumps({'running':[{'id':cid} for cid in w.EXPECTED],'files':[]}))
+            def call(args,timeout=60):
+                self.assertEqual(args[1],'inspect');return json.dumps(items).encode()
+            out=io.StringIO()
+            with patch.object(w,'ROOT',Path(root)),patch.object(w,'call',side_effect=call),patch.object(w.os,'geteuid',return_value=0),patch.object(w.sys,'argv',['tool','validate']),contextlib.redirect_stdout(out):
+                w.main()
+            result=json.loads(out.getvalue());self.assertEqual(result['status'],'ok')
+            self.assertTrue(result['readOnly']);self.assertNotIn('PRIVATE_VALUE',out.getvalue())
+
 if __name__=='__main__':unittest.main()

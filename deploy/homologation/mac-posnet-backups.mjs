@@ -21,7 +21,7 @@ let serviceMutationRequested=false;
 
 async function main() {
   const action=process.argv[2] || 'preflight';
-  if (!['preflight','copy-config','copy-volumes','stop-services','recover-services'].includes(action)) throw Error('unsupported_action');
+  if (!['preflight','copy-config','copy-volumes','stop-services','recover-services','validate-services'].includes(action)) throw Error('unsupported_action');
   if (['stop-services','recover-services'].includes(action) && (!process.argv.includes('--approved') || action==='stop-services' && !process.argv.includes('--quiesced'))) throw Error('explicit_window_approval_required');
   await fs.mkdir(BASE,{recursive:true,mode:0o700});
   if ((await fs.lstat(BASE)).isSymbolicLink()) throw Error('destination_is_symlink');
@@ -54,12 +54,12 @@ async function main() {
     if (result.status==='failed') throw Error('remote_query_failed');
     return result;
   };
-  if (['stop-services','recover-services'].includes(action)) {
+  if (['stop-services','recover-services','validate-services'].includes(action)) {
     stage=action;
     const serviceSource=await fs.readFile(path.join(HERE,'posnet-window-services.py'),'utf8');
-    const mode=action==='stop-services'?'stop':'return';
-    const args=[mode,'--approved',...(mode==='stop'?['--quiesced']:[])];
-    serviceMutationRequested=true;
+    const mode=action==='validate-services'?'validate':action==='stop-services'?'stop':'return';
+    const args=mode==='validate'?['validate']:[mode,'--approved',...(mode==='stop'?['--quiesced']:[])];
+    serviceMutationRequested=mode!=='validate';
     const {child,exited}=start('sudo -n python3 -c '+quote(serviceSource)+' '+args.map(quote).join(' '));
     let text='';for await (const chunk of child.stdout) {text+=chunk;if(text.length>MiB){child.kill();throw Error('output_limit');}}
     const code=await exited;

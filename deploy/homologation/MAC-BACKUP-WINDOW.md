@@ -212,3 +212,66 @@ Sem isso, não executar. O comando encerra os 12 containers preservados, não pa
 nem redimensiona EC2. Esperar `stage=complete/status=ok/action=stop/containers=12`
 antes da etapa offline. Falha não é sucesso parcial aceitável: preservar saída e
 seguir o retorno dirigido, sem avançar para EC2.
+
+## Ocorrência: FreeTierRestrictionError e recuperação
+
+O operador informou que a alteração para m7i.xlarge foi bloqueada por
+`FreeTierRestrictionError`, religou a mesma EC2 e retornou os **12 containers**.
+A saída `running_not_application_validated` confirma execução, não saúde/SSO.
+Não declarar redimensionamento concluído. Não repetir stop/backup/cópia agora.
+Backup offline dos três volumes e cópia no Mac já concluídos, com tar compare e
+SHA-256 verificados (4 arquivos/103.399 bytes conforme saída). Preservar backups;
+se novas operações ocorrerem, avaliar atualização do ponto de backup na futura
+janela, sem restaurar um ponto antigo para desfazer operações novas.
+
+### Validação pós-retorno, sem escrita de aplicação
+
+No Mac, atualizar a branch e executar:
+
+```bash
+cd "$HOME/LSports"
+git pull --ff-only origin feat/sportsbook-demo
+node deploy/homologation/mac-posnet-backups.mjs validate-services
+node deploy/homologation/validate-posnet-pages.mjs
+```
+
+Primeiro comando: só inspect dos 12 containers e comparação com o backup de
+identidade/imagens/mounts/portas/aliases. Mostra running, health, OOM, restartCount
+e horário/exit code da última checagem, nunca Output dos healthchecks ou env.
+`status=ok` exige apps healthy e proxies running (proxies sem healthcheck não
+são apresentados como tendo HTTP validado). Não restaura arquivos nem start/stop.
+
+Segundo comando: GET público HTTPS em www/demo, com TLS verificado, HTML e amostra
+JS/CSS, sem cookies/tokens/credentials/login/apostas. Redirecionamento externo
+exige conferência manual e não é seguido; nenhum header/query/body sensível é
+impresso. HTTP 200 com HTML no lugar de JS/CSS falha. Essa amostra não testa todos
+os assets nem autenticação. O workspace recebeu 403 do próprio proxy de saída
+nas tentativas de acesso público: não é diagnóstico HTTP do POSNET.
+
+### SSO autenticado — navegador, fluxo habitual
+
+1. Abrir a origem habitual autorizada e autenticar-se normalmente, sem enviar
+   senha/token/cookies ao chat. Usar janela privada se for necessário separar
+   sessões, respeitando o fluxo e as permissões existentes.
+2. Iniciar um **novo** acesso SSO ao POSNET pela origem; não reutilizar URL/token
+   antigo nem dar refresh em callback de uso único como se fosse um novo login.
+3. Confirmar destino www/demo apropriado, usuário/permissões esperados, ausência
+   de loop de login e navegação normal em uma página autorizada sem nova exigência
+   indevida de autenticação. Não criar vendas/apostas/pagamentos para testar.
+4. Informar apenas sucesso/falha, origem/destino sem query e mensagem sanitizada.
+   Não anexar HAR, headers, URLs completas de SSO, tokens, cookies ou payloads.
+
+Sem essa evidência, `authenticatedSsoValidated` permanece false. Página HTTP ok e
+healthcheck não provam SSO. A validação não deve ser declarada concluída antes
+da saída remota/Mac e confirmação funcional no navegador.
+
+### Próxima tentativa de ampliação
+
+Primeiro concluir saúde/páginas/SSO. Depois conferir a indicação do plano na
+console AWS e a opção oficial de atualização do Free Plan para Paid Plan, se essa
+for a restrição confirmada na conta; não inventar comando CLI de upgrade.
+A aprovação financeira da m7i.xlarge continua válida; não pedir de novo o mesmo
+valor. Ler a tela real e condições/cobranças do plano antes de confirmar mudança
+de conta. Nenhum upgrade de conta, nova instância, recurso ou nova parada foi
+executado pelo workspace. Combinar novo início operacional depois de resolver a
+restrição; não parar novamente só para testar se a conta já permite a troca.

@@ -53,7 +53,7 @@ def main():
     global STAGE
     STAGE='approval_gate'
     action=sys.argv[1] if len(sys.argv)>1 else ''
-    if action not in ('stop','return') or '--approved' not in sys.argv or action=='stop' and '--quiesced' not in sys.argv: raise ValueError()
+    if action not in ('stop','return','validate') or action!='validate' and ('--approved' not in sys.argv or action=='stop' and '--quiesced' not in sys.argv): raise ValueError()
     if os.geteuid()!=0: raise PermissionError()
     STAGE='identity_gate'
     choices=[]
@@ -72,7 +72,24 @@ def main():
     proxies=[i['Id'] for i in items if i['Name'] in CADDYS]
     apps=[i['Id'] for i in items if i['Name'] not in CADDYS]
     if len(proxies)!=3 or len(apps)!=9: raise ValueError()
-    if action=='stop':
+    if action=='validate':
+        STAGE='health_validation'
+        rows=[]
+        for item in items:
+            state=item.get('State') or {}
+            health=state.get('Health') or {}
+            logs=health.get('Log') or []
+            rows.append({'id':item['Id'],'name':item['Name'],'running':bool(state.get('Running')),
+                         'health':health.get('Status'),'oomKilled':state.get('OOMKilled'),
+                         'restartCount':item.get('RestartCount'),
+                         'lastCheckExitCode':logs[-1].get('ExitCode') if logs else None,
+                         'lastCheckAt':logs[-1].get('End') if logs else None})
+        ok=all(r['running'] and not r['oomKilled'] and (r['health']=='healthy' or r['name'] in CADDYS and r['health'] is None) for r in rows)
+        print(json.dumps({'stage':'health_validation','status':'ok' if ok else 'not_ready','readOnly':True,
+                          'containers':rows,'identityStorageNetworksMatchBackup':True,
+                          'caddyHttpNotChecked':True,'sso':'requires_browser_session_validation'}))
+        if not ok: raise SystemExit(2)
+    elif action=='stop':
         STAGE='stop_proxies'; call(['docker','stop','--time','120',*proxies],timeout=150)
         STAGE='stop_apps'; call(['docker','stop','--time','120',*apps],timeout=150)
         STAGE='verify_stopped'
