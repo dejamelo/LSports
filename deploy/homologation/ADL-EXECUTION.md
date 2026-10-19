@@ -320,8 +320,8 @@ O novo site usa upstream `adl-homologation-api:3001`, bloqueia rotas demo/sinté
 e restringe `/control`, `/api/control/*` e `/api/diagnostics/*` ao CIDR administrativo
 já registrado, além da autenticação da aplicação. `log_skip` evita registrar URLs
 de sessões temporárias. Não adiciona X-Frame-Options incompatível com iframe.
-URLs após sucesso: `https://sportbook.apuestadeportiva.lat/sportsbook` e
-`https://sportbook.apuestadeportiva.lat/control`. A AWS é plataforma nova: ainda
+Painel após sucesso: `https://sportbook.apuestadeportiva.lat/control`. O iframe
+usa `/embed/:cliente/:operacao/sportsbook`, após configurar a operação e sessão. A AWS é plataforma nova: ainda
 precisa de bootstrap de administrador e operação autorizada, não usar contas ou
 bilhetes Argentina Demo do Mac. Página HTTP 200 não prova feed/sessão incorporada.
 
@@ -368,3 +368,46 @@ Validação pendente real: TLS na AWS, bootstrap/operação de homologação, im
 dos journals após shutdown, partida única, snapshots completos e odds atuais no
 iframe. Falhas de memória/cooldown local continuam separadas de 429/autorização/
 fechamento AMQP do fornecedor. Não liberar odds do checkpoint nem forçar available.
+
+### HTTPS pending após reload: verificar sem publicar novamente
+
+O operador confirmou `https_pending`, `caddyReloaded=true`, rotas anteriores e
+overrides preservados. A sequência com `&&` encerrou antes da transferência das
+credenciais, portanto não houve `credentialsStored=true`.
+
+Foi encontrado um erro no probe de publicação: `/sportsbook` não é uma rota do
+modo plataforma. Ela pode retornar 404 mesmo com certificado válido. O iframe é
+`/embed/:cliente/:operacao/sportsbook`; só deve ser construído para a operação/sessão
+autorizada após o bootstrap. O probe futuro foi corrigido para ler `/control` via
+loopback e verificar um asset JavaScript real por HTTPS, sem abrir rotas anônimas.
+Não repetir a publicação já aplicada para instalar essa correção do probe.
+
+Executar no Mac:
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/verify-adl-https.mjs &&
+node deploy/homologation/stage-adl-credentials.mjs
+```
+
+O verificador é somente leitura: não reload, restart, append de site ou alteração
+de overrides. Compara configuração ativa/boot/montada; faz handshake TLS verificado
+com SNI do domínio tanto na porta local quanto no destino público, informando
+validade/fingerprint públicos do certificado, ou categorias DNS/conexão/TLS.
+Testa o asset real via HTTPS sem seguir redirects e mostra códigos HTTP de
+`/control` e da antiga `/sportsbook` separadamente. `403` no control externo pode
+ser a restrição CIDR esperada; `404` da rota antiga não implica falha TLS.
+
+Consulta últimas 2000 linhas/30 minutos dos logs do Caddy e publica apenas sinais
+fixos relativos a esse domínio: certificado obtido, emissão em curso, desafio/DNS/
+CAA, limite ACME, timeout, permissão de armazenamento e repetição agendada. Nunca
+imprime texto bruto, chaves privadas, URLs ACME ou identificadores de conta.
+Ausência de sinais nesse recorte não comprova ausência de emissão. Não força uma
+nova emissão nem consulta o fornecedor LSports.
+
+Sucesso exige `status=ok`, `httpsVerified=true`, `applicationVerified=true`; só então
+`&&` prossegue para o staging protegido e `credentialsStored=true`. Se falhar,
+reportar somente JSON sanitizado; não remover proteção TLS ou publicar o site de
+novo. Mesmo com sucesso, Mac continua consumidor único e worker AWS parado até
+bootstrap, desligamento normal, audit/export dos journals e cooldown.

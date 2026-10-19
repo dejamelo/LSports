@@ -93,8 +93,12 @@ def https_main():
             deadline=time.monotonic()+90;verified=False
             while time.monotonic()<deadline:
                 try:
-                    with urllib.request.urlopen('https://'+DOMAIN+'/sportsbook',timeout=8) as response:
-                        verified=response.status==200 and b'<html' in response.read(1024*1024).lower()
+                    with urllib.request.urlopen('http://127.0.0.1:13001/control',timeout=5) as local_response:
+                        html=local_response.read(1024*1024).decode('utf8')
+                    assets=re.findall(r'(?:src|href)=[\"\'](/assets/[a-zA-Z0-9_.-]+\.js)[\"\']',html)
+                    if not assets:raise ValueError('built_asset_missing')
+                    with urllib.request.urlopen('https://'+DOMAIN+assets[0],timeout=8) as response:
+                        verified=response.status==200 and response.headers.get_content_type() in ('application/javascript','text/javascript')
                     if verified:break
                 except Exception:pass
                 time.sleep(3)
