@@ -108,3 +108,8 @@ status ok, sem restart). Não repetir. Restam dados dos dois volumes replay e do
 volume Caddy: há rotina **offline**, que bloqueia com gravadores ativos, e proposta
 de janela/transferência protegida/retorno explícito dos 12 em RESIZE-APPROVAL.md.
 Não executar backup offline nem parar serviços antes da aprovação da janela.
+
+Autorização financeira recebida; parada ainda sem horário combinado. Ver
+[MAC-BACKUP-WINDOW.md](MAC-BACKUP-WINDOW.md): `mac-posnet-backups.mjs preflight`
+mede tamanhos/espaço e amostra SSH sem parar nada; `copy-config` antecipa a cópia
+protegida para o Mac. Os comandos explícitos de janela e recuperação estão separados.

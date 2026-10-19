@@ -299,3 +299,13 @@ O custo do tipo aprovado para revisão não mudou: subtotal **US$ 154,02/mês**,
 ou mudança está autorizado por este registro. Restore Supabase continua não testado
 por evidência; PITR permanece desligado. A aprovação operacional deve reconhecer
 esse risco e o intervalo desde o backup diário, sem executar restore de produção.
+
+## Autorização financeira e dimensionamento da janela
+
+O operador **autorizou** m7i.xlarge no subtotal US$ 154,02/mês (+US$ 85,27), com
+exclusões de tráfego/backups/impostos. Não solicitar aprovação financeira de novo.
+O horário de início da parada ainda será combinado. O procedimento concreto de
+medição Mac/AWS, transferência protegida e execução/retorno está em
+[MAC-BACKUP-WINDOW.md](MAC-BACKUP-WINDOW.md). Primeiro executar apenas `preflight`
+e `copy-config`; nenhuma dessas ações para serviços. A estimativa numérica final
+depende do relatório real de tamanhos/espaço/transferência, não disponível no workspace.
