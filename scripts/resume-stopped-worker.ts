@@ -33,6 +33,7 @@ export async function resumeStoppedWorker(io:ResumeIO,expectedPid:number,root:st
   const current=await io.identity(expectedPid);
   if(!current&&await io.absent())return {ownerPid:expectedPid,launcherResumed:parent?.pid??null,supervisorPreserved,signal:'SIGCONT',pendingTermObserved:pending,directedTermRequested:termRequested,lockReleased:true};
   if(current&&!sameIdentity(owner,current))throw Error('OWNER_CHANGED_AFTER_CONT');
+  if(current&&termRequested&&/^T/.test(await io.state(expectedPid)))throw Error('OWNER_RESUSPENDED_AFTER_TERM_NO_MORE_SIGNALS');
   if(current&&pending!==true&&!termRequested&&io.now()-resumedAt>=resumeGraceMs){
    if(/^T/.test(await io.state(expectedPid)))throw Error('OWNER_STOPPED_AGAIN_NO_TERM_SENT');
    if(await io.absent()){await io.pause();continue;}

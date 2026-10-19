@@ -1,3 +1,4 @@
+import {shutdownAttemptEvidence} from './shutdown-attempt-evidence.js';
 import {root,statePath} from '@lsports/feed-store';
 import {diagnoseCutover,safeError} from './cutover-diagnostics.js';
 import {processIdentity,processCwd,workerIdentity,sameIdentity,journalHashes} from './stop-owned-worker.js';
@@ -32,7 +33,9 @@ async function processMetrics(pid:number){
  return processState;
 }
 async function inspectOwner(report:Awaited<ReturnType<typeof diagnoseCutover>>){
- const lock=report.locks.find(l=>l.kind==='worker');const pid=lock&&'ownerPid' in lock?lock.ownerPid:undefined;
+ const lock=report.locks.find(l=>l.kind==='worker');const matches=(report.processes as {matches?:{pid:number;kind:string}[]}).matches||[];
+ const candidates=matches.filter(item=>['worker_entrypoint','homologation_entrypoint'].includes(item.kind));
+ const pid=lock&&'ownerPid' in lock?lock.ownerPid:candidates.length===1?candidates[0].pid:undefined;
  if(!pid)return {status:'no_verified_owner_pid'};
  const info=await processIdentity(pid);if(!info)return {status:'owner_not_running',pid};
  const processState=await processMetrics(pid);
@@ -55,10 +58,14 @@ async function main(){
  const first=await fileStat();let hashes:string|undefined;try{hashes=await journalHashes(state);}catch{}
  await delay(5000);
  const second=await fileStat();let stable:boolean|null=null;try{stable=hashes===undefined?null:hashes===await journalHashes(state);}catch{}
+ let attemptedShutdown:object={status:'owner_unverified'};
+ const verified=owner as {status?:string;pid?:number;descriptors?:{items?:{kind:string}[]}};
+ if(verified.status==='verified'&&verified.pid)try{attemptedShutdown=await shutdownAttemptEvidence(verified.pid,state,await realpath(root),!!verified.descriptors?.items?.some(d=>['socket','pipe'].includes(d.kind)));}catch(e){attemptedShutdown={status:'inspection_unverified',reason:safeError(e)};}
+ const ownerAfter=verified.pid?await processMetrics(verified.pid):null;
  const after=await diagnoseCutover({state,refreshMs});
  const ready=after.status==='ok'&&stable===true;
  console.log(JSON.stringify({operation:'shutdown.diagnose',status:ready?'ready_for_export':'blocked',readOnly:true,providerRequests:0,workerStarted:false,awsChanged:false,
-  owner,checkpointObservation:{before:first,after:second,changed:JSON.stringify(first)!==JSON.stringify(second)},journalsStable:stable,
+  owner,ownerAfter,attemptedShutdown,checkpointObservation:{before:first,after:second,changed:JSON.stringify(first)!==JSON.stringify(second)},journalsStable:stable,
   currentEvidence:after,observationWindowSeconds:5,pendingStage:/^T/.test(String((owner as {processState?:{state?:string}}).processState?.state||''))?'os_stopped_before_javascript_progress':'not_proven_in_existing_process',loadedCodeVersion:'unknown',
   note:'No signals or lock removal. Socket state and persisted phase do not identify a specific pending Promise. Logs may predate this signal; no raw commands, endpoints, log paths or payloads printed.'}));
  process.exitCode=ready?0:2;

@@ -120,3 +120,11 @@ test('real suspended supervisor stays stopped while child drains, unlocks and be
   if(parent.exitCode===null)parent.kill('SIGCONT');await exited;await fs.rm(dir,{recursive:true,force:true});
  }
 });
+
+test('new OS stop after directed TERM is identified without another signal',async()=>{
+ const f=fixture();let tick=0,terminated=false;f.io.pendingTerm=async()=>null;f.io.now=()=>tick;f.io.pause=async()=>{tick++;};
+ f.io.terminate=pid=>{terminated=true;f.actions.push('TERM:'+pid);};
+ const oldState=f.io.state;f.io.state=async pid=>terminated&&pid===12811?'T':oldState(pid);
+ await assert.rejects(resumeStoppedWorker(f.io,12811,'/repo',501,10,2),/OWNER_RESUSPENDED_AFTER_TERM_NO_MORE_SIGNALS/);
+ assert.equal(f.actions.filter(a=>a.startsWith('TERM:')).length,1);assert.equal(f.signals.filter(pid=>pid===12811).length,1);
+});

@@ -5,7 +5,7 @@ import {execFile} from 'node:child_process';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 const args=['--import','tsx','--env-file-if-exists=.env','scripts/diagnose-shutdown.ts'];
 if(process.argv.length!==2){console.log(JSON.stringify({operation:'shutdown.diagnose',status:'blocked',stage:'arguments',readOnly:true}));process.exitCode=2;}
-else execFile(process.execPath,args,{cwd:root,timeout:30000,maxBuffer:1024*1024},(error,stdout,stderr)=>{
+else execFile(process.execPath,args,{cwd:root,timeout:60000,maxBuffer:1024*1024},(error,stdout,stderr)=>{
  try{
   const result=JSON.parse(stdout.trim());
   if(result.operation!=='shutdown.diagnose'||result.readOnly!==true)throw Error();

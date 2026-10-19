@@ -185,3 +185,45 @@ no chat e nenhum segredo LSports vai ao navegador.
 A confirmação final dos feeds reais depende da execução no Mac. Se fornecedor
 recusar autenticação/distribuição, enviar 429 ou apenas eventos encerrados, os
 códigos e retryAt ficam visíveis; nenhuma proteção é removida para apresentar odds.
+
+## Atualização: timeout após CONT e TERM no Mac
+
+O usuário confirmou backup verificado, CONT e TERM dirigidos ao dono 12811 e
+`RESUME_TIMEOUT_NO_MORE_SIGNALS`. Nenhuma exportação/importação/partida AWS foi
+concluída. Preservar a intenção e o backup já criados; **não repetir o executor
+completo nem apagar as intenções para permitir novos sinais**.
+
+A versão anterior não inspecionava estado T depois do TERM. O timeout sozinho
+não distingue nova suspensão por controle de terminal, espera de stdout/socket
+com concurrently suspenso, ou outra espera do encerramento carregado. Grupos de
+terminal diferentes não provam SIGTTIN/SIGTTOU. O código carregado continua
+unknown; git pull não o atualiza dentro do processo existente.
+
+O diagnóstico existente foi ampliado, sem novo script de recuperação. Comando:
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/diagnose-adl-shutdown.mjs
+```
+
+Coleta independente do estado antes/depois, owner/parent/npm, PGID/TPGID, classe de
+espera (sem texto bruto), terminal stdin e tostop consultado somente leitura,
+TCP/descritores, backup/manifesto e intenções já criados vinculados à identidade
+PID/início/UID/argv. Verifica hashes dos arquivos existentes e compara checkpoint
+atual com backup. Não refaz backup, não envia sinais, não altera terminal, não
+remove locks nem acessa AWS. Não imprime argumentos, credenciais ou payloads.
+
+`attemptedShutdown.finding` distingue `os_stopped_after_directed_term` de
+`owner_alive_after_term`; só levanta hipótese de backpressure se pai suspenso e
+saída pipe/socket. `causeProven=false` é deliberado: um ps não identifica a Promise
+ou o sinal que causou a parada. `ownerAfter` e estabilidade dos arquivos mostram
+se houve progresso durante a janela. Se o lock já tiver sido liberado, tenta a
+única identidade de worker ainda encontrada, sem depender do lock para observação.
+
+A recuperação seguinte deve usar esse relatório atual e reutilizar backup/intenção
+verificados; não deve contornar `RECOVERY_ALREADY_REQUESTED_NO_REPEAT`. Retomar um
+supervisor compartilhado exige verificar seus comandos/restart/filhos e controle
+do terminal; não é equivalente a retomar launcher dedicado. O diagnóstico não
+executa retomada adicional. O AWS permanece parado até
+confirmar fim da execução Mac, liberação dos locks e exportação fresca.
