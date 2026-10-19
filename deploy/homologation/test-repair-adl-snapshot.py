@@ -47,6 +47,10 @@ class Repair(unittest.TestCase):
    old={k:NS.get(k) for k in ['SECURE','RELEASES','BACKUPS','states','run','model','control_status','feed_evidence','os','snapshot_host_memory']};NS.update(os=types.SimpleNamespace(**{**os.__dict__,'geteuid':lambda:0}),SECURE=secure,RELEASES=releases,BACKUPS=backups,states=states,run=run,model=model,control_status=lambda:200,feed_evidence=lambda *a:{'recentErrors':[]},snapshot_host_memory=lambda:1024**3)
    request={'handoff':handoff,'freshAuditAt':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z'),'sourceHashes':hashes}
    try:
+    # Correlation reads protected evidence even when RAM admission would reject a mutation.
+    out=io.StringIO()
+    with contextlib.redirect_stdout(out):code=NS['repair_snapshot']({**request,'inspectOnly':True})
+    self.assertEqual(code,0,out.getvalue());self.assertIn('snapshot_repair.correlation',out.getvalue());self.assertEqual(list(backups.iterdir()),[]);self.assertTrue(running);self.assertEqual(journal.read_bytes(),original);self.assertFalse(any(c[:2]==['docker','kill'] for c in calls))
     # Memory refusal occurs before any stop or configuration write.
     out=io.StringIO()
     with contextlib.redirect_stdout(out):code=NS['repair_snapshot'](request)
@@ -80,4 +84,29 @@ class Repair(unittest.TestCase):
   before={'services':{'api':{'mem_limit':'805306368'},'worker':{'mem_limit':'4294967296','environment':{'preserved':'yes'},'volumes':['preserved']}}}
   original=copy.deepcopy(before);after=NS['snapshot_memory_model'](before)
   self.assertEqual(before,original);self.assertEqual(after['services']['worker']['mem_limit'],4294967296);self.assertEqual(after['services']['api'],before['services']['api']);self.assertEqual(after['services']['worker']['volumes'],['preserved'])
+ def test_correlation_256_current_vs_128_historical_and_cooldown_does_not_refresh_failure_age(self):
+  caps={'prematch':{'limitBytes':268435456},'inplay':{'limitBytes':134217728}};started='2026-10-19T05:00:00Z'
+  def failure(limit):return {'reason':'response_size_limit','operation':'snapshot.events','httpStatus':200,'responseLimitBytes':limit}
+  old={'packageId':4511,'operation':'snapshot.events','at':'2026-10-19T04:00:00Z','completedAt':'2026-10-19T04:00:10Z','failure':failure(134217728)}
+  fresh={'packageId':4511,'operation':'snapshot.events','at':'2026-10-19T05:31:22Z','completedAt':'2026-10-19T05:31:27Z','failure':failure(268435456)}
+  evidence={'recentErrors':[{'lane':'prematch','category':'rate_limited','rateLimitSource':'local_operation_cooldown','loggedAt':'2026-10-19T05:40:00Z','coordinator':old}], 'schedulers':[{'operations':[{'packageId':4511,'operation':'snapshot.events','coordinator':fresh}]}]}
+  report=NS['correlate_snapshot_failures'](caps,started,{},evidence)
+  current=next(r for r in report['rows'] if r['attemptLimitBytes']==268435456)
+  self.assertEqual(current['classification'],'current_limit_exceeded');self.assertEqual(current['requestAt'],'2026-10-19T05:31:22Z');self.assertEqual(current['failedAt'],'2026-10-19T05:31:27Z')
+  historical=next(r for r in report['rows'] if r['attemptLimitBytes']==134217728);self.assertEqual(historical['classification'],'historical_before_current_configuration')
+  self.assertEqual(report['decisions']['prematch'],'bounded_partitioned_recovery_required_no_cap_increase')
+ def test_correlation_unknown_time_and_runtime_mismatch_never_claim_current_256_overflow(self):
+  caps={'prematch':{'limitBytes':268435456},'inplay':{'limitBytes':134217728}};failure={'reason':'response_size_limit','httpStatus':200,'responseLimitBytes':268435456}
+  feed={'connections':{'prematch':{'lastSnapshotDiagnostic':failure,'diagnostic':{'reason':'unsupported_message_type','operation':'feed.decode','category':'unsupported_message','messageMetadata':{'messageType':99,'payload':'MUST_NEVER_PRINT'}}}}}
+  report=NS['correlate_snapshot_failures'](caps,'2026-10-19T05:00:00Z',feed,{})
+  self.assertEqual(report['rows'][0]['classification'],'insufficient_timestamp_evidence');self.assertEqual(report['decisions']['prematch'],'no_current_size_failure_proven_do_not_change_limits');self.assertNotIn('MUST_NEVER_PRINT',json.dumps(report));self.assertEqual(report['independentMessageBlockers'][0]['diagnostic']['messageMetadata']['messageType'],99)
+  evidence={'recentErrors':[{'lane':'inplay','loggedAt':'2026-10-19T05:02:00Z',**failure}]}
+  report=NS['correlate_snapshot_failures'](caps,'2026-10-19T05:00:00Z',{},evidence)
+  self.assertEqual(report['rows'][0]['classification'],'current_runtime_limit_mismatch')
+ def test_later_success_and_saved_evidence_are_correlated_without_reopening_markets(self):
+  caps={'prematch':{'limitBytes':268435456},'inplay':{'limitBytes':134217728}}
+  evidence={'recentErrors':[{'lane':'prematch','loggedAt':'2026-10-19T05:01:00Z','reason':'response_size_limit','responseLimitBytes':268435456,'httpStatus':200}]}
+  feed={'connections':{'prematch':{'lastSnapshotAt':'2026-10-19T05:02:00Z'}}}
+  original=copy.deepcopy(feed);report=NS['correlate_snapshot_failures'](caps,'2026-10-19T05:00:00Z',feed,{},historical={'evidence':evidence})
+  self.assertEqual(report['rows'][0]['classification'],'superseded_by_later_successful_snapshot');self.assertEqual(report['decisions']['prematch'],'no_current_size_failure_proven_do_not_change_limits');self.assertEqual(feed,original)
 if __name__=='__main__':unittest.main()

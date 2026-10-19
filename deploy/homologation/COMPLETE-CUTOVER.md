@@ -471,3 +471,39 @@ configuração, API, rede, volume ou segredo é normalizado ou descartado. O mes
 novamente. Testes incluem Compose com bytes em string / Docker em inteiro, fluxo de
 reparo simulado completo, rejeições estritas e proteção dos demais campos. Isso não
 substitui a confirmação real dos operandos e feeds na AWS.
+
+### Distinguir falha atual de 256 MiB de evidência antiga de 128 MiB
+
+`NO_CURRENT_128_MIB_LANE_REQUIRES_CHANGE` (ou equivalente) não afirma que um snapshot
+teve sucesso. O seletor anterior só tratava 128 MiB e sua síntese removia horários;
+falhas de 256 MiB também ficavam fora da decisão de alterar a configuração.
+
+O modo `--snapshot-report` é somente leitura na AWS e reutiliza automaticamente
+`lastValidation` do progresso protegido no Mac. Cruza erros recentes, diagnóstico do
+checkpoint e coordinator.failure dos journals com packageId/lane, requestAt,
+completedAt, timestamp Docker, State.StartedAt e capacidade efetiva do processo.
+Não usa o horário novo do cooldown como se fosse uma nova falha HTTP antiga.
+
+Classificações: falha anterior ao container/configuração atual; limite atual excedido;
+limite registrado diferente do runtime atual (investigar fonte/observação); data
+insuficiente; ou falha superada por snapshot posterior bem-sucedido. Mantém os valores
+originais e fontes de cada linha. Também expõe somente o código numérico de mensagem
+não suportada, disposition/retryPolicy, sem payload nem descarte de entrega.
+
+O comando grava `snapshot-volume-12811-12809.json` no diretório protegido ADL/Cutover
+fora do repositório, com chmod 0600. Não repete exportação, importação, cooldown ou
+partida; não consulta o fornecedor nem muda imagem, limites, volumes ou overrides.
+O relatório permite analisar evidências exatas, evitando depender de foto de terminal.
+
+Se confirmar falha HTTP 200 atual de 256 MiB no PreMatch, não elevar cap/heap sob o
+mesmo envelope de 4 GiB: 384 MiB já exigiria 3136 MiB de conversão, além do heap de
+3072 MiB configurado. A correção indicada é recuperação limitada por grupos de fixtures,
+com inventário completo de assinaturas existentes, respostas finitas e coordenação
+serializada; não reduzir silenciosamente cobertura com IDs parciais da projeção.
+O SDK oficial instalado 3.10.10 expõe `fixtures?: number[]` em GetEventRequest e
+GetEventRequestDto aceita o filtro. Isso é filtro de requisição, não paginação nem
+nova assinatura. Antes de implementar a recuperação particionada, validar o inventário
+completo e o contrato da resposta. Todos os grupos devem concluir, persistir e passar
+pelo handoff ordenado antes de marcar baseline pronto; preservar versões e liquidações.
+Datas antigas nunca viram odds atuais. Esse fluxo particionado ainda não foi implantado.
+Uma falha histórica sozinha não autoriza ajuste, reinício ou nova consulta antecipada.

@@ -39,6 +39,75 @@ def snapshot_volume_failures(failures):
                     proven[lane].append({'httpStatus':200,'responseLimitBytes':128*1024*1024,'reason':'response_size_limit'})
     return proven
 
+def snapshot_utc(value):
+    if not isinstance(value,str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',value):return None
+    try:return datetime.datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()
+    except (ValueError,OverflowError):return None
+
+def correlate_snapshot_failures(capacities,worker_started,feed,evidence,historical=None):
+    rows=[];start=snapshot_utc(worker_started)
+    def add(lane,d,source,logged=None):
+        if lane not in ('prematch','inplay') or not isinstance(d,dict):return
+        coordinator=d.get('coordinator') if isinstance(d.get('coordinator'),dict) else {}
+        candidates=[(d,coordinator,logged),(coordinator.get('failure'),coordinator,None)]
+        for failure,c,log_time in candidates:
+            if not isinstance(failure,dict) or failure.get('reason')!='response_size_limit':continue
+            if failure.get('operation') not in (None,'snapshot.events') or c.get('operation') not in (None,'snapshot.events'):continue
+            limit=failure.get('responseLimitBytes');current=capacities[lane]['limitBytes']
+            if type(limit) is not int or limit<=0 or limit>2**40:continue
+            attempted=c.get('at');completed=c.get('completedAt');a=snapshot_utc(attempted);b=snapshot_utc(completed);log=snapshot_utc(log_time)
+            timing='unproven_age'
+            # A cooldown can print an older failure: never use its new log time for the nested failure.
+            if start is not None:
+                if b is not None and b<start:timing='before_current_container'
+                elif a is not None and a>=start and (b is None or b>=a):timing='current_container'
+                elif a is None and b is not None and b>=start:timing='current_container'
+                elif a is None and b is None and log is not None:timing='current_container' if log>=start else 'before_current_container'
+            if timing=='before_current_container':classification='historical_before_current_configuration'
+            elif timing=='current_container':classification='current_limit_exceeded' if limit==current else 'current_runtime_limit_mismatch'
+            else:classification='insufficient_timestamp_evidence'
+            success_value=((feed.get('connections') or {}).get(lane) or {}).get('lastSnapshotAt')
+            success=snapshot_utc(success_value);failure_time=b if b is not None else log
+            if classification=='current_limit_exceeded' and success is not None and start is not None and success>=start and failure_time is not None and success>failure_time:classification='superseded_by_later_successful_snapshot'
+            row={'lane':lane,'packageId':4511 if lane=='prematch' else 4510,'source':source,'httpStatus':failure.get('httpStatus') if type(failure.get('httpStatus')) is int else None,'attemptLimitBytes':limit,'effectiveLimitBytes':current,'containerStartedAt':worker_started if start is not None else None,'requestAt':attempted if a is not None else None,'failedAt':completed if b is not None else None,'loggedAt':log_time if log is not None else None,'timing':timing,'classification':classification,'lastSuccessfulSnapshotAt':success_value if success is not None else None}
+            rows.append(row)
+    def collect(e,source):
+        if not isinstance(e,dict):return
+        for d in e.get('recentErrors',[]):add(d.get('lane'),d,source+'.logs',d.get('loggedAt'))
+        for schedule in e.get('schedulers',[]):
+            for item in schedule.get('operations',[]):
+                if item.get('operation')!='snapshot.events':continue
+                lane={4511:'prematch',4510:'inplay'}.get(item.get('packageId'))
+                add(lane,{'coordinator':item.get('coordinator',{})},source+'.journal')
+    collect(evidence,'current')
+    for lane in ('prematch','inplay'):
+        connection=(feed.get('connections') or {}).get(lane,{})
+        for key in ('diagnostic','lastSnapshotDiagnostic'):add(lane,connection.get(key),key)
+    if isinstance(historical,dict):
+        collect(historical.get('evidence'),'saved_validation')
+        for lane,connection in (historical.get('lanes') or {}).items():
+            for key in ('diagnostic','lastSnapshotDiagnostic'):add(lane,connection.get(key),'saved_validation.'+key)
+    unique={}
+    for row in rows:
+        key=tuple(row[k] for k in ('lane','attemptLimitBytes','requestAt','failedAt','loggedAt','classification'))
+        if key in unique:unique[key]['sources'].append(row['source'])
+        else:unique[key]={**row,'sources':[row['source']]}
+    rows=list(unique.values())
+    decisions={}
+    for lane in ('prematch','inplay'):
+        current=[r for r in rows if r['lane']==lane and r['classification']=='current_limit_exceeded' and r['httpStatus']==200]
+        mismatch=any(r['lane']==lane and r['classification']=='current_runtime_limit_mismatch' for r in rows)
+        if current and capacities[lane]['limitBytes']>=256*1024**2:decision='bounded_partitioned_recovery_required_no_cap_increase'
+        elif current:decision='confirmed_128_mib_limit_can_be_reviewed_for_256'
+        elif mismatch:decision='runtime_limit_mismatch_requires_source_investigation'
+        else:decision='no_current_size_failure_proven_do_not_change_limits'
+        decisions[lane]=decision
+    blockers=[]
+    for lane in ('prematch','inplay'):
+        d=((feed.get('connections') or {}).get(lane) or {}).get('diagnostic') or {}
+        if d.get('reason')=='unsupported_message_type':blockers.append({'lane':lane,'diagnostic':safe_feed_diagnostic(d),'action':'explicit_handler_required_no_discard'})
+    return {'readOnly':True,'providerRequests':0,'rows':rows,'decisions':decisions,'independentMessageBlockers':blockers,'currentEffectiveLimitsBytes':{lane:capacities[lane]['limitBytes'] for lane in ('prematch','inplay')}}
+
 def snapshot_plan(capacities, failures):
     proven=snapshot_volume_failures(failures)
     wanted={lane:256 for lane in proven if proven[lane] and capacities[lane]['limitBytes']==128*1024*1024}
@@ -104,6 +173,7 @@ def repair_snapshot(request):
                 if entry.get('operation')=='snapshot.events' and entry.get('packageId') in (4510,4511):
                     lane='prematch' if entry['packageId']==4511 else 'inplay'
                     failures[lane].append({'operation':'snapshot.events','coordinator':entry.get('coordinator',{})})
+        feed={}
         checkpoint=directory/'trade-feed.json'
         if checkpoint.is_file():
             require(not checkpoint.is_symlink() and checkpoint.stat().st_size<=256*1024*1024,'CHECKPOINT_SIZE_LIMIT')
@@ -114,6 +184,10 @@ def repair_snapshot(request):
                 connection=feed.get('connections',{}).get(lane,{})
                 failures[lane].append(safe_feed_diagnostic(connection.get('lastSnapshotDiagnostic')))
                 failures[lane].append(safe_feed_diagnostic(connection.get('diagnostic')))
+        correlation=correlate_snapshot_failures(observed['capacities'],worker.get('State',{}).get('StartedAt'),feed,evidence,request.get('historicalValidation'))
+        if request.get('inspectOnly') is True:
+            emit(operation='cutover.aws',stage='snapshot_repair.correlation',status='ok',report=correlation,runtimeSourceMatchesExpected=observed['sourceHashes']==request['sourceHashes'],workerRunning=True,readOnly=True,workerStopped=False,limitsChanged=False,posnetChanged=False)
+            return 0
         wanted,budget=snapshot_plan(observed['capacities'],failures)
         emit(operation='cutover.aws',stage=stage,status='inspected',effective=observed,failures=failures,plannedLaneLimitsMB=wanted,responseLimitFailuresByLane=snapshot_volume_failures(failures),evidence=evidence,workerStarted=False,posnetChanged=False)
         require(observed['sourceHashes']==request['sourceHashes'],'SNAPSHOT_RUNTIME_SOURCE_DIFFERS_NO_BLIND_PATCH')

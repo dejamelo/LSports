@@ -221,6 +221,12 @@ def safe_feed_diagnostic(value):
     if type(value.get('deferred')) is bool:out['deferred']=value['deferred']
     if isinstance(value.get('amqpCloseSignals'),list):out['amqpCloseSignals']=[v for v in value['amqpCloseSignals'] if isinstance(v,str) and v in {'connection_forced','heartbeat_timeout','ack_timeout','administrative_close','server_shutdown'}]
     if isinstance(value.get('distributionInspection'),dict):out['distributionInspection']={k:v for k,v in value['distributionInspection'].items() if k in ('before','startRequested','after') and type(v) is bool}
+    metadata=value.get('messageMetadata')
+    if isinstance(metadata,dict):
+        kind=metadata.get('messageType')
+        if type(kind) is int and 0<=kind<=65535:out['messageMetadata']={'messageType':kind}
+    for key,allowed in {'deliveryDisposition':{'requeue_requested','unacknowledged_until_close'},'retryPolicy':{'restart_required'}}.items():
+        if isinstance(value.get(key),str) and value[key] in allowed:out[key]=value[key]
     if isinstance(value.get('coordinator'),dict):out['coordinator']=safe_coordinator(value['coordinator'])
     return out
 
