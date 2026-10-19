@@ -127,3 +127,12 @@ test('partition continuations respect prior cooldown, host spacing and supplier 
   now+=5000;await assert.rejects(new SnapshotScheduler('https://stm-snapshot.lsports.eu',4511,options).run('snapshot.events',async()=>{calls++;},{recoveryId:'new-session',part:0}));assert.equal(calls,5);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('supplier confirmed 15s full floor extends an older 5s host reservation without bypassing journals',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-confirmed-spacing-'));let now=100000;try{
+  const first=new SnapshotScheduler('https://spacing.invalid',4511,{root:join(dir,'feed'),now:()=>now,spacingMs:5000,refreshMs:300000});await first.run('snapshot.events',async()=>1);
+  now+=6000;const corrected=new SnapshotScheduler('https://spacing.invalid',4511,{root:join(dir,'feed'),now:()=>now});let requests=0;
+  await assert.rejects(corrected.run('snapshot.outright.fixtures',async()=>{requests++;}),error=>error instanceof OperationError&&Date.parse(error.diagnostic.retryAt!)===115000);
+  assert.equal(requests,0);now=115000;await corrected.run('snapshot.outright.fixtures',async()=>{requests++;});assert.equal(requests,1);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

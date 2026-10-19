@@ -264,14 +264,10 @@ test(
           (r: any) => r.fixtureId === 926721036,
         );
         assert.equal(row.markets[0][1].bets[0].price, "2.50");
-        if (msg === football)
-          assert(
-            saved.events.some(
-              (e: any) =>
-                e.id === "prematch:900111" &&
-                e.markets[0].selections[0].odds === 2.2,
-            ),
-          );
+        if(msg===football){
+          const pending=saved.workerCheckpoint.regular.find((r:any)=>r.fixtureId===900111);
+          assert.equal(pending.markets[0][1].bets[0].price,'2.2');
+        }
         acks++;
       },
       nack() {
@@ -349,6 +345,7 @@ test(
         },
       );
       assert(connected);
+      assert.equal(state.feed().events.find(e=>e.id==='prematch:900111')?.markets?.[0].selections[0].odds,2.2);
       assert.equal(
         state.rows.prematch.get(key)?.marketReceipt?.messagesByType["40"],
         1,

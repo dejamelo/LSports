@@ -206,7 +206,7 @@ def cutover_main():
         return 2
 
 # Explicit fields only: provider exception text, URLs and message payloads never leave SSH.
-FEED_OPERATIONS={'subscriptions.list','amqp.connection','amqp.channel','amqp.consume','amqp.connect','snapshot.events','snapshot.outright.fixtures','snapshot.outright.markets','distribution.start','distribution.status','feed.decode','feed.apply','feed.stale','worker.start','file.persist'}
+FEED_OPERATIONS={'subscriptions.list','amqp.connection','amqp.channel','amqp.consume','amqp.connect','snapshot.events','snapshot.outright.fixtures','snapshot.outright.markets','distribution.start','distribution.stop','distribution.status','feed.decode','feed.apply','feed.stale','worker.start','file.persist'}
 def safe_distribution_observation(value):
     out={}
     if value.get('stage') in ('before_start','start_response','after_propagation'):out['stage']=value['stage']
@@ -239,11 +239,12 @@ def safe_feed_diagnostic(value):
         if inspection.get('propagationDelayMs')==2000:out['distributionInspection']['propagationDelayMs']=2000
     validation=value.get('snapshotValidation')
     if isinstance(validation,dict):
-        allowed={'phase':{'inventory','batch','verify'},'code':{'inventory_not_array','inventory_limit','inventory_invalid_ids','inventory_envelope','inventory_sdk_mismatch','batch_invalid_fixture','batch_id_mismatch','inventory_changed'},'attribution':{'local_bound','provider_contract','sdk_or_adapter','inventory_changed','not_proven'}}
+        allowed={'phase':{'inventory','batch','verify'},'code':{'inventory_not_array','inventory_limit','inventory_invalid_ids','inventory_envelope','inventory_sdk_mismatch','batch_invalid_fixture','batch_id_mismatch','inventory_changed','full_document_invalid'},'attribution':{'local_bound','provider_contract','sdk_or_adapter','inventory_changed','not_proven'}}
         v={k:x for k,x in validation.items() if k in allowed and isinstance(x,str) and x in allowed[k]}
         for k in ('rawCount','sdkCount','invalidCount','requested','received','missing','unexpected'):
             if type(validation.get(k)) is int and 0<=validation[k]<=1000000:v[k]=validation[k]
         if isinstance(validation.get('itemTypes'),dict):v['itemTypes']={k:x for k,x in validation['itemTypes'].items() if k in {'number','string','object','null','array','boolean','other'} and type(x) is int and 0<=x<=1000000}
+        if validation.get('detail') in {'invalid_json','token_size_limit','truncated_string','truncated_json','item_size_limit','root_not_object','invalid_root_key','duplicate_or_invalid_root_key','invalid_root_colon','body_not_array','invalid_body_separator','invalid_root_separator','trailing_comma','trailing_json','invalid_header_or_application_error','header_status_rejected','row_not_object','invalid_fixture','invalid_markets_shape','invalid_timestamp','sdk_row_mismatch','disk_headroom','duplicate_or_excess_fixture','invalid_endpoint','unsupported_content_encoding','nesting_limit'}:v['detail']=validation['detail']
         out['snapshotValidation']=v
     # Match only our exact historical constants, never echo arbitrary message text.
     legacy={'Inventario de suscripciones inválido o superior al límite local; no se usa la proyección como inventario.':'inventory_validation_after_http_success',
@@ -325,6 +326,9 @@ def cutover_status(directory,start_requested):
     for lane in ('prematch','inplay'):
         source=feed.get('connections',{}).get(lane,{})
         lanes[lane]={k:source.get(k) for k in fields}
+        progress=source.get('consumerProgress') or {};full=source.get('fullSnapshot') or {}
+        lanes[lane]['consumerProgress']={k:v for k,v in progress.items() if k=='acknowledgedMessages' and type(v) is int and 0<=v<=10**12 or k=='lastAckAt' and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
+        lanes[lane]['fullSnapshot']={k:v for k,v in full.items() if k=='method' and v=='disk_spool_two_pass' or k in ('rows','bytes','ackedDuringRecovery') and type(v) is int and 0<=v<=2**40 or k in ('startedAt','completedAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
         lanes[lane]['distributionObservations']=[safe_distribution_observation(o) for o in source.get('distributionObservations',[])[-3:] if isinstance(o,dict)]
         lane_coverage=feed.get('coverage',{}).get(lane,{}) or {}
         coverage=lane_coverage.get('activity',{})
@@ -334,10 +338,17 @@ def cutover_status(directory,start_requested):
             lanes[lane][key]=safe_feed_diagnostic(source.get(key))
         lanes[lane]['sessionEnds']=[{'endedAt':entry.get('endedAt'),'startedAt':entry.get('startedAt'),'diagnostic':safe_feed_diagnostic(entry.get('diagnostic'))} for entry in source.get('sessionEnds',[])[-8:] if isinstance(entry,dict)]
     events=feed.get('events',[]);selectable=0;markets=0;prices=0;reasons={}
+    per_lane={lane:{'events':0,'markets':0,'pricedSelections':0,'selectableSelections':0} for lane in ('prematch','inplay')}
     for event in events:
+        lane=str(event.get('id') or '').split(':',1)[0];counts=per_lane.get(lane)
+        if counts is not None:counts['events']+=1
         for market in event.get('markets',[]):
             markets+=1
+            if counts is not None:counts['markets']+=1
             for selection in market.get('selections',[]):
+                if counts is not None:
+                    if type(selection.get('odds')) in (int,float) and selection['odds']>1:counts['pricedSelections']+=1
+                    if selection.get('available') is True:counts['selectableSelections']+=1
                 if type(selection.get('odds')) in (int,float) and selection['odds']>1:prices+=1
                 if selection.get('available') is True:selectable+=1
                 for reason in selection.get('unavailableReasons',[]):
@@ -348,6 +359,6 @@ def cutover_status(directory,start_requested):
     fresh=0<=time.time()-epoch(feed.get('updatedAt'))<20
     current_sessions=bool(start_requested) and all(epoch((c.get('session') or {}).get('startedAt'))>=epoch(start_requested)-5 and epoch(c.get('lastSnapshotAt'))>=epoch((c.get('session') or {}).get('startedAt')) for c in lanes.values())
     ready=fresh and current_sessions and len(consumers)==1 and consumers[0].get('running') is True and all(c.get('phase')=='connected' and (c.get('recoveryProgress') or {}).get('regularSnapshotReady') is True and c.get('lastSnapshotAt') for c in lanes.values())
-    emit(**result,status='snapshots_ready' if ready else 'recovering',updatedAt=feed.get('updatedAt'),lanes=lanes,events=len(events),markets=markets,pricedSelections=prices,selectableSelections=selectable,blockedReasons=reasons,iframeAuthenticated=False)
+    emit(**result,status='snapshots_ready' if ready else 'recovering',updatedAt=feed.get('updatedAt'),lanes=lanes,events=len(events),markets=markets,pricedSelections=prices,selectableSelections=selectable,projectionByLane=per_lane,blockedReasons=reasons,iframeAuthenticated=False)
     return 0
 if __name__=='__main__':raise SystemExit(cutover_main())

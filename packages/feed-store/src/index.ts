@@ -1,4 +1,4 @@
-import { readFile, mkdir, rename, writeFile } from "node:fs/promises";
+import { readFile, mkdir, rename, writeFile, open } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EventFeed } from "@lsports/contracts";
@@ -57,8 +57,10 @@ export function createPublisher(path = statePath()) {
     const operation = tail.then(async () => {
       await mkdir(dirname(path), { recursive: true });
       const temp = `${path}.${process.pid}.tmp`;
-      await writeFile(temp, body, { mode: 0o600 });
-      await rename(temp, path);
+      const file=await open(temp,'w',0o600);
+      try{await file.writeFile(body);await file.sync();}finally{await file.close();}
+      await rename(temp,path);
+      const directory=await open(dirname(path),'r');try{await directory.sync();}finally{await directory.close();}
     });
     tail = operation.catch(() => {});
     return operation;

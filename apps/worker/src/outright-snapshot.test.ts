@@ -62,7 +62,7 @@ test('official SDK initial outright fixture/market snapshots restore an empty in
     await session(pkg, { packages: [pkg], snapshotUrl: url, customersUrl: url, recoveryMs: 300000, staleMs: 90000 }, state,
       async () => { await publish(state.feed(), checkpoint(state)); if (state.connections.prematch.phase === 'connected') abort.abort(); },
       abort.signal, { connect: (async () => connection) as unknown as typeof amqp.connect,
-        clientFactory: () => ({ ...api, async startDistribution() {}, async catalog() { return []; } }) });
+        clientFactory: () => ({ ...api, snapshotFull:undefined, async startDistribution() {}, async stopDistribution() {}, async catalog() { return []; } }) });
     assert.deepEqual(routes, ['/Prematch/GetEvents', '/Prematch/GetOutrightFixture', '/Prematch/GetOutrightFixtureMarkets']);
     assert.equal(state.connections.prematch.outrightRecovery?.status, 'ok');
     assert.equal(state.connections.prematch.outrightRecovery?.marketRequest?.filter, 'fixtures');

@@ -1,5 +1,9 @@
 # Ticket #217525 — PreMatch filtered snapshot returns no decoded fixtures
 
+**Historical draft — the supplier has since confirmed these IDs are from2024,
+and `/Fixtures/Get` is historical. Do not resend this as an unresolved supplier
+defect. See [FULL-CURRENT-SNAPSHOT.md](FULL-CURRENT-SNAPSHOT.md).**
+
 Draft only; not sent automatically. Evidence from the user's saved report and
 screenshot collected on 2026-10-19. No new supplier calls or restarts were made
 for this investigation.

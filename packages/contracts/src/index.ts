@@ -204,7 +204,8 @@ export interface SnapshotRequestInspection {
 }
 export interface SnapshotValidationInspection {
   phase: 'inventory'|'batch'|'verify';
-  code: 'inventory_not_array'|'inventory_limit'|'inventory_invalid_ids'|'inventory_envelope'|'inventory_sdk_mismatch'|'batch_invalid_fixture'|'batch_id_mismatch'|'inventory_changed';
+  code: 'inventory_not_array'|'inventory_limit'|'inventory_invalid_ids'|'inventory_envelope'|'inventory_sdk_mismatch'|'batch_invalid_fixture'|'batch_id_mismatch'|'inventory_changed'|'full_document_invalid';
+  detail?:string;
   attribution: 'local_bound'|'provider_contract'|'sdk_or_adapter'|'inventory_changed'|'not_proven';
   rawCount?:number;sdkCount?:number;invalidCount?:number;requested?:number;received?:number;missing?:number;unexpected?:number;
   itemTypes?:Partial<Record<'number'|'string'|'object'|'null'|'array'|'boolean'|'other',number>>;
@@ -223,7 +224,7 @@ export interface IntegrationDiagnostic {
   operation:
     | "config"
     | "distribution.status"
-    | "distribution.start"
+    | "distribution.start" | "distribution.stop"
     | "snapshot.events"
     | "snapshot.outright.fixtures"
     | "snapshot.outright.markets"
@@ -374,6 +375,8 @@ export interface FeedMessageMetadata {
   warnings?: string[];
 }
 export interface ConnectionState {
+  consumerProgress?:{acknowledgedMessages:number;lastAckAt?:string};
+  fullSnapshot?:{method:'disk_spool_two_pass';startedAt:string;completedAt?:string;rows?:number;bytes?:number;ackedDuringRecovery?:number};
   distributionObservations?:DistributionObservation[];
   session?: {id:string;startedAt:string};
   sessionEnds?: {id:string;startedAt:string;endedAt:string;diagnostic:IntegrationDiagnostic}[];

@@ -150,3 +150,37 @@ test('real worker bootstrap restores before its first write and shutdown, withou
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('market-before-fixture delivery survives restart in private regular checkpoint, without exposing odds or restoring availability',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-regular-pending-')),path=join(dir,'feed.json');
+ try{const original=new TradeState();original.apply('prematch',[{fixtureId:100,markets:[{id:1,status:1,bets:[{id:'123',price:'2.8',status:1,isChanged:1}]}]}],Date.now());
+  assert.equal(original.feed().events.length,0);await createPublisher(path)(original.feed(),checkpoint(original));
+  const restarted=new TradeState();await restore(restarted,path);
+  assert.equal(restarted.rows.prematch.get(100)?.markets.get('1')?.bets?.[0].price,'2.8');assert.equal(restarted.feed().events.length,0);
+  restarted.apply('prematch',[{fixtureId:100,fixture:{status:1,sport:{name:'Football'}}}],Date.now());
+  assert.ok(restarted.feed().events[0].selections.every(s=>!s.available));
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('private regular sidecar restores an acknowledged market orphan while public JSON omits its payload; missing sidecar blocks restore',async()=>{
+ const{persistRegularCheckpoint}=await import('./persistence.js');const dir=await mkdtemp(join(tmpdir(),'adl-sidecar-')),path=join(dir,'feed.json');
+ try{const original=new TradeState();original.apply('prematch',[{fixtureId:100,markets:[{id:1,status:1,bets:[{id:'123',price:'2.8',status:1,isChanged:1}]}]}],Date.now());
+ const{regular,...saved}=checkpoint(original);await persistRegularCheckpoint(path,regular);await createPublisher(path)(original.feed(),{...saved,regularExternal:true});
+ assert.ok(!String(await readFile(path,'utf8')).includes('2.8'));
+ const restarted=new TradeState();await restore(restarted,path);assert.equal(restarted.rows.prematch.get(100)?.markets.get('1')?.bets?.[0].price,'2.8');assert.equal(restarted.feed().events.length,0);
+ await rm(path+'.regular-checkpoint.json');await assert.rejects(restore(new TradeState(),path));
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('both lanes persist concurrently through one writer; private checkpoint and lock survive clean shutdown/restart', {timeout:10000},async()=>{
+ const{runConnected}=await import('./connected.js');const dir=await mkdtemp(join(tmpdir(),'adl-two-lane-writer-')),path=join(dir,'feed.json');const abort=new AbortController();let committed=0;
+ const packages=(['prematch','inplay'] as const).map((lane,i)=>({lane,packageId:4511-i,username:'isolated',password:'',hostname:'unused',vhost:'unused',port:5672,tls:false,queue:'unused'}));
+ try{await runConnected(abort.signal,{path,ticketPath:join(dir,'tickets.sqlite'),config:{packages,snapshotUrl:'https://unused.invalid',customersUrl:'https://unused.invalid',recoveryMs:300000,staleMs:90000},session:async(pkg,_cfg,state,save)=>{
+  state.apply(pkg.lane,[{fixtureId:pkg.packageId,markets:[{id:1,status:1,bets:[{id:'123',price:'2.1',status:1,isChanged:1}]}]}],Date.now());await save();
+  const side=JSON.parse(await readFile(path+'.regular-checkpoint.json','utf8'));assert.ok(side.regular.some((r:{lane:string})=>r.lane===pkg.lane));
+  if(++committed===2)abort.abort();
+ }});
+ const restarted=new TradeState();await restore(restarted,path);assert.equal(restarted.rows.prematch.size,1);assert.equal(restarted.rows.inplay.size,1);assert.equal(committed,2);
+ await assert.rejects(readFile(path+'.lock'),(e:{code:string})=>e.code==='ENOENT');
+ }finally{abort.abort();await rm(dir,{recursive:true,force:true});}
+});

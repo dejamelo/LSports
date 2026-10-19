@@ -8,7 +8,7 @@ import { session } from "./connected.js";
 import { TradeState } from "./state.js";
 import type { PackageConfig } from "./config.js";
 import { clients } from "./provider.js";
-test("worker connects to configured queue, buffers deltas during snapshot, persists before ack and gates on shutdown", async () => {
+test("worker consumes while snapshot is pending, preserves newer deltas, persists before ack and gates on shutdown", async () => {
   const state = new TradeState();
   const abort = new AbortController();
   let onMessage: (m: ConsumeMessage | null) => void = () => {};
@@ -130,7 +130,7 @@ test("worker connects to configured queue, buffers deltas during snapshot, persi
     },
     state,
     async () => {
-      persistedOdds = state.feed().events[0]?.selections[0]?.odds || 0;
+      persistedOdds = Number(state.rows.prematch.get(100)?.markets.get('1')?.bets?.[0]?.price||0);
       if (state.connections.prematch.phase === "connected") {
         finalOdds = persistedOdds;
         abort.abort();
@@ -700,7 +700,7 @@ test("type 37 publication failure requests requeue without ACK", async () => {
       clientFactory: () => fakeClients,
     },
   ));
-  assert.equal(acks, 1);
+  assert.equal(acks, 2); // Both uncommitted deliveries in the finite batch are requeued.
 
   assert.equal(state.connections.prematch.diagnostic?.deliveryDisposition, "requeue_requested");
   assert.equal(state.feed().events.find(e => e.kind === "outright")?.participants?.[11].name, "Horse 12");
@@ -718,11 +718,29 @@ test('inventory wait processes and persists AMQP before begin(ids); rejected inv
 });
 
 
-test('distribution observations persist before propagating a failed Start without opening AMQP',async()=>{
- const{OperationError}=await import('./diagnostics.js');const state=new TradeState(),abort=new AbortController();let saved=false;
+test('consumer is installed before Start; failed activation persists observations and closes without snapshot',async()=>{
+ const{OperationError}=await import('./diagnostics.js');const state=new TradeState(),abort=new AbortController();let saved=false,consuming=false,closed=0;
  const observations=[{stage:'after_propagation' as const,observedAtUTC:'2026-10-19T14:00:03Z',bodyIsDistributionOn:false,sdkIsDistributionOn:false,elapsedSinceStartMs:2002,propagationDelayMs:2000}];
- const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'unused',port:5672,tls:false,queue:'_4511_'};
- const fake:ReturnType<typeof clients>={async snapshot(){assert.fail('Snapshot cannot run before activation');},async catalog(){return[];},async distributionStatus(){assert.fail('Unused status stub');},distributionObservations:()=>observations,async startDistribution(){throw new OperationError({operation:'distribution.start',protocol:'http',category:'invalid_response',reason:'distribution_still_off',message:'ISOLATED'});}};
- await assert.rejects(session(pkg,{packages:[pkg],snapshotUrl:'https://snapshot.invalid',customersUrl:'https://customers.invalid',recoveryMs:300000,staleMs:90000},state,async()=>{if(state.connections.prematch.distributionObservations?.length)saved=true;},abort.signal,{clientFactory:()=>fake,connect:(async()=>{assert.fail('Do not connect MQ after failed distribution activation');}) as unknown as typeof amqp.connect}),OperationError);
- assert.equal(saved,true);assert.deepEqual(state.connections.prematch.distributionObservations,observations);
+ const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'unused',queue:'unused',port:5672,tls:false};
+ const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(){consuming=true;}});
+ const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel;},async close(){closed++;connection.emit('close');}});
+ const fake:ReturnType<typeof clients>={async snapshot(){assert.fail('Snapshot cannot run after failed activation');},async catalog(){return[];},async distributionStatus(){assert.fail('Unused stub');},distributionObservations:()=>observations,async startDistribution(){assert.equal(consuming,true);throw new OperationError({operation:'distribution.start',protocol:'http',category:'invalid_response',reason:'distribution_still_off',message:'ISOLATED'});}};
+ await assert.rejects(session(pkg,{packages:[pkg],snapshotUrl:'https://snapshot.invalid',customersUrl:'https://customers.invalid',recoveryMs:300000,staleMs:90000},state,async()=>{if(state.connections.prematch.distributionObservations?.length)saved=true;},abort.signal,{clientFactory:()=>fake,connect:(async()=>connection) as unknown as typeof amqp.connect}),OperationError);
+ assert.equal(saved,true);assert.equal(closed,1);assert.deepEqual(state.connections.prematch.distributionObservations,observations);
+});
+
+test('full recovery consumes 100 deltas before snapshot completes, commits once before ACK and stops distribution before closing',{timeout:15000},async()=>{
+ const state=new TradeState(),abort=new AbortController();let deliver:(m:ConsumeMessage)=>void=()=>{};let acks=0,persisted=0,messageWrites=0,stopped=false;
+ let resolveAck:()=>void=()=>{};const allAcked=new Promise<void>(r=>resolveAck=r);
+ const channel=Object.assign(new EventEmitter(),{async prefetch(n:number){assert.equal(n,100);},async consume(_q:string,cb:typeof deliver){deliver=cb;},ack(){assert.equal(persisted,100);assert.equal(stopped,false);if(++acks===100)resolveAck();},nack(){assert.fail('Valid updates must not be dropped');}});
+ const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel;},async close(){assert.equal(stopped,true);connection.emit('close');}});
+ const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',port:5672,tls:false,queue:'_4511_'};
+ const fake:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){assert.equal(acks,100);stopped=true;},async distributionStatus(){return{isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async snapshot(){assert.fail('Must use unfiltered spooled snapshot');},async catalog(){return[];},async snapshotFull(sink){
+  for(let i=0;i<100;i++)deliver({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'live-'+i,ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'123',Price:'2.8',Status:1}]}]}]}})),properties:{headers:{}},fields:{redelivered:false}} as ConsumeMessage);
+  await allAcked;assert.equal(state.connections.prematch.recoveryProgress?.regularSnapshotReady,false);assert.equal(state.connections.prematch.phase,'recovering');assert.ok(messageWrites<=3);
+  await sink.apply({fixtureId:1,fixture:{status:1,sport:{name:'Football'}},markets:[{id:1,status:1,bets:[{id:'123',price:'2.1',status:1,isChanged:1}]}]},Date.now()-10000);
+  return{ids:new Set([1]),rows:1,bytes:100};
+ }};
+ await session(pkg,{packages:[pkg],snapshotUrl:'https://snapshot.invalid',customersUrl:'https://customers.invalid',recoveryMs:300000,staleMs:90000},state,async()=>{persisted=state.feed().coverage?.prematch.messages??0;if(persisted)messageWrites++;if(state.connections.prematch.phase==='connected')abort.abort();},abort.signal,{clientFactory:()=>fake,connect:(async()=>connection) as unknown as typeof amqp.connect});
+ assert.equal(acks,100);assert.equal(stopped,true);assert.equal(state.feed().events[0].markets?.[0].selections[0].odds,2.8);
 });

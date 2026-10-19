@@ -1,3 +1,4 @@
+import {validateFullRecovery} from './full-recovery-validation.mjs';
 // Authorized protected recovery + resumable migration. No credentials are copied or printed.
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -36,7 +37,7 @@ async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFi
 export async function run(args){
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--snapshot-validation-report','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--snapshot-validation-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
@@ -59,10 +60,10 @@ export async function run(args){
   stage='remote_consumer_gate';const pre=await remote('preflight');
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!(args[4]==='--repair-snapshot'?['2147483648','4294967296']:['4294967296']).includes(String(pre.workerModel?.memoryLimitBytes))||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
-  if(['--validate-only','--repair-snapshot','--snapshot-report','--snapshot-validation-report','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
+  if(['--validate-only','--repair-snapshot','--snapshot-report','--snapshot-validation-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
    stage='validation_resume_gate';
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
-   if(!['--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
+   if(!['--partitioned-recovery','--inventory-repair','--distribution-repair','--full-recovery'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
    const mac=rows.find(r=>r.operation==='cutover.audit');if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
@@ -88,10 +89,12 @@ export async function run(args){
     }
     ledger.steps.snapshot_capacity_repair={status:'ok',at:new Date().toISOString(),result};await save();
    }
-   if(['--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
+   if(['--partitioned-recovery','--inventory-repair','--distribution-repair','--full-recovery'].includes(args[4])){
     stage='partitioned_upgrade';
-    const distributionMode=args[4]==='--distribution-repair';
-    if(!distributionMode){
+    const distributionMode=args[4]==='--distribution-repair',fullMode=args[4]==='--full-recovery';
+    if(fullMode){
+     if(ledger.steps.distribution_upgrade?.status!=='ok')throw Error('FULL_RECOVERY_REQUIRES_COMPLETED_DISTRIBUTION_UPGRADE');
+    }else if(!distributionMode){
      const report=await protectedJson(path.join(folder,`snapshot-volume-${pid}-${parent}.json`));
      if(report.report?.decisions?.prematch!=='bounded_partitioned_recovery_required_no_cap_increase'||!report.report.rows?.some(row=>row.lane==='prematch'&&row.classification==='current_limit_exceeded'&&row.httpStatus===200&&row.attemptLimitBytes===268435456))throw Error('SAVED_VOLUME_DIAGNOSIS_NOT_CONFIRMED');
     }else{
@@ -107,18 +110,20 @@ export async function run(args){
      const evidence={capturedAt:new Date().toISOString(),previous,current,readOnly:true,providerRequests:0};ledger.inventoryRepairEvidence??=evidence;ledger.inventoryRepairLatestEvidence=evidence;await save();
      emit({stage:'inventory_evidence',status:'saved',providerRequests:0,progressFile:progress,workerRestarted:false});
     }
-    const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts'].map(name=>'apps/worker/src/'+name);names.push('packages/contracts/src/index.ts');
+    const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts'].map(name=>'apps/worker/src/'+name);names.push('packages/contracts/src/index.ts','packages/feed-store/src/index.ts');
     const {createHash}=await import('node:crypto'),files={},baseHashes={};
-    const baseRef=distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
+    const baseRef=fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
     for(const name of names){files[name]=await command('git',['show','HEAD:'+name],undefined,10000,true);baseHashes[name]=existing.includes(name)?createHash('sha256').update(await command('git',['show',baseRef+':'+name],undefined,10000,true)).digest('hex'):null;}
-    const repairOptions=distributionMode?{fixCommit:'2aa06f7'}:{};
+    const repairOptions=fullMode?{fullRecovery:true}:distributionMode?{fixCommit:'2aa06f7'}:{};
     const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
+    if(fullMode&&prepared.offlineFullRecoveryVerified!==true)throw Error('FULL_RECOVERY_OFFLINE_UNVERIFIED');
     if(distributionMode&&prepared.offlinePropagationVerified!==true)throw Error('DISTRIBUTION_PROPAGATION_TEST_UNVERIFIED');
-    ledger.steps[distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
+    ledger.steps[fullMode?'full_image':distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
     const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);const fresh=freshRows.find(r=>r.operation==='cutover.audit');
     if(fresh?.status!=='ok'||fresh.matchingWorkerProcesses!==0||fresh.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});
-    ledger.steps[distributionMode?'distribution_upgrade':'partitioned_upgrade']={status:'ok',at:new Date().toISOString(),result:activated};await save();
+    ledger.steps[fullMode?'full_upgrade':distributionMode?'distribution_upgrade':'partitioned_upgrade']={status:'ok',at:new Date().toISOString(),result:activated};await save();
+    if(fullMode){stage='full_feed_validation';await validateFullRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress);return;}
     if(distributionMode){stage='distribution_validation';await validateDistribution((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,path.join(folder,`support-217525-post-2aa06f7-${pid}-${parent}.md`));return;}
     stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress,45*60000,args[4]==='--inventory-repair');return;
    }

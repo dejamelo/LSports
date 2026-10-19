@@ -142,3 +142,9 @@ sem reinício/implantação automática.
 Aplicação autorizada da correção de distribuição, com status bruto e rascunho
 pós-correção: [APPLY-DISTRIBUTION-2aa06f7.md](APPLY-DISTRIBUTION-2aa06f7.md)
 (`--distribution-repair`, somente worker; retomável).
+
+## Recuperação atual confirmada no ticket #217525
+
+O inventário histórico `/Fixtures/Get` foi substituído no worker pela recuperação
+do snapshot completo sem filtro, com spool privado limitado e consumo AMQP
+contínuo. Procedimento e comando único: [FULL-CURRENT-SNAPSHOT.md](FULL-CURRENT-SNAPSHOT.md).

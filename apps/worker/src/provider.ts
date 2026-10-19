@@ -1,3 +1,6 @@
+import {fullSnapshot} from './full-snapshot.js';
+import {dirname} from 'node:path';
+import {statePath} from '@lsports/feed-store';
 import {partitionedSnapshot,subscriptionInventory,type PartitionSink} from './partitioned-snapshot.js';
 import {snapshotEvidence} from "./snapshot-evidence.js";
 import {normalizeSdkTimestamps,attachTimestampPrecision} from './timestamp-contract.js';
@@ -26,6 +29,7 @@ import {
   GetInPlayEventRequestDto,
   StatusResponseBody,
   StartResponseBody,
+  StopResponseBody,
   StartMessage,
   DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS,
   GetSubscriptionsRequestDto,
@@ -63,6 +67,8 @@ export interface ProviderClients {
     messagesPerSecond: number;
   }>;
   startDistribution(): Promise<void>;
+  stopDistribution?(): Promise<void>;
+  snapshotFull?:(sink:{assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal})=>Promise<{ids:Set<number>;rows:number;bytes:number}>;
   snapshotAudit?: () => SnapshotAudit | undefined;
   outrightResponseInspections?: () => NonNullable<import("@lsports/contracts").ConnectionState["outrightRecovery"]>["responseInspections"];
   subscriptions?: () => Promise<{ fixtures: number }>;
@@ -254,6 +260,28 @@ export function clients(
         return result;
       },
     }:{}),
+    ...(config.lane==='prematch'?{async snapshotFull(sink:{assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal}){
+      const result=await scheduler.run('snapshot.events',()=>operation('snapshot.events','http',()=>fullSnapshot({url:urls.snapshotUrl,credentials,directory:dirname(statePath()),...sink})));
+      audit={transport:{receivedBytes:result.bytes,responseLimitBytes:2147483648,timeoutMs:120000},bodyShape:'array',providerRows:result.rows,sdkRows:result.rows,acceptedRows:result.rows,filters:'none'};
+      console.info(JSON.stringify({lane:config.lane,operation:'snapshot.events',status:'full_spool_complete',rows:result.rows,decodedBytes:result.bytes,startedAt:result.startedAt,completedAt:result.completedAt}));
+      return result;
+    }}:{}),
+    async stopDistribution(){
+      const stopStatus=()=>operation('distribution.status','http',async()=>{
+        const status=await distribution.getDistributionStatus(StatusResponseBody);
+        const raw=(snapshotResponsePayload() as {Body?:{IsDistributionOn?:unknown}}|undefined)?.Body?.IsDistributionOn;
+        if(typeof raw!=='boolean'||raw!==status?.isDistributionOn)throw new Error('Distribution Stop status not a verified boolean');
+        return status;
+      });
+      let status=await stopStatus();
+      if(status?.isDistributionOn!==false){
+        await operation('distribution.stop','http',()=>distribution.stopDistribution(StopResponseBody));
+        await new Promise(resolve=>setTimeout(resolve,DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS));
+        status=await stopStatus();
+      }
+      if(status?.isDistributionOn!==false)throw new Error('Distribution Stop not confirmed');
+      console.info(JSON.stringify({lane:config.lane,operation:'distribution.stop',status:'ok',bodyIsDistributionOn:false}));
+    },
     async snapshot(): Promise<TradeEvent[]> {
       return snapshotRequest("snapshot.events", async () => {
         const response =

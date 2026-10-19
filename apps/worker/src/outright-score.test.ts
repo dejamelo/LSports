@@ -55,7 +55,7 @@ test('redelivered 39 is stored before ACK; consumer resumes snapshot recovery an
  let callback: (m:ConsumeMessage|null)=>void=()=>{};let acks=0;let connected=false;let persistedScore=false;
  const scoreMessage={content:wire(),properties:{contentEncoding:'gzip'},fields:{redelivered:true}} as ConsumeMessage;
  const footballMessage={content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'next-football',ServerTimestamp:at+200},Body:{Events:[{FixtureId:900777,Markets:[{Id:1,Status:1,Bets:[{Id:'900778',Price:'2.10',Status:1}]}]}]}})),properties:{},fields:{redelivered:false}} as ConsumeMessage;
- const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(queue:string,cb:typeof callback){assert.equal(queue,'_4511_');callback=cb;return {consumerTag:'existing-test-queue'};},ack(msg:ConsumeMessage){assert(persistedScore);if(msg===footballMessage)assert.equal(state.feed().events.find(e=>e.id==='prematch:900777')?.selections[0].odds,2.1);acks++;},nack(){assert.fail('Valid score must not be discarded/requeued');}});
+ const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(queue:string,cb:typeof callback){assert.equal(queue,'_4511_');callback=cb;return {consumerTag:'existing-test-queue'};},ack(msg:ConsumeMessage){assert(persistedScore);if(msg===footballMessage)assert.equal(Number(state.rows.prematch.get(900777)?.markets.get('1')?.bets?.[0].price),2.1);acks++;},nack(){assert.fail('Valid score must not be discarded/requeued');}});
  const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel;},async close(){connection.emit('close');}});
  const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'synthetic-user',password:'',hostname:'unused',vhost:'StmPreMatch',queue:'_4511_',port:5672,tls:false};
  try{
@@ -63,7 +63,7 @@ test('redelivered 39 is stored before ACK; consumer resumes snapshot recovery an
    await publish(state.feed(),checkpoint(state));persistedScore=!!JSON.parse(await readFile(path,'utf8')).workerCheckpoint.outright.find((r:{fixtureId:number})=>r.fixtureId===fixtureId)?.outrightScore;
    if(state.connections.prematch.phase==='connected'){connected=true;assert.equal(acks,3);abort.abort();}
   },abort.signal,{connect:(async()=>connection) as unknown as typeof amqp.connect,clientFactory:()=>({async startDistribution(){},async distributionStatus(){return {isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async catalog(){return [];},async snapshot(){callback(scoreMessage);callback(scoreMessage);callback(footballMessage);return [{fixtureId:900777,fixture:{sport:{name:'Football'},status:1}}];}})});
-  assert(connected);assert.equal(acks,3);const restored=new TradeState();await restore(restored,path);assert.equal(restored.feed().events.find(e=>e.kind==='outright')?.outrightScore?.status,3);
+  assert(connected);assert.equal(state.feed().events.find(e=>e.id==='prematch:900777')?.selections[0].odds,2.1);assert.equal(acks,3);const restored=new TradeState();await restore(restored,path);assert.equal(restored.feed().events.find(e=>e.kind==='outright')?.outrightScore?.status,3);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('score persistence failure never ACKs the message and requests requeue', {timeout:10000},async()=>{

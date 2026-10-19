@@ -313,8 +313,8 @@ export class TradeState {
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
     for(const row of this.rows[lane].values())if(!row.outright){row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
   }
-  finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit){
-    this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&ids.has(id)));
+  finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
+    this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));
     this.metrics[lane].snapshot=audit;
     this.set(lane,{lastSnapshotAt:new Date().toISOString(),snapshotEvents:ids.size});
   }

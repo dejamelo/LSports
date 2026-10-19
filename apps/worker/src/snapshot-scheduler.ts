@@ -5,8 +5,8 @@ import { statePath } from '@lsports/feed-store';
 import { OperationError, describeFailure } from './diagnostics.js';
 import type { Operation } from './diagnostics.js';
 interface Schedule { requests?: Record<string, NonNullable<import('@lsports/contracts').IntegrationDiagnostic['coordinator']>>; lastRequest?: NonNullable<import('@lsports/contracts').IntegrationDiagnostic['coordinator']>; nextAt: number; failures: Record<string, number>; due: Record<string, number> }
-// Local policy, not a claimed supplier quota: serialize host requests, space by 5s,
-// refresh each operation at most every 5min; back off 60s..30min + positive jitter.
+// Ticket217525: full snapshots >=15s, filtered >=1s. Conservative production policy:
+// serialize ALL snapshot operations at >=15s, retain 5min refresh and 60s..30min backoff.
 export class SnapshotScheduler {
   private path: string;
   constructor(host: string, private packageId: number, private options: {
@@ -49,7 +49,7 @@ export class SnapshotScheduler {
         } finally { await recovery.close(); await rm(`${lockPath}.reclaim`, { force: true }); }
         return this.run(name, action, continuation);
       }
-      return this.defer(name, this.now() + (this.options.spacingMs ?? 5000));
+      return this.defer(name, this.now() + (this.options.spacingMs ?? 15000));
     }
     try {
       await lock.writeFile(String(process.pid)); await lock.close();
@@ -64,8 +64,10 @@ export class SnapshotScheduler {
       const key = `${this.packageId}:${name}`;
       const previous=schedule.requests?.[key];
       const ownSuccess=!!continuation&&previous?.recoveryId===continuation.recoveryId&&previous.outcome==='success'&&previous.partitionPart!==undefined&&continuation.part===previous.partitionPart+1;
-      const due = Math.max(schedule.nextAt, ownSuccess?0:schedule.due[key] || 0);
-      if (due > this.now()) return this.defer(name, due, !ownSuccess && (schedule.due[key] || 0) >= schedule.nextAt ? "local_operation_cooldown" : "local_host_cooldown", !ownSuccess && (schedule.due[key] || 0) >= schedule.nextAt ? schedule.requests?.[key] || schedule.lastRequest : schedule.lastRequest);
+      const previousAt=Date.parse(schedule.lastRequest?.at||schedule.lastRequest?.completedAt||'');
+      const hostDue=Math.max(schedule.nextAt,Number.isFinite(previousAt)?previousAt+(this.options.spacingMs??15000):0);
+      const due = Math.max(hostDue, ownSuccess?0:schedule.due[key] || 0);
+      if (due > this.now()) return this.defer(name, due, !ownSuccess && (schedule.due[key] || 0) >= hostDue ? "local_operation_cooldown" : "local_host_cooldown", !ownSuccess && (schedule.due[key] || 0) >= hostDue ? schedule.requests?.[key] || schedule.lastRequest : schedule.lastRequest);
       const save = async () => {
         const temp = `${this.path}.${process.pid}.tmp`;
         await writeFile(temp, JSON.stringify(schedule), { mode: 0o600 }); await rename(temp, this.path);
@@ -73,7 +75,7 @@ export class SnapshotScheduler {
       // Persist reservation before the request, including process-crash recovery.
       schedule.lastRequest = {packageId:this.packageId, operation:name, pid:process.pid, at:new Date(this.now()).toISOString(), outcome:"reserved",...(continuation?{recoveryId:continuation.recoveryId,partitionPart:continuation.part}:{})};
       (schedule.requests ||= {})[key] = schedule.lastRequest;
-      schedule.nextAt = this.now() + (this.options.spacingMs ?? 5000);
+      schedule.nextAt = this.now() + (this.options.spacingMs ?? 15000);
       schedule.due[key] = this.now() + (this.options.refreshMs ?? 300000);
       await save();
       try {
@@ -81,7 +83,7 @@ export class SnapshotScheduler {
         schedule.failures[key] = 0;
         schedule.lastRequest!.outcome = "success";
         schedule.lastRequest!.completedAt = new Date(this.now()).toISOString();
-        schedule.nextAt = this.now() + (this.options.spacingMs ?? 5000);
+        schedule.nextAt = this.now() + (this.options.spacingMs ?? 15000);
         await save();
         return result;
       } catch (error) {
@@ -92,11 +94,11 @@ export class SnapshotScheduler {
           schedule.lastRequest!.completedAt = new Date(this.now()).toISOString();
           const base = Math.min(1800000, 60000 * 2 ** Math.min(attempts - 1, 5));
           const wait = error.diagnostic.retryAfterMs ?? Math.ceil(base * (1 + (this.options.random?.() ?? Math.random()) * .1));
-          const retryAt = this.now() + Math.max(1000, this.options.spacingMs ?? 5000, wait);
+          const retryAt = this.now() + Math.max(1000, this.options.spacingMs ?? 15000, wait);
           schedule.nextAt = retryAt;
           schedule.due[key] = retryAt;
           await save();
-          throw new OperationError({ ...error.diagnostic, deferred: false, requesterPid:process.pid, rateLimitSource: "supplier_http", coordinator: schedule.lastRequest, retryAfterMs: Math.max(1000, this.options.spacingMs ?? 5000, wait),
+          throw new OperationError({ ...error.diagnostic, deferred: false, requesterPid:process.pid, rateLimitSource: "supplier_http", coordinator: schedule.lastRequest, retryAfterMs: Math.max(1000, this.options.spacingMs ?? 15000, wait),
             retryAt: new Date(retryAt).toISOString(), attempts });
         }
         // A completed failure must not keep masquerading as an in-flight reservation.

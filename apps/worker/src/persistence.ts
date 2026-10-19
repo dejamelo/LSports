@@ -1,6 +1,8 @@
 import { validTrace, validMarketEvidence } from "./settlement-evidence.js";
 import { constants } from 'node:fs';
-import { copyFile, readFile } from 'node:fs/promises';
+import { copyFile, readFile, open, rename, mkdir, lstat } from 'node:fs/promises';
+import {getHeapStatistics} from 'node:v8';
+import {dirname} from 'node:path';
 import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
 import { TradeState, type Row } from './state.js';
@@ -9,7 +11,11 @@ const validId = (n: unknown): n is number => Number.isSafeInteger(n) && Number(n
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const tuples = (v: unknown): v is [string, unknown][] => Array.isArray(v) && v.every(e => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string');
 export function checkpoint(state: TradeState) {
-  return { version: 1, outright: (['prematch', 'inplay'] as const).flatMap(lane =>
+  const regular=(['prematch','inplay'] as const).flatMap(lane=>[...state.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({
+    lane,fixtureId:Number(key),fixture:row.fixture,livescore:row.livescore,
+    markets:[...row.markets],marketAt:[...row.marketAt],betAt:[...row.betAt],betOrder:row.betOrder?[...row.betOrder]:undefined,
+  })));
+  return { version: 1, regular, outright: (['prematch', 'inplay'] as const).flatMap(lane =>
     [...state.rows[lane]].filter(([, row]) => row.outright).map(([key, row]) => ({
       lane, fixtureId: Number(String(key).split(':').at(-1)),
       fixture: row.fixture, outright: row.outright, livescore: row.livescore, outrightScore: row.outrightScore, marketReceipt: row.marketReceipt,
@@ -20,6 +26,14 @@ export function checkpoint(state: TradeState) {
       betOrder: row.betOrder ? [...row.betOrder] : undefined,
       markets: [...row.markets], marketAt: [...row.marketAt], betAt: [...row.betAt],
     }))) };
+}
+
+// Stable private sidecar may be ahead of the public feed after a crash; replay remains
+// idempotent and restored prices remain blocked. ACK is sent only after BOTH writes.
+export async function persistRegularCheckpoint(path:string,regular:ReturnType<typeof checkpoint>['regular']){
+  await mkdir(dirname(path),{recursive:true});const target=path+'.regular-checkpoint.json',temp=target+'.'+process.pid+'.tmp';
+  const file=await open(temp,'w',0o600);try{await file.writeFile(JSON.stringify({version:1,regular}));await file.sync();}finally{await file.close();}
+  await rename(temp,target);const directory=await open(dirname(path),'r');try{await directory.sync();}finally{await directory.close();}
 }
 
 // Read directly: API freshness protection must not prevent recovery after downtime.
@@ -38,9 +52,19 @@ export async function restore(state: TradeState, path: string) {
     const saved = value.workerCheckpoint;
     if (!object(saved) || saved.version !== 1 || !Array.isArray(saved.outright))
       throw new Error('Unsupported TRADE checkpoint; original file preserved');
-    for (const entry of saved.outright) {
+    if(saved.regularExternal===true){
+      const sidePath=path+'.regular-checkpoint.json',info=await lstat(sidePath);
+      const headroom=Math.min(getHeapStatistics().heap_size_limit-process.memoryUsage().heapUsed,process.availableMemory?.()??Infinity);
+      if(!info.isFile()||info.isSymbolicLink()||info.size>2*1024**3||headroom<info.size*6+64*1024**2)throw new Error('Private regular checkpoint memory/identity guard; original preserved');
+      const side=JSON.parse(await readFile(sidePath,'utf8'));
+      if(!object(side)||side.version!==1||!Array.isArray(side.regular))throw new Error('Invalid private regular checkpoint; original preserved');
+      saved.regular=side.regular;
+    }else if(saved.regularExternal!==undefined)throw new Error('Invalid private checkpoint reference');
+    if(saved.regular!==undefined&&!Array.isArray(saved.regular))throw new Error('Invalid regular checkpoint');
+    const entries=[...saved.outright.map(entry=>({entry,regular:false})),...(Array.isArray(saved.regular)?saved.regular.map(entry=>({entry,regular:true})):[])];
+    for (const {entry,regular} of entries) {
       if (!object(entry) || !['prematch', 'inplay'].includes(String(entry.lane)) || !validId(entry.fixtureId) ||
-          !object(entry.outright) || !validId(entry.outright.competitionId) ||
+          (!regular&&(!object(entry.outright)||!validId(entry.outright.competitionId))) || (regular&&entry.outright!==undefined) ||
           !tuples(entry.markets) || !tuples(entry.marketAt) || !tuples(entry.betAt) ||
           entry.markets.some(([, m]) => !object(m) || !validId(m.id) || (m.bets !== undefined && !Array.isArray(m.bets))) ||
           [...entry.marketAt, ...entry.betAt].some(([, t]) => typeof t !== 'number' || !Number.isFinite(t)) ||
@@ -70,7 +94,7 @@ export async function restore(state: TradeState, path: string) {
         throw new Error('Invalid saved market counters; original file preserved');
       if(entry.betOrder !== undefined && (!tuples(entry.betOrder) || entry.betOrder.some(([,v])=>typeof v!=='string'||!/^[-]?[0-9]{1,25}$/.test(v))))throw new Error('Invalid precise timestamp ordering; original preserved');
       const lane = entry.lane as Lane;
-      const key = `outright:${entry.outright.competitionId}:${entry.fixtureId}`;
+      const key = regular?entry.fixtureId:`outright:${(entry.outright as Record<string,unknown>).competitionId}:${entry.fixtureId}`;
       if (recovered.rows[lane].has(key)) throw new Error('Duplicate outright checkpoint identity');
       recovered.rows[lane].set(key, {
         deferredTimestampBets: entry.deferredTimestampBets === undefined ? undefined : new Map(entry.deferredTimestampBets as [string, unknown][]) as Row["deferredTimestampBets"],

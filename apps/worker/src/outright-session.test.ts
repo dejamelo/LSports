@@ -76,7 +76,7 @@ for (const scenario of ['ok', 'persist_failure', 'malformed', 'unknown'] as cons
     } else {
       await assert.rejects(execution);
       assert.equal(acks, 0);
-      assert.equal(nacks, 1);
+      assert.equal(nacks, scenario==='persist_failure'?2:1); // Entire uncommitted finite batch is requeued on write failure.
       assert.equal(state.connections.prematch.diagnostic?.deliveryDisposition, 'requeue_requested');
       assert(!JSON.stringify(state.connections).includes('private malformed market'));
     }

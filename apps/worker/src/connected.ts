@@ -20,7 +20,7 @@ import {
   formatDiagnostic,
   OperationError,
 } from "./diagnostics.js";
-import { checkpoint, restore } from "./persistence.js";
+import { checkpoint, restore, persistRegularCheckpoint } from "./persistence.js";
 import { connectMq } from "./mq.js";
 
 // Retain the first terminal cause, even when close/cleanup and retry replace phase/diagnostic.
@@ -66,13 +66,18 @@ export async function runConnected(signal: AbortSignal, dependencies: {
       tenantTickets = new TenantTickets(platform);
     }
     const publish = createPublisher(path);
-    const save = () =>
-      operation("file.persist", "local", async () => {
+    let saveTail:Promise<void>=Promise.resolve();
+    const save = () => {
+      const pending=saveTail.then(()=>operation("file.persist", "local", async () => {
         const feed = state.feed();
         tenantTickets?.reconcile(feed);
       ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
-        await publish(feed, checkpoint(state));
-      });
+        const {regular,...saved}=checkpoint(state);
+        await persistRegularCheckpoint(path,regular);
+        await publish(feed,{...saved,regularExternal:true});
+      }));
+      saveTail=pending.catch(()=>{});return pending;
+    };
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
     const heartbeat = setInterval(() => {
@@ -187,6 +192,7 @@ export async function session(
 ) {
   const lane = pkg.lane;
   state.set(lane, {
+    consumerProgress:{acknowledgedMessages:0},fullSnapshot:undefined,
     phase: "recovering",
     session:{id:randomUUID(),startedAt:new Date().toISOString()},
     recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady:false},
@@ -195,20 +201,16 @@ export async function session(
   });
   await save();
   const api = dependencies.clientFactory(pkg, config);
-  try{await api.startDistribution();}finally{
-    const observations=api.distributionObservations?.();
-    if(observations){state.set(lane,{distributionObservations:observations});await save();}
-  }
-  await delay(2000, undefined, { signal });
-  if (signal.aborted) return;
+  if(signal.aborted)return;
   const connection = await connectMq(pkg, dependencies.connect);
+  const transportAbort=new AbortController();
   let failure: unknown;
   let closed = false;
   const closeConnection = connectionCloser(connection);
   const fail = (error: unknown) => {
     if (closed) return;
     failure = error;
-    closed = true;
+    closed = true;transportAbort.abort();
     const diagnostic = describeFailure(error, "amqp.connection", "amqp");
     recordSessionEnd(state,lane,diagnostic);
     state.set(lane, {
@@ -227,11 +229,15 @@ export async function session(
     const diagnostic=cause instanceof Error?describeFailure(cause,"amqp.connection","amqp"):undefined;
     fail(diagnostic?new OperationError({...diagnostic,...(!diagnostic.reason||diagnostic.reason==="unknown_exception"?{reason:"connection_closed" as const}:{})}):transportEnd("connection_closed"));
   });
-  const abort = () => fail(transportEnd("worker_stopped"));
+  let plannedStop:Promise<void>|undefined;
+  const abort = () => {if(plannedStop)return;plannedStop=(async()=>{
+    if(api.stopDistribution)await api.stopDistribution();
+    fail(transportEnd("worker_stopped"));
+  })();void plannedStop.catch(error=>console.error(JSON.stringify({lane,status:'failed',...describeFailure(error,'distribution.stop','http')})));};
   signal.addEventListener("abort", abort, { once: true });
   let processing = Promise.resolve();
   let buffered: ConsumeMessage[] = [];
-  let bufferingForSnapshot = true;
+  let bufferingForSnapshot = false;
   let lastReceived = Date.now();
   const seen = new Set<string>();
   const reportedShapes = new Set<string>();
@@ -248,7 +254,10 @@ export async function session(
     // Give that event its turn so a generic channel closure cannot hide broker codes.
     channel.on("close", () => queueMicrotask(() => fail(transportEnd("channel_closed"))));
     await operation("amqp.prefetch", "amqp", () => channel.prefetch(100));
-    const processMessage = async (msg: ConsumeMessage) => {
+    let acknowledgedMessages=0;
+    const ackDelivery=(msg:ConsumeMessage)=>{channel.ack(msg);state.set(lane,{consumerProgress:{acknowledgedMessages:++acknowledgedMessages,lastAckAt:new Date().toISOString()}});};
+    const pendingAcks:ConsumeMessage[]=[];const pendingMetadata=new Map<ConsumeMessage,FeedMessageMetadata>();
+    const processMessage = async (msg: ConsumeMessage,commit=true) => {
       if (closed) return;
       let messageMetadata: FeedMessageMetadata | undefined;
       try {
@@ -282,7 +291,7 @@ export async function session(
             diagnostic,
           });
           await save();
-          await operation("amqp.ack", "amqp", async () => channel.ack(msg));
+          await operation("amqp.ack", "amqp", async () => ackDelivery(msg));
           console.warn(
             JSON.stringify({
               lane,
@@ -301,10 +310,10 @@ export async function session(
         state.set(lane, {
           lastMessageAt: new Date(lastReceived).toISOString(),
         });
-        await save();
+        if(commit)await save();
         seen.add(decoded.guid);
         if (seen.size > 10000) seen.delete(seen.values().next().value!);
-        await operation("amqp.ack", "amqp", async () => channel.ack(msg));
+        if(commit)await operation("amqp.ack", "amqp", async () => ackDelivery(msg));else {pendingAcks.push(msg);pendingMetadata.set(msg,decoded.metadata);}
         const shape = JSON.stringify([
           decoded.type,
           decoded.metadata.compression,
@@ -339,6 +348,15 @@ export async function session(
         fail(new OperationError({ ...diagnostic, deliveryDisposition }));
       }
     };
+    let drainScheduled=false;
+    const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;
+      processing=processing.then(async()=>{
+        drainScheduled=false;const messages=buffered.splice(0,100);
+        for(const msg of messages){await processMessage(msg,false);if(closed)break;}
+        if(!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}
+        if(buffered.length&&!closed)scheduleDrain();
+      }).catch(error=>{const metadata=pendingMetadata.values().next().value;for(const msg of pendingAcks){try{channel.nack(msg,false,true);}catch{}}pendingAcks.length=0;pendingMetadata.clear();fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'requeue_requested'}));});
+    };
     await operation("amqp.consume", "amqp", () =>
       channel.consume(
         pkg.queue,
@@ -349,11 +367,19 @@ export async function session(
           }
           lastReceived = Date.now();
           if (bufferingForSnapshot) buffered.push(msg);
-          else processing = processing.then(() => processMessage(msg));
+          else {buffered.push(msg);scheduleDrain();}
         },
         { noAck: false, exclusive: true },
       ),
     );
+    // Install the exclusive durable consumer BEFORE enabling supplier distribution.
+    // Queue delivery and persist-before-ACK continue throughout activation and recovery.
+  try{await api.startDistribution();}finally{
+    const observations=api.distributionObservations?.();
+    if(observations){state.set(lane,{distributionObservations:observations});await save();}
+  }
+    if(closed)throw failure;
+    if(signal.aborted){abort();return;}
     const nextDue: Record<string, number> = { "snapshot.events": 0,
       "snapshot.outright.fixtures": api.outrightFixtures ? 0 : Infinity,
       "snapshot.outright.markets": api.outrightMarkets ? 0 : Infinity };
@@ -364,7 +390,7 @@ export async function session(
     const requireOpen=()=>{if(closed || signal.aborted)throw failure || transportEnd("worker_stopped");};
     const recover = async () => {
       requireOpen();
-      bufferingForSnapshot = true;
+      bufferingForSnapshot = false;
       state.set(lane, {
         phase: "recovering",
         recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady},
@@ -374,12 +400,21 @@ export async function session(
       requireOpen();
       await save();
       requireOpen();
-      let rows: import("./state.js").TradeEvent[] | undefined;let partitionCompleted=false;
+      let rows: import("./state.js").TradeEvent[] | undefined;let partitionCompleted=false,fullCompleted=false;
       if (Date.now() >= nextDue["snapshot.events"]) {
         const started = Date.now();
         state.set(lane,{lastSnapshotAttemptAt:new Date(started).toISOString()});
         try {
-          if(lane==='prematch'&&api.snapshotPartitioned){
+          if(lane==='prematch'&&api.snapshotFull){
+            const ackedAtStart=acknowledgedMessages;let appliedRows=0;const fullStarted=Date.now();
+            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});state.beginPartitionedSnapshot(lane);await save();
+            const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,apply:async(row,at)=>{
+              const applied=processing.then(async()=>{requireOpen();state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});if(++appliedRows%10===0)await save();});
+              processing=applied;await applied;
+            }});
+            requireOpen();await processing;requireOpen();state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted);partitionCompleted=true;fullCompleted=true;
+            state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
+          }else if(lane==='prematch'&&api.snapshotPartitioned){
             regularSnapshotReady=false;state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,regularSnapshotReady:false}});
             let inventory=new Set<number>();
             // Inventory itself can wait through a cooldown. Do not retain 100 unacked
@@ -400,18 +435,22 @@ export async function session(
             });
             requireOpen();state.finishPartitionedSnapshot(lane,inventory,api.snapshotAudit?.());partitionCompleted=true;
             console.info(JSON.stringify({lane,operation:'snapshot.events',status:'partitioned_complete',...result}));
-          }else rows = await api.snapshot();
+          }else {state.beginPartitionedSnapshot(lane);await save();rows=await api.snapshot();}
           if (closed || signal.aborted) throw failure || new Error("Disconnected during recovery");
-          if(rows!==undefined)state.replace(lane, rows, started, api.snapshotAudit?.());
+          if(rows!==undefined){
+            const recovered=rows;
+            const applied=processing.then(async()=>{requireOpen();state.apply(lane,recovered.map(r=>({...r,marketRecovery:true})),started,{source:'snapshot',receivedAt:Date.now()});state.finishPartitionedSnapshot(lane,new Set(recovered.map(r=>r.fixtureId)),api.snapshotAudit?.(),started);await save();});
+            processing=applied;await applied;
+          }
           regularSnapshotReady = true;
           state.set(lane, { diagnostic: undefined, lastSnapshotDiagnostic: undefined });
           nextDue["snapshot.events"] = Date.now() + Math.max(300000, config.recoveryMs);
         } catch (error) {
-          if (closed || signal.aborted) throw error;
+          if (closed || signal.aborted) throw failure||error;
           state.set(lane,{lastSnapshotErrorAt:new Date().toISOString()});
           const diagnostic = describeFailure(error, "snapshot.events", "http");
           state.set(lane, { diagnostic, lastSnapshotDiagnostic: diagnostic });
-          const rejectedPartition=lane==='prematch'&&!!api.snapshotPartitioned&&(['invalid_response','sdk_error'].includes(diagnostic.category)||diagnostic.reason==='response_size_limit');
+          const rejectedPartition=lane==='prematch'&&!!(api.snapshotFull||api.snapshotPartitioned)&&(api.snapshotFull?diagnostic.operation==='snapshot.events':(['invalid_response','sdk_error'].includes(diagnostic.category)||diagnostic.reason==='response_size_limit'));
           if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded" && !rejectedPartition) throw error;
           // Invalid partition HTTP is not AMQP failure. Keep persist-before-ACK and
           // baseline false, without changing the independent InPlay recovery policy.
@@ -444,7 +483,7 @@ export async function session(
           nextDue[name] = Date.now() + Math.max(300000, config.recoveryMs);
           console.info(JSON.stringify({ lane, operation: name, status: name === "snapshot.outright.markets" && outrightRecovery.timestampRejections?.length ? "partial" : "ok", events: recovered.length, ...(name === "snapshot.outright.markets" ? {timestampRejected:outrightRecovery.timestampRejections?.length || 0} : {}) }));
         } catch (error) {
-          if (closed || signal.aborted) throw error;
+          if (closed || signal.aborted) throw failure||error;
           attempt.lastErrorAt=new Date().toISOString();
           const diagnostic = describeFailure(error, name, "http");
           nextDue[name] = diagnostic.category === "rate_limited" ? retryTime(diagnostic) : Date.now() + Math.max(300000, config.recoveryMs);
@@ -479,7 +518,7 @@ export async function session(
       state.set(lane, {
         phase: regularSnapshotReady ? "connected" : "recovering",
         recoveryProgress:{...state.connections[lane].recoveryProgress!,stage:regularSnapshotReady?"idle":"waiting_retry",regularSnapshotReady,completedAt:new Date().toISOString(),nextRegularAttemptAt:new Date(nextDue["snapshot.events"]).toISOString()},
-        message: partitionCompleted ? "Feed conectado; snapshot particionado completo e inventario verificado." : !regularSnapshotReady ? "AMQP activo; snapshot inicial pendiente. Cuotas bloqueadas hasta completar la recuperación." : rows !== undefined && rows.length
+        message: partitionCompleted ? "Feed conectado; snapshot completo validado con memoria limitada." : !regularSnapshotReady ? "AMQP activo; snapshot inicial pendiente. Cuotas bloqueadas hasta completar la recuperación." : rows !== undefined && rows.length
           ? "Feed conectado; snapshot recuperado." + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : "")
           : (rows === undefined ? "Feed AMQP conectado; recuperación HTTP pendiente." : "Feed conectado; snapshot regular vacío (0 fixtures).") + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : " Recuperación Outright consultada por separado."),
       });
@@ -487,8 +526,8 @@ export async function session(
       console.log(
         JSON.stringify({
           lane,
-          status: partitionCompleted?"partitioned_snapshot_recovered":rows === undefined ? "snapshot_deferred" : "snapshot_recovered",
-          ...(partitionCompleted?{events:state.connections[lane].snapshotEvents,partitioned:true}:rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
+          status: fullCompleted?"full_snapshot_recovered":partitionCompleted?"partitioned_snapshot_recovered":rows === undefined ? "snapshot_deferred" : "snapshot_recovered",
+          ...(partitionCompleted?{events:state.connections[lane].snapshotEvents,partitioned:!fullCompleted,fullSnapshot:fullCompleted}:rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
           snapshotAudit: api.snapshotAudit?.(),
           coverage: state.feed().coverage?.[lane],
         }),
@@ -543,6 +582,7 @@ export async function session(
     });
     try {
       // Drain writes for deliveries already being processed before final persist.
+      if(signal.aborted){abort();await plannedStop;}
       await processing;
       await save();
     } finally {
