@@ -411,3 +411,51 @@ Sucesso exige `status=ok`, `httpsVerified=true`, `applicationVerified=true`; só
 reportar somente JSON sanitizado; não remover proteção TLS ou publicar o site de
 novo. Mesmo com sucesso, Mac continua consumidor único e worker AWS parado até
 bootstrap, desligamento normal, audit/export dos journals e cooldown.
+
+### Corte bloqueado no Mac: diagnóstico local somente leitura
+
+Uma saída genérica de `cutover.prepare` não identifica a evidência ausente. Não
+concluir que há lock residual ou consumidor ativo somente porque não há npm em
+uma aba do Terminal. A auditoria anterior descartava a causa e o launcher de
+exportação também ocultava o relatório do subprocesso quando ele saía com código
+2. Agora `prepare` expõe `stage` e `auditEvidence` sanitizados; a exportação também
+distingue journal alterado após a auditoria, contagem diferente e erro de arquivo.
+
+Executar primeiro, sem repetir a exportação ou iniciar consumidores:
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/diagnose-adl-cutover.mjs
+```
+
+Relatório `cutover.diagnose`, somente leitura e zero requisições LSports/AWS:
+
+- `blockers`: etapas e códigos específicos; coleta continua após a primeira falha.
+- `processes`: apenas PID, PPID e categoria de worker reconhecido; nenhum argv,
+  ambiente ou comando completo. Falha de `ps` não é tratada como ausência.
+- `locks`: tipo (worker, guard ou scheduler), PID quando numérico, dono
+  running/not_running/unknown e idade; todos com action=preserved. PID ausente ou
+  morto não autoriza remoção. Inclui guard do worker que a coleta anterior omitia.
+- `journals`: índice, tamanho, integridade JSON/estrutura, quantidade de operações
+  e maior prazo; nenhum conteúdo completo ou texto arbitrário de erros.
+- `checkpoint`: existência/leitura/JSON, modo classificado e presença das duas
+  lanes, sem eventos, bilhetes ou payloads. Parse limitado a 256 MiB e admitido
+  apenas com margem conservadora de memória física/heap; recusa informa orçamento.
+- `notBeforeUTC`: só calculado quando há evidência legível; não substitui
+  status=ok nem dispensa confirmar que o consumidor Mac continua desligado.
+- `stateLocationSource`: default ou configured, sem imprimir o valor do .env.
+- `diagnostic_start`: distingue falha de loader/dependências/opção Node/timeout
+  antes mesmo de executar a coleta; stderr bruto permanece oculto.
+
+Envie apenas o JSON sanitizado. Nenhum lock é apagado/reclamado, nenhum arquivo
+.env/checkpoint/journal/bilhete é modificado e nenhum worker ou processo é morto.
+Não há SSH neste comando nem alterações no POSNET, volumes ou composeOverrides.
+Só prosseguir para exportação/importação depois de resolver a causa demonstrada.
+
+Validação desta alteração: 11 testes direcionados de diagnóstico/cooldown e
+tipagem dos três scripts passaram. O `tsc -p tsconfig.json` genérico inclui o
+frontend sem sua configuração JSX e testes fora dos targets de build, portanto
+não é um check global válido; não foram alterados frontend/configs para contorná-lo.
+O diagnóstico foi exercitado também contra ausência de checkpoint no workspace;
+isso não é evidência sobre o Mac, cuja causa ainda depende do relatório local.
