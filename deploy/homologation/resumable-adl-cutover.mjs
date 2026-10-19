@@ -34,7 +34,7 @@ async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFi
 export async function run(args){
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||args[4]!=='--recover-and-cutover'||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
@@ -57,6 +57,15 @@ export async function run(args){
   stage='remote_consumer_gate';const pre=await remote('preflight');
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||String(pre.workerModel?.memoryLimitBytes)!=='4294967296'||String(pre.workerModel?.prematchCapMB)!=='256'||String(pre.workerModel?.inplayCapMB)!=='128')throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
+  if(args[4]==='--validate-only'){
+   stage='validation_resume_gate';
+   if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
+   if(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running)throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
+   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
+   const mac=rows.find(r=>r.operation==='cutover.audit');if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+   const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
+   stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress);return;
+  }
   stage='local_protection';
   if(ledger.steps.local_exit?.status!=='ok')await step(ledger,stage,save,async()=>{
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/protected-mac-cutover.ts','--pid',pid,'--parent',parent,'--protect'],undefined,300000);
@@ -103,9 +112,19 @@ export async function run(args){
    stage='fresh_mac_gate';const fresh=await audit();
    stage='aws_start';await step(ledger,stage,save,()=>remote('start',{handoff,freshAuditAt:fresh.capturedAt,expectedWorkerImage:ledger.steps.worker_image.result.image}));
   }
-  stage='feed_validation';const until=Date.now()+15*60000;let status;
+  stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress);
+ }catch(error){
+  if(ledger&&save){ledger.lastFailure={stage,at:new Date().toISOString(),reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED'};try{await save();}catch{}}
+  emit({stage,status:'blocked',reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED',progressFile:progress,localExitConfirmed:ledger?.steps?.local_exit?.status==='ok',awsStartConfirmed:ledger?.steps?.aws_start?.status==='ok',note:'See concrete sanitized child stage. Completed results and backups preserved. No blind signal replay, Mac restart or provider cooldown reset.'});process.exitCode=2;
+ }
+finally{if(lease)await new Promise(resolve=>lease.close(resolve));}
+}
+
+export async function validateFeeds(remote,handoff,ledger,save,progress){
+ const until=Date.now()+15*60000;let status;
   while(Date.now()<until){
    status=await remote('status',{handoff});
+   ledger.lastValidation=status;ledger.currentStage='feed_validation';await save();
    if(status.status==='snapshots_ready')break;
    if(status.workers?.some(w=>w.state==='exited'||w.oomKilled))throw Error('AWS_WORKER_EXITED_INSPECT_STATUS');
    if(status.lanes&&Object.values(status.lanes).some(l=>l.phase==='error'&&l.diagnostic?.reason==='unsupported_message_type'))throw Error('AWS_UNSUPPORTED_MESSAGE_RETAINED');
@@ -114,9 +133,4 @@ export async function run(args){
   ledger.lastValidation=status;ledger.currentStage=status?.status==='snapshots_ready'?'complete':'feed_validation_pending';await save();
   const ready=status?.status==='snapshots_ready';emit({stage:ledger.currentStage,status:ready?'snapshots_verified':'pending',progressFile:progress,macWorkerStopped:true,awsWorkerStartConfirmed:true,realFeedSnapshotsVerified:ready,projectionOddsAvailable:ready&&status.selectableSelections>0,iframeAuthenticated:false,authenticatedApiVerified:false,posnetChanged:false,note:'Never restart Mac consumer. Fresh AWS administrator/operation/embed session remains separate. Real validation is this server report, not local tests.'});
   if(!ready)process.exitCode=2;
- }catch(error){
-  if(ledger&&save){ledger.lastFailure={stage,at:new Date().toISOString(),reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED'};try{await save();}catch{}}
-  emit({stage,status:'blocked',reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED',progressFile:progress,localExitConfirmed:ledger?.steps?.local_exit?.status==='ok',awsStartConfirmed:ledger?.steps?.aws_start?.status==='ok',note:'See concrete sanitized child stage. Completed results and backups preserved. No blind signal replay, Mac restart or provider cooldown reset.'});process.exitCode=2;
- }
-finally{if(lease)await new Promise(resolve=>lease.close(resolve));}
 }

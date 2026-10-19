@@ -351,3 +351,38 @@ sem reinício automático; lock existente continua sendo bloqueio, sem remoção
 Os testes reproduzem a rejeição real do launcher sem importações do fornecedor e
 exercitam a recuperação com Docker/SSH simulados. A correção na AWS só se confirma
 pelo relatório da execução real e pelos snapshots de ambas as lanes.
+
+### Continuar somente a validação, com worker AWS já running
+
+Use `complete-adl-cutover.mjs --pid 12811 --parent 12809 --validate-only`.
+Exige progresso salvo de local_exit, exportação, importação e partida concluídos,
+container AWS único running e auditoria atual de ausência do consumidor no Mac.
+Não chama patch/start/recover/import nem modifica overrides, volumes ou journals;
+salva apenas o progresso local e lê Docker logs/checkpoint/journals por SSH.
+O worker existente continua com seu próprio agendamento e cooldowns. Não execute
+diagnose:trade paralelo nem reinicie consumidores para antecipar o prazo.
+
+Acompanha por até 15 minutos e salva cada observação, mesmo se bloquear depois:
+- `lanes.*.sessionEnds`: causas terminais e horários, separadas do erro atual;
+- `diagnostic.amqpCloseSignals`: código 320 = connection_forced, não prova sozinho
+  de outro consumidor, fechamento administrativo ou timeout;
+- `rateLimitSource`: supplier_http identifica HTTP 429; local_operation_cooldown,
+  local_host_cooldown e local_in_flight identificam adiamento sem chamada HTTP;
+- `evidence.schedulers`: reserva, conclusão, outcome e dueAt reais dos journals;
+- `distributionInspection`: before=false/startRequested=true/after=false indica
+  status ainda desligado após start; não inferir credenciais inválidas nem tratar
+  HTTP 200 como distribuição habilitada;
+- `evidence.recentErrors`: últimos erros sanitizados com timestamp do Docker,
+  sem textos livres, URLs, payloads ou credenciais; inspeção não chama fornecedor.
+
+Se persistir distribuição desligada ou fechamento 320, usar esses horários UTC,
+packages 4511/4510 e sinais de fechamento no ticket LSports 217525: solicitar causa
+exata do fechamento no broker e motivo de a distribuição permanecer OFF após start,
+confirmando ausência de bloqueio/limite operacional do pacote Test. Não alterar
+assinaturas nem executar stopDistribution. A lista de erros agregada sem cronologia
+não prova a causa raiz, nem demonstra falha local de parsing ou de memória.
+
+Snapshots só são considerados validados em sessões atuais, com baseline pronto e
+checkpoint recente. Keepalive, dados restaurados e mercados encerrados continuam
+insuficientes para liberar cotações. Sessão autenticada de iframe ainda exige a
+operação de homologação própria; esse monitor não declara iframe validado.

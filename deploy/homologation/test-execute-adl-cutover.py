@@ -25,6 +25,26 @@ class Cutover(unittest.TestCase):
   self.assertEqual(NS['canonical_barrier']('2026-10-19T23:59:59.999999Z'),'2026-10-20T00:00:00.000Z')
   self.assertEqual(NS['canonical_barrier']('2026-10-19T00:00:00Z'),'2026-10-19T00:00:00.000Z')
   with self.assertRaisesRegex(RuntimeError,'INVALID_DEADLINE'):NS['canonical_barrier']('2026-10-19T00:00:00')
+ def test_feed_evidence_is_local_only_separates_broker_close_and_cooldown_without_raw_text(self):
+  with tempfile.TemporaryDirectory() as temporary:
+   folder=Path(temporary);journal={'nextAt':900,'due':{'4511:snapshot.events':1200},'failures':{},'requests':{'4511:snapshot.events':{'pid':8,'packageId':4511,'operation':'snapshot.events','outcome':'rate_limited','at':'2026-10-19T10:00:00Z','failure':{'category':'rate_limited','httpStatus':429},'secret':'MUST_NEVER_PRINT'}}}
+   (folder/'trade-feed.json.snapshot-aaaaaaaaaaaaaaaa.json').write_text(json.dumps(journal))
+   logs=[{'lane':'prematch','operation':'amqp.connection','category':'network','reason':'connection_closed','amqpCode':320,'amqpCloseSignals':['connection_forced','MUST_NEVER_PRINT'],'message':'MUST_NEVER_PRINT'},
+         {'lane':'prematch','operation':'snapshot.events','category':'rate_limited','rateLimitSource':'local_operation_cooldown','retryAt':'2026-10-19T10:05:00Z','coordinator':journal['requests']['4511:snapshot.events']},
+         {'lane':'prematch','operation':'distribution.start','category':'invalid_response','reason':'distribution_still_off','distributionInspection':{'before':False,'startRequested':True,'after':False,'password':'MUST_NEVER_PRINT'}}]
+   content='\n'.join('2026-10-19T10:00:00.000000000Z '+json.dumps(row) for row in logs).encode()
+   previous=NS['subprocess'];calls=[]
+   def run(args,**kw):calls.append(args);return types.SimpleNamespace(returncode=0,stdout=b'',stderr=content)
+   NS['subprocess']=types.SimpleNamespace(run=run)
+   try:
+    evidence=NS['feed_evidence'](folder,[{'id':'c'*64}]);encoded=json.dumps(evidence)
+    self.assertNotIn('MUST_NEVER_PRINT',encoded);self.assertEqual(evidence['providerRequests'],0);self.assertEqual(len(evidence['recentErrors']),3)
+    self.assertEqual(evidence['recentErrors'][0]['amqpCloseSignals'],['connection_forced'])
+    self.assertEqual(evidence['recentErrors'][1]['rateLimitSource'],'local_operation_cooldown')
+    self.assertEqual(evidence['recentErrors'][2]['distributionInspection']['after'],False)
+    self.assertEqual(evidence['schedulers'][0]['operations'][0]['coordinator']['outcome'],'rate_limited')
+    self.assertTrue(all(c[:2]==['docker','logs'] for c in calls));self.assertEqual(json.loads((folder/'trade-feed.json.snapshot-aaaaaaaaaaaaaaaa.json').read_bytes()),journal)
+   finally:NS['subprocess']=previous
  def test_invalid_schedule_rejected(self):
   for value in ({}, {'nextAt':float('nan'),'due':{},'failures':{}},{'nextAt':0,'due':{'x':-1},'failures':{}}):
    with self.assertRaisesRegex(RuntimeError,'INVALID_SCHEDULE'):NS['schedule_checked'](value)
@@ -35,7 +55,7 @@ class Cutover(unittest.TestCase):
    old='2026-01-01T00:00:00Z'
    lane={'phase':'connected','lastSnapshotAt':now,'session':{'startedAt':old},'recoveryProgress':{'regularSnapshotReady':True}}
    feed={'updatedAt':now,'connections':{'prematch':copy.deepcopy(lane),'inplay':copy.deepcopy(lane)},'events':[]}
-   prior=NS['states'];NS['states']=lambda service:[{'running':True}]
+   prior=NS['states'];prior_evidence=NS['feed_evidence'];NS['feed_evidence']=lambda *args:{};NS['states']=lambda service:[{'running':True}]
    def check():
     (folder/'trade-feed.json').write_text(json.dumps(feed));output=io.StringIO()
     with contextlib.redirect_stdout(output):NS['cutover_status'](folder,now)
@@ -46,7 +66,7 @@ class Cutover(unittest.TestCase):
     self.assertEqual(check()['status'],'snapshots_ready')
     feed['connections']['prematch']['recoveryProgress']['regularSnapshotReady']=False
     self.assertEqual(check()['status'],'recovering')
-   finally:NS['states']=prior
+   finally:NS['states']=prior;NS['feed_evidence']=prior_evidence
  @unittest.skipUnless(os.geteuid() in (0,1000),'fixture requires UID 1000 or root')
  def test_import_start_preserves_existing_overrides_only_starts_worker_and_obeys_cooldown(self):
   with tempfile.TemporaryDirectory() as temporary:

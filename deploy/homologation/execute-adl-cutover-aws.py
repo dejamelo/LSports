@@ -203,8 +203,69 @@ def cutover_main():
         emit(operation='cutover.aws',stage=stage,status='blocked',reason=reason,backup=str(backup) if backup else None,journalsWritten=written,workerStartRequested=worker_requested,workerStarted=None if worker_requested else False,posnetChanged=False,rawExceptionPrinted=False)
         return 2
 
+# Explicit fields only: provider exception text, URLs and message payloads never leave SSH.
+FEED_OPERATIONS={'amqp.connection','amqp.channel','amqp.consume','amqp.connect','snapshot.events','snapshot.outright.fixtures','snapshot.outright.markets','distribution.start','distribution.status','feed.decode','feed.apply','feed.stale','worker.start','file.persist'}
+def safe_feed_diagnostic(value):
+    if not isinstance(value,dict):return {}
+    out={}
+    enums={'operation':FEED_OPERATIONS,'category':{'network','rate_limited','invalid_response','authentication_rejected','authentication_or_permission','permission_denied','response_limit','unexpected','configuration','invalid_message','unsupported_message','supplier_error'},
+       'reason':{'connection_closed','channel_closed','consumer_cancelled','consumer_conflict','distribution_still_off','timeout','memory_budget_exceeded','response_size_limit','application_error','null_response_body','missing_response_body','sdk_conversion','sdk_validation','unknown_exception','provider_interrupted','unsupported_message_type'},
+       'rateLimitSource':{'supplier_http','local_in_flight','local_host_cooldown','local_operation_cooldown'}}
+    for key,allowed in enums.items():
+        if isinstance(value.get(key),str) and value[key] in allowed:out[key]=value[key]
+    for key in ('httpStatus','amqpCode','retryAfterMs','attempts','requesterPid','responseLimitBytes','memoryBudgetBytes','memoryHeadroomBytes'):
+        if type(value.get(key)) in (int,float) and math.isfinite(value[key]):out[key]=value[key]
+    for key in ('retryAt',):
+        if isinstance(value.get(key),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',value[key]):out[key]=value[key]
+    if type(value.get('deferred')) is bool:out['deferred']=value['deferred']
+    if isinstance(value.get('amqpCloseSignals'),list):out['amqpCloseSignals']=[v for v in value['amqpCloseSignals'] if isinstance(v,str) and v in {'connection_forced','heartbeat_timeout','ack_timeout','administrative_close','server_shutdown'}]
+    if isinstance(value.get('distributionInspection'),dict):out['distributionInspection']={k:v for k,v in value['distributionInspection'].items() if k in ('before','startRequested','after') and type(v) is bool}
+    if isinstance(value.get('coordinator'),dict):out['coordinator']=safe_coordinator(value['coordinator'])
+    return out
+
+def safe_coordinator(value):
+    out=safe_feed_diagnostic({k:v for k,v in value.items() if k!='coordinator'})
+    for key in ('pid','packageId'):
+        if type(value.get(key)) is int:out[key]=value[key]
+    for key in ('at','completedAt'):
+        if isinstance(value.get(key),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',value[key]):out[key]=value[key]
+    if value.get('outcome') in ('reserved','success','rate_limited','failed'):out['outcome']=value['outcome']
+    if isinstance(value.get('failure'),dict):out['failure']=safe_feed_diagnostic(value['failure'])
+    return out
+
+def feed_evidence(directory,consumers):
+    evidence={'readOnly':True,'providerRequests':0,'recentErrors':[],'schedulers':[]}
+    for c in consumers:
+        require(re.fullmatch('[0-9a-f]{12,64}',c['id']) is not None,'WORKER_CONTAINER_ID_UNVERIFIED')
+        logs=subprocess.run(['docker','logs','--tail','120','--timestamps',c['id']],capture_output=True,timeout=15,check=False)
+        if logs.returncode!=0:evidence['logInspection']='unavailable';continue
+        for line in (logs.stdout+b'\n'+logs.stderr).decode(errors='replace').splitlines():
+            match=re.match(r'^(\d{4}-\d{2}-\d{2}T[0-9:.]+Z) (.*)$',line)
+            if not match:continue
+            try:row=json.loads(match[2])
+            except Exception:continue
+            if not isinstance(row,dict) or not isinstance(row.get('operation'),str) or row['operation'] not in FEED_OPERATIONS:continue
+            d=safe_feed_diagnostic(row)
+            if not d.get('category') and not d.get('amqpCode'):continue
+            d['loggedAt']=match[1]
+            if row.get('lane') in ('prematch','inplay'):d['lane']=row['lane']
+            evidence['recentErrors'].append(d)
+    evidence['recentErrors']=sorted(evidence['recentErrors'],key=lambda r:r['loggedAt'])[-20:]
+    for target in sorted(directory.glob('trade-feed.json.snapshot-*.json')):
+        require(target.is_file() and not target.is_symlink() and target.stat().st_size<=1024*1024,'JOURNAL_UNVERIFIED')
+        schedule=schedule_checked(json.loads(target.read_bytes()))
+        entries=[]
+        for key,due in schedule['due'].items():
+            match=re.fullmatch(r'(4510|4511):(snapshot\.(?:events|outright\.fixtures|outright\.markets))',key)
+            if not match:continue
+            coordinator=(schedule.get('requests') or {}).get(key) or {}
+            entries.append({'packageId':int(match[1]),'operation':match[2],'dueAt':datetime.datetime.fromtimestamp(due/1000,datetime.timezone.utc).isoformat().replace('+00:00','Z'),'coordinator':safe_coordinator(coordinator)})
+        evidence['schedulers'].append({'nextAt':schedule['nextAt'],'operations':entries})
+    return evidence
+
 def cutover_status(directory,start_requested):
     consumers=states('worker');path=directory/'trade-feed.json';result={'operation':'cutover.aws','stage':'status','readOnly':True,'workers':consumers,'posnetChanged':False}
+    result['evidence']=feed_evidence(directory,consumers)
     if any(c.get('state')=='exited' for c in consumers):
         result['workerFailure']=inspect_worker_failure(consumers)[0]
     if not path.exists():
@@ -213,14 +274,15 @@ def cutover_status(directory,start_requested):
     available=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))*1024
     require(available>path.stat().st_size*8+64*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
     feed=json.loads(path.read_bytes());lanes={}
-    fields=('phase','session','lastSnapshotAt','lastSnapshotAttemptAt','recoveryProgress')
+    fields=('phase','session','lastSnapshotAt','lastSnapshotAttemptAt','lastSnapshotErrorAt','recoveryProgress')
     for lane in ('prematch','inplay'):
         source=feed.get('connections',{}).get(lane,{})
         lanes[lane]={k:source.get(k) for k in fields}
         coverage=(feed.get('coverage',{}).get(lane,{}) or {}).get('activity',{})
         lanes[lane]['updates']={k:coverage.get(k) for k in ('lastDataDecodedAt','lastMarketDecodedAt','lastSettlementDecodedAt','lastControlDecodedAt')}
         for key in ('diagnostic','lastSnapshotDiagnostic'):
-            d=source.get(key) or {};lanes[lane][key]={k:d[k] for k in ('operation','category','reason','httpStatus','amqpCode','rateLimitSource','retryAt') if k in d}
+            lanes[lane][key]=safe_feed_diagnostic(source.get(key))
+        lanes[lane]['sessionEnds']=[{'endedAt':entry.get('endedAt'),'startedAt':entry.get('startedAt'),'diagnostic':safe_feed_diagnostic(entry.get('diagnostic'))} for entry in source.get('sessionEnds',[])[-8:] if isinstance(entry,dict)]
     events=feed.get('events',[]);selectable=0;markets=0;prices=0;reasons={}
     for event in events:
         for market in event.get('markets',[]):
