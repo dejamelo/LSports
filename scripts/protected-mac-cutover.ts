@@ -4,7 +4,7 @@ import {platformDirectory} from '@lsports/feed-store/platform';
 import {protect,terminateProtected,type ProtectedRecord} from './protected-stop.js';
 import {shutdownAttemptEvidence} from './shutdown-attempt-evidence.js';
 import {verifiedSupervisorPolicy} from './supervisor-runtime-policy.js';
-import {readOwner,processIdentity,processCwd,processStateCode,pathAbsent,sameIdentity} from './stop-owned-worker.js';
+import {readOwner,processIdentity,processObservation,processCwd,processStateCode,pathAbsent,sameIdentity} from './stop-owned-worker.js';
 import {diagnoseCutover,safeError} from './cutover-diagnostics.js';
 import {lstat,readFile,readdir,mkdir,mkdtemp,open,rename,copyFile,chmod,unlink,statfs,realpath} from 'node:fs/promises';
 import {constants} from 'node:fs';
@@ -81,6 +81,12 @@ async function main(){
  };
  const archive=async()=>{
   stage='archive_verified_dead_lock';if(!gone(pid))throw Error('OWNER_NOT_DEAD_LOCK_PRESERVED');
+  let audit=await diagnoseCutover({state,refreshMs:Number(process.env.LSPORTS_SNAPSHOT_INTERVAL_MS||300000)});
+  // Give the reaping supervisor time to exit; never hide it from the consumer audit.
+  const auditDeadline=Date.now()+5000;
+  while(audit.blockers.some(b=>b.stage==='processes')&&Date.now()<auditDeadline){await delay(500);audit=await diagnoseCutover({state,refreshMs:Number(process.env.LSPORTS_SNAPSHOT_INTERVAL_MS||300000)});}
+  if(audit.blockers.some(b=>b.stage!=='locks')||audit.locks.some(l=>l.kind!=='worker'))throw Error('LOCAL_CONSUMER_OR_JOURNAL_AUDIT_BLOCKED_LOCK_PRESERVED');
+  if(!gone(pid))throw Error('OWNER_NOT_DEAD_LOCK_PRESERVED');
   const guardPath=lockPath+'.reclaim';const guard=await open(guardPath,'wx',0o600);const guardInfo=await guard.stat();
   try{
    await guard.writeFile(String(process.pid));await guard.sync();
@@ -93,7 +99,7 @@ async function main(){
    await guard.close();const now=await lstat(guardPath);if(now.ino===guardInfo.ino&&now.dev===guardInfo.dev&&await readFile(guardPath,'utf8')===String(process.pid))await unlink(guardPath);
   }
  };
- const io={identity:processIdentity,cwd:processCwd,state:processStateCode,lock:()=>readOwner(lockPath),noTcp:()=>noTcp(pid),
+ const io={observe:processObservation,report:emit,identity:processIdentity,cwd:processCwd,state:processStateCode,lock:()=>readOwner(lockPath),noTcp:()=>noTcp(pid),
   children:async()=>{const {stdout}=await exec('ps',['-axo','pid=,ppid=,state='],{timeout:5000,maxBuffer:1024*1024});return stdout.split('\n').flatMap(line=>{const f=line.trim().split(/\s+/);return Number(f[1])===parentPid&&!/^Z/.test(f[2]||'')?[Number(f[0])]:[];});},
   signal:(target:number,signal:'SIGSTOP'|'SIGCONT'|'SIGHUP')=>{process.kill(target,signal);emit({stage,status:'signal_sent',pid:target,signal});},save,backup,verifyBackup,gone,archive,pause:()=>delay(100),now:Date.now};
  if(args[4]==='--protect'){

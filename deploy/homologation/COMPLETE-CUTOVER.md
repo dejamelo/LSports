@@ -300,3 +300,28 @@ dos dados persistidos. Use [RESUMABLE-CUTOVER.md](RESUMABLE-CUTOVER.md). O coman
 único `complete-adl-cutover.mjs --pid 12811 --parent 12809 --recover-and-cutover`
 substitui novas tentativas manuais de TERM/CONT/drain e não pede nova aprovação.
 Nunca anunciar execução Mac/AWS a partir dos testes isolados.
+
+
+### Retomada de `local_exit` após divergência de identidade
+
+`PID_REUSED_AFTER_TERMINATION` na versão anterior comparava também `command`:
+um argv alterado durante a saída podia receber esse rótulo sem prova de reutilização.
+O executor agora lê estado e identidade de nascimento em uma única leitura de `ps`
+(LC_ALL=C) e registra `owner_exit_reconciliation`, sem argv ou credenciais.
+Compara PID, UID e lstart ao registro protegido; divergência nesses campos bloqueia
+sem sinal. Um argv diferente, sozinho, não comprova reutilização. Estado E ainda é
+vivo; Z exige coleta pelo pai e confirmação ESRCH antes de tratar o lock.
+
+Retomar o mesmo comando `--recover-and-cutover`: `worker_image` e backup concluídos
+são reutilizados. Com `terminationRequested=true`, não há novo HUP/CONT no worker.
+Somente o pai idêntico ao registro, suspenso e ainda não retomado por esta tentativa,
+pode receber CONT para coletar o filho morto. O executor verifica backup, ausência
+OS do PID, ausência de consumidores e validade dos journals antes de arquivar o lock.
+Se houver PID vivo com nascimento diferente, ou dados ambíguos, preserva o lock e
+informa a causa; não assume que o novo processo seja o worker nem o sinaliza.
+
+Validação de desenvolvimento: testes de E → Z → ausência, argv mutável, nascimento
+alterado, reexecução sem sinais repetidos, saída real de processo isolado e preservação
+de dois bilhetes SQLite. Fixtures de ps macOS não substituem a execução real no Mac.
+Não houve acesso ao Mac/AWS nesta revisão; os feeds só estarão validados depois da
+exportação/importação, cooldown e confirmação real das duas lanes pelo executor.

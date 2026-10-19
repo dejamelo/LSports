@@ -30,7 +30,7 @@ test('protected preparation resumes without repeating freeze or completed backup
 });
 test('already attempted termination never sends HUP again to a living owner',async()=>{
  const f=fixture();await protect(f.io,f.record,'/repo',501);f.record.terminationRequested=true;
- await assert.rejects(terminateProtected(f.io,f.record,'/repo',501,true),/ALREADY_REQUESTED/);assert.ok(!f.calls.some(c=>c.startsWith('SIGHUP')));
+ await assert.rejects(terminateProtected(f.io,f.record,'/repo',501,true),/OWNER_STILL_PRESENT_NO_MORE_SIGNALS/);assert.ok(!f.calls.some(c=>c.startsWith('SIGHUP')));
 });
 test('crash after owner exit can finish parent reap/archive without repeating HUP',async()=>{
  const f=fixture();await protect(f.io,f.record,'/repo',501);f.record.terminationRequested=true;
@@ -63,4 +63,30 @@ test('isolated old process: protect committed ticket data, terminate with HUP, r
   if(parent.exitCode===null){parent.kill('SIGCONT');if(pid&&await processIdentity(pid)){process.kill(pid,'SIGHUP');process.kill(pid,'SIGCONT');}await parentExit;}
   await fs.rm(dir,{recursive:true,force:true});
  }
+});
+
+
+test('resume reconciles macOS exiting command and zombie without repeating owner signals',async()=>{
+ const f=fixture();await protect(f.io,f.record,'/repo',501);f.record.terminationRequested=true;f.record.hupSent=true;f.record.ownerContinueRequested=true;
+ let index=0;const states=['E','Z','absent'];let reaped=false;
+ const io={...f.io,observe:async()=>{const state=states[Math.min(index++,2)];return state==='absent'?undefined:{state,identity:{...f.record.owner,args:'(node)'}};},
+  gone:()=>reaped,signal:(pid:number,signal:'SIGSTOP'|'SIGCONT'|'SIGHUP')=>{assert.equal(pid,9);assert.equal(signal,'SIGCONT');reaped=true;f.calls.push(signal+':'+pid);},archive:async()=>{assert.ok(reaped);f.calls.push('archive');}};
+ await terminateProtected(io,f.record,'/repo',501,true,20);
+ assert.equal(f.calls.filter(c=>c==='SIGCONT:9').length,1);assert.ok(!f.calls.some(c=>c==='SIGHUP:11'||c==='SIGCONT:11'));assert.equal(f.calls.at(-1),'archive');
+});
+test('changed birth identity proves mismatch and blocks all signals/archive',async()=>{
+ const f=fixture();await protect(f.io,f.record,'/repo',501);f.record.terminationRequested=true;const before=[...f.calls];
+ const io={...f.io,observe:async()=>({state:'S',identity:{...f.record.owner,startedAt:'new birth'}})};
+ await assert.rejects(terminateProtected(io,f.record,'/repo',501,true,20),/PID_BIRTH_IDENTITY_CHANGED/);assert.deepEqual(f.calls,before);
+});
+test('live same-birth argv change alone is not PID reuse and never allows archive or a signal',async()=>{
+ const f=fixture();await protect(f.io,f.record,'/repo',501);f.record.terminationRequested=true;const before=[...f.calls];
+ const io={...f.io,observe:async()=>({state:'S',identity:{...f.record.owner,args:'(node)'}})};
+ await assert.rejects(terminateProtected(io,f.record,'/repo',501,true,20),/OWNER_COMMAND_CHANGED_SAME_BIRTH/);assert.deepEqual(f.calls,before);
+});
+test('macOS zombie with missing argv retains birth and state for post-termination inspection',async()=>{
+ const {parseProcessObservation}=await import('../../../scripts/stop-owned-worker.js');
+ const row='12811 12809 501 Mon Oct 19 01:00:00 2026 Z';
+ const value=parseProcessObservation(row,12811);assert.equal(value?.state,'Z');assert.equal(value?.identity.startedAt,'Mon Oct 19 01:00:00 2026');assert.equal(value?.identity.args,'');
+ assert.throws(()=>parseProcessObservation(row.replace(' Z',' S'),12811),/COMMAND_UNVERIFIED/);
 });
