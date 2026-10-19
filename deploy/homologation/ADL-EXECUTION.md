@@ -621,3 +621,13 @@ Testes isolados reproduzem os dois cenários reais: TERM pendente + CONT e ausê
 de TERM + CONT seguido de TERM revalidado. Ambos concluem persistência e liberação
 do próprio lock. Também cobrem backup falho, intenção já usada, PID/lock trocado,
 suspensão recorrente e timeout sem repetição/escalada. Nenhum teste usa fornecedor.
+
+
+## Corte consolidado — procedimento vigente
+
+Após o bloqueio no launcher pai, não repetir os comandos de recuperação anteriores.
+Seguir [COMPLETE-CUTOVER.md](COMPLETE-CUTOVER.md): uma única coleta Mac + AWS
+identifica todas as condições e o pai real, antes de finalizar o executor único.
+A autorização existente permanece; o bloqueio atual é falta de evidência de identidade,
+não solicitação de nova aprovação. Nenhum worker AWS está autorizado a iniciar
+antes da parada/exportação/importação e cooldown efetivamente verificados.
