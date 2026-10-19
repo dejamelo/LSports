@@ -227,3 +227,67 @@ supervisor compartilhado exige verificar seus comandos/restart/filhos e controle
 do terminal; não é equivalente a retomar launcher dedicado. O diagnóstico não
 executa retomada adicional. O AWS permanece parado até
 confirmar fim da execução Mac, liberação dos locks e exportação fresca.
+
+## Recuperação específica: dono S, pai concurrently T, após TERM já enviado
+
+Nova evidência do Mac: PID 12811 S, pai 12809 T, nenhum socket TCP; identidade e
+backup existentes verificados. Checkpoint alterado de 03:28:02.322Z para
+03:28:07.455Z em 19/10/2026 (00:28 de Brasília), journals estáveis. Não há evidência
+de nova suspensão nessa janela. O heartbeat de persistência pode continuar porque
+`runConnected` aguarda as sessões antes de limpar o intervalo. Isso não prova que
+stdout seja a causa nem identifica a Promise pendente na versão carregada.
+
+O SDK instalado oferece outra causa reproduzível: `ChannelModel.close()` usa uma
+promessa do callback CloseOk. Se o transporte emitir `close` sem executar esse
+callback, a promessa não termina. O encerramento local aguardava essa promessa
+mesmo com a conexão efetivamente fechada. `connection-closer.ts` agora compartilha
+um único fechamento e também observa `close`; continua aguardando processamento
++ persistência antes da saída e não introduz timeout, ACK antecipado ou destruição
+do transporte. **Git pull não aplica essa correção ao PID antigo nem à imagem AWS
+já construída.** Atualizar a imagem do worker é pendência antes da execução AWS.
+
+Para o PID antigo existe agora uma recuperação do supervisor, sem repetir TERM
+no worker. Ela não afirma que backpressure esteja comprovado no Mac; é uma ação
+limitada para permitir que o supervisor drene stdout/stderr e recolha o filho.
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/drain-adl-supervisor.mjs --pid 12811 --parent 12809
+```
+
+Antes do único SIGCONT ao pai, verifica:
+
+- Mesmas identidades PID/início/UID/cwd e relação pai-filho; dono não suspenso,
+  pai suspenso, lease atual inalterado e único filho vivo sendo o dono conhecido.
+- Backup/manifesto/intenções originais íntegros e vinculados ao mesmo dono. Não
+  copia novamente o checkpoint, não sobrescreve backup nem apaga intenções.
+- Executável Node usando o CLI concurrently do node_modules deste projeto;
+  versão 9, defaults instalados anteriores à partida do pai. Defaults explícitos
+  restartTries=0, maxProcesses=0 (todos iniciados), handleInput=false e sinal
+  padrão, sem opções/variáveis herdadas que alterem reinício, fila, input,
+  kill-signal ou escalonamento por kill-timeout. Não imprime o ambiente lido.
+- Terminal de saída consultado somente leitura, com tostop desativado; nenhum
+  fg/tcsetpgrp, alteração stty, sinal de grupo ou retomada do npm ancestral.
+
+O helper registra intenção própria wx/600 e envia **apenas um CONT ao pai**,
+revalidando imediatamente antes. Não envia TERM/KILL ao dono. Se o concurrently
+original usa `-k`, ele pode aplicar seu comportamento normal de SIGTERM ao
+processar a saída de comandos; não configuramos esse comportamento nem permitimos
+kill-timeout/SIGKILL ou reinício. O comando só considera sucesso após saída do dono
+E supervisor, liberação normal do lock e estabilidade dos journals. Depois chama
+apenas `prepare-adl-cutover.mjs`: exporta e mostra `notBeforeUTC`, sem SSH/start AWS.
+
+Nova suspensão, processo/lease diferente, novo filho, opção de reinício ou timeout
+são falhas reais. Não há segundo CONT, repetição de TERM ou exclusão de lock. Se o
+pai voltar e o dono continuar S + persistindo após 120s, a dependência do supervisor
+não foi suficiente para explicar/liberar o encerramento. O helper conserva tudo e
+informa `SUPERVISOR_DRAIN_TIMEOUT_NO_MORE_SIGNALS`. Não transformar isso em permissão
+para matar o processo ou contornar o lock. A Promise da versão antiga ainda pode
+estar pendente; corrigir arquivos no disco não retoma uma continuação já carregada.
+
+Validação desta etapa: 51 testes direcionados passaram, incluindo SDK amqplib real
+com callback CloseOk não executado, stdout represado por concurrently realmente
+suspenso e liberação após somente CONT do pai; ACK/persistência/requeue e reinício
+com dois bilhetes liquidados preservados. São testes isolados, não confirmação da
+parada real do Mac nem conexão validada com LSports.

@@ -1,3 +1,4 @@
+import { connectionCloser } from './connection-closer.js';
 import {randomUUID} from "node:crypto";
 import { platformEnabled, PlatformStore } from "@lsports/feed-store/platform";
 import { TenantTickets } from "@lsports/feed-store/tenant-tickets";
@@ -199,8 +200,7 @@ export async function session(
   const connection = await connectMq(pkg, dependencies.connect);
   let failure: unknown;
   let closed = false;
-  let closing: Promise<void> | undefined;
-  const closeConnection = () => closing ??= Promise.resolve().then(() => connection.close()).catch(() => {});
+  const closeConnection = connectionCloser(connection);
   const fail = (error: unknown) => {
     if (closed) return;
     failure = error;
