@@ -459,3 +459,46 @@ frontend sem sua configuração JSX e testes fora dos targets de build, portanto
 não é um check global válido; não foram alterados frontend/configs para contorná-lo.
 O diagnóstico foi exercitado também contra ausência de checkpoint no workspace;
 isso não é evidência sobre o Mac, cuja causa ainda depende do relatório local.
+
+### Worker Mac ativo sem Terminal visível: encerramento por dono verificado
+
+O operador confirmou dois processos reconhecidos (12809 e 12811 na captura),
+com o segundo como dono vivo do lock. Esses PIDs são evidência histórica, não
+alvos fixos. O comando abaixo relê as identidades antes de qualquer sinal:
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/stop-adl-mac-worker.mjs
+```
+
+O comando local identifica os processos novamente, lê lock regular e PID numérico,
+e confirma UID, argumento de entrada do worker, diretório real deste repositório
+(ou apps/worker), horário de início do processo e identidade inode/dev do lock.
+No Mac usa `ps` e `lsof` para leitura; nenhum argv/cwd bruto é impresso. Falta de
+permissão ou identidade divergente bloqueia. Não deve ser executado com sudo.
+
+Envia exatamente um SIGTERM ao PID positivo do dono atual verificado, sem sinais
+para pai, grupo, npm geral, API ou outros Node. Aguarda até 120s tanto a saída do
+processo quanto ausência do lock e guard, sem removê-los. O próprio worker executa
+seu finally normal de persistência, fechamento AMQP e liberação do próprio lock.
+Se a política já existente do supervisor encerrar processos acompanhantes após
+saída do worker, o comando não altera essa política. Nunca reativa o supervisor.
+
+Após a saída, exige auditoria sem processos/locks, journals estáveis entre duas
+leituras e nova auditoria. Só então chama automaticamente prepare-adl-cutover.mjs.
+A última saída é cutover.prepare/status=ok com destination, journals e notBeforeUTC.
+Esse prazo é calculado na exportação fresca e pode ser posterior ao visto no
+diagnóstico anterior à parada. Compartilhar apenas a saída sanitizada; manter Mac
+worker desligado. Nenhuma operação SSH, AWS, POSNET, volume ou override é feita.
+
+Se timeout, PID reutilizado, dono diferente, lock residual, processo remanescente
+ou supervisor recriando worker: termina blocked sem repetir sinal, sem SIGKILL,
+sem apagar lock e sem exportar/iniciar AWS. O lock de dono morto continua preservado
+para análise; a parada normal não contorna as proteções de recuperação.
+
+Validação: 20 testes de identidade, encerramento real SIGINT/SIGTERM (direto e
+npm/concurrently), persistência/restauração, dois bilhetes isolados preservados,
+locks próprios/concorrentes e cooldown; tipagem direcionada dos novos scripts passou.
+O teste real de sinal usa apenas o harness isolado, sem conexão ao fornecedor.
+A parada e notBeforeUTC do Mac continuam dependendo da execução pelo operador.
