@@ -547,3 +547,59 @@ notBeforeUTC fresco. Se `blocked`, enviar só o JSON sanitizado para decidir o
 próximo passo com evidência. Dono morto com lock residual continua bloqueado,
 sem recuperação automática. Nenhum SSH, reload, worker start ou alteração POSNET,
 volumes, backups ou composeOverrides é realizado por essa observação.
+
+### Evidência OS: state=T — recuperação do processo suspenso
+
+A captura do operador mostra PID 12811 em **T**, CPU 0, sem TCP e sem atualização
+do checkpoint desde 22:59:53Z. **T é estado suspenso pelo sistema operacional**;
+isso deveria ter sido destacado na leitura anterior. O JavaScript não progride
+nesse estado e um SIGTERM enviado pode permanecer pendente. Não comprova deadlock
+AMQP nem qual sinal/job-control causou a suspensão. O commit efetivamente
+carregado permanece desconhecido; `git pull` não atualiza módulos já carregados.
+A recuperação não assume que o runtime antigo possui o código do checkout atual.
+
+Próximo comando no Mac, sem sudo (PID explícito da captura, não aceitar outro):
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/recover-stopped-mac-worker.mjs --pid 12811 --prior-term-confirmed
+```
+
+`--prior-term-confirmed` registra a evidência já fornecida: SIGTERM foi enviado
+com sucesso a esse PID. O comando não envia SIGTERM novamente. Reconfirma lock,
+UID, cwd real, PID/horário de início/argv reconhecido e estado T imediatamente
+antes da ação. Se ps disponibilizar máscara pending/sig, inspeciona apenas o bit
+de SIGTERM; ausência conhecida bloqueia. Se o sistema não expuser máscara válida,
+reporta `pendingTermObserved=null`, usando a afirmação explícita do operador, sem
+alegar que leu sinais pendentes. Se PID, estado ou identidade mudaram, bloqueia.
+
+Antes de qualquer SIGCONT, cria backup fora do Git em
+`~/Library/Application Support/ADL/Recovery/stopped-worker-*` (700/600): checkpoint,
+journals, cópia do lock e manifesto privado. Não copia .env nem altera dados vivos.
+Exige espaço, estado T durante a cópia, SHA-256 igual entre fonte antes/depois e
+cópia; sincroniza arquivos de backup. A pasta Recovery existente deve ser privada
+e pertencer ao usuário. Falha de backup impede todos os sinais.
+
+Retoma exclusivamente o dono verificado com um SIGCONT. Se o pai também estiver
+T, só o retoma se for um launcher **tsx reconhecido, não-watch**, do mesmo usuário,
+projeto e relação pai-filho revalidada; nunca retoma npm genérico, shell, grupo ou
+watch supervisor. Isso permite drenar IPC e colher a saída do filho. Qualquer
+pai parado não reconhecido bloqueia antes de sinais, pedindo investigação.
+Um arquivo privado de intenção por identidade de processo impede reaplicação
+cega; nunca é removido automaticamente, mesmo se a ação não concluir.
+
+Após CONT, espera o SIGTERM anterior encerrar o worker, liberar seu próprio lock
+e terminar a persistência. Não remove lock vivo **nem órfão**: se o runtime antigo
+não liberar, a saída bloqueia com backup preservado para recuperação offline
+específica, sem migração. Não aplica timeout destrutivo, novo TERM ou KILL.
+Só com ausência de processos/locks e journals estáveis o launcher executa a
+exportação fresca, retornando cutover.prepare/destination/journals/notBeforeUTC.
+AWS continua parado. Não reativar o Mac após concluir essa exportação.
+
+Teste real isolado reproduziu SIGSTOP → SIGTERM pendente → SIGCONT, com handler,
+persistência final e liberação do próprio lock. Não usa conexões/credenciais reais.
+Testes de PID/UID/cwd, pai watch/genérico, identidade alterada, falha de backup,
+intenção já usada e timeout comprovam bloqueio sem sinais adicionais. A parada
+normal também passou a recusar um dono em T antes de enviar TERM, direcionando
+para essa recuperação específica.

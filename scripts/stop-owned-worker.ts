@@ -22,6 +22,10 @@ export async function processIdentity(pid:number):Promise<Identity|undefined>{
   return {pid,parentPid:Number(fields[1]),uid:Number(fields[2]),startedAt:fields.slice(3,8).join(' '),args:fields.slice(8).join(' ')};
  }catch(e){if((e as {code?:unknown;stdout?:unknown}).code===1&&!String((e as {stdout?:unknown}).stdout||'').trim())return undefined;throw e;}
 }
+export async function processStateCode(pid:number){
+ const {stdout}=await promisify(execFile)('ps',['-p',String(pid),'-o','state='],{timeout:5000,maxBuffer:4096});
+ const value=stdout.trim();if(!/^[A-Za-z+<NsWTsl-]{1,12}$/.test(value))throw Error('PROCESS_STATE_UNVERIFIED');return value;
+}
 export async function processCwd(pid:number){
  if(process.platform==='linux')return realpath(await readlink('/proc/'+pid+'/cwd'));
  if(process.platform!=='darwin')throw Error('PLATFORM_UNSUPPORTED');
@@ -37,11 +41,12 @@ export async function readOwner(lockPath:string):Promise<Lock>{
  return {pid:Number(raw),ino:info.ino,dev:info.dev,uid:info.uid};
 }
 const sameLock=(a:Lock,b:Lock)=>a.pid===b.pid&&a.ino===b.ino&&a.dev===b.dev&&a.uid===b.uid;
-export async function stopOwnedWorker(io:{lock:()=>Promise<Lock>;identity:(pid:number)=>Promise<Identity|undefined>;cwd:(pid:number)=>Promise<string>;signal:(pid:number)=>void;absent:()=>Promise<boolean>;pause:()=>Promise<void>;now:()=>number;verified?:(pid:number,parentPid:number)=>void},root:string,uid:number,timeoutMs=120000){
+export async function stopOwnedWorker(io:{lock:()=>Promise<Lock>;identity:(pid:number)=>Promise<Identity|undefined>;cwd:(pid:number)=>Promise<string>;signal:(pid:number)=>void;absent:()=>Promise<boolean>;pause:()=>Promise<void>;now:()=>number;verified?:(pid:number,parentPid:number)=>void;osState?:(pid:number)=>Promise<string>},root:string,uid:number,timeoutMs=120000){
  const lock=await io.lock();const info=await io.identity(lock.pid);
  if(!info||lock.uid!==uid||!workerIdentity(info,root,await io.cwd(lock.pid),uid))throw Error('LOCK_OWNER_NOT_VERIFIED_LSPORTS_WORKER');
  const fresh=await io.identity(lock.pid);
  if(!fresh||!sameIdentity(info,fresh)||!sameLock(lock,await io.lock())||!workerIdentity(fresh,root,await io.cwd(lock.pid),uid))throw Error('IDENTITY_CHANGED_BEFORE_SIGNAL');
+ if(io.osState&&/^T/.test(await io.osState(lock.pid)))throw Error('WORKER_OS_STOPPED_REQUIRES_RESUME_RECOVERY');
  io.verified?.(lock.pid,info.parentPid);
  io.signal(lock.pid); // Only one SIGTERM to a positive PID. No parent/group/broad process matching.
  const deadline=io.now()+timeoutMs;

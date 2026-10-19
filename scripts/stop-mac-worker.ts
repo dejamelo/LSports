@@ -2,7 +2,7 @@ import {root,statePath} from '@lsports/feed-store';
 import {realpath} from 'node:fs/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 import {diagnoseCutover,safeError} from './cutover-diagnostics.js';
-import {stopOwnedWorker,readOwner,processIdentity,processCwd,pathAbsent,journalHashes,normalPause} from './stop-owned-worker.js';
+import {stopOwnedWorker,readOwner,processIdentity,processCwd,processStateCode,pathAbsent,journalHashes,normalPause} from './stop-owned-worker.js';
 let stage='identify';let signalRequested=false;
 const emit=(value:object)=>console.log(JSON.stringify({operation:'cutover.stop',workerStarted:false,awsChanged:false,...value}));
 try{
@@ -11,7 +11,7 @@ try{
  emit({stage,status:'ok',processes:before.processes,locks:before.locks});
  if(!await pathAbsent(lock)){
   stage='verified_shutdown';
-  const result=await stopOwnedWorker({lock:()=>readOwner(lock),identity:processIdentity,cwd:processCwd,
+  const result=await stopOwnedWorker({lock:()=>readOwner(lock),identity:processIdentity,cwd:processCwd,osState:processStateCode,
    absent:async()=>await pathAbsent(lock)&&await pathAbsent(lock+'.reclaim'),pause:normalPause,now:Date.now,
    signal:pid=>{signalRequested=true;process.kill(pid,'SIGTERM');},
    verified:(pid,parentPid)=>emit({stage:'signal_target',status:'verified',ownerPid:pid,parentPid,signal:'SIGTERM',parentSignaled:false})},await realpath(root),process.getuid!());
@@ -33,7 +33,7 @@ try{
  }
 }catch(e){
  const message=(e as Error).message;
- const allowed=['LOCK_UNVERIFIED','LOCK_OWNER_UNVERIFIED','LOCK_OWNER_NOT_VERIFIED_LSPORTS_WORKER','IDENTITY_CHANGED_BEFORE_SIGNAL','IDENTITY_CHANGED_WHILE_WAITING','GRACEFUL_SHUTDOWN_TIMEOUT_LOCK_PRESERVED','PROCESS_IDENTITY_UNVERIFIED','CWD_UNVERIFIED','PLATFORM_UNSUPPORTED','JOURNALS_MISSING','JOURNAL_UNVERIFIED','JOURNALS_CHANGED_AFTER_SHUTDOWN'];
+ const allowed=['WORKER_OS_STOPPED_REQUIRES_RESUME_RECOVERY','PROCESS_STATE_UNVERIFIED','LOCK_UNVERIFIED','LOCK_OWNER_UNVERIFIED','LOCK_OWNER_NOT_VERIFIED_LSPORTS_WORKER','IDENTITY_CHANGED_BEFORE_SIGNAL','IDENTITY_CHANGED_WHILE_WAITING','GRACEFUL_SHUTDOWN_TIMEOUT_LOCK_PRESERVED','PROCESS_IDENTITY_UNVERIFIED','CWD_UNVERIFIED','PLATFORM_UNSUPPORTED','JOURNALS_MISSING','JOURNAL_UNVERIFIED','JOURNALS_CHANGED_AFTER_SHUTDOWN'];
  emit({stage,status:'blocked',signalRequested,reason:allowed.includes(message)?message:safeError(e),
   note:'No raw commands/errors printed. No force kill, parent/group signals or lock removal. Preserve checkpoint/journals; AWS worker remains untouched.'});process.exitCode=2;
 }

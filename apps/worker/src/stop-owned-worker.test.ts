@@ -48,3 +48,6 @@ test('worker matcher accepts npm workspace cwd, rejects API and generic supervis
  assert.equal(workerIdentity({...f.info,args:'node /repo/apps/api/src/index.ts'},'/repo','/repo',501),false);
  assert.equal(workerIdentity({...f.info,args:'npm run dev:worker'},'/repo','/repo',501),false);
 });
+test('normal stop refuses an already OS-stopped owner without sending TERM',async()=>{
+ const f=fixture();await assert.rejects(stopOwnedWorker({...f.io,osState:async()=> 'T'},'/repo',501,10),/WORKER_OS_STOPPED_REQUIRES_RESUME_RECOVERY/);assert.deepEqual(f.signals,[]);
+});

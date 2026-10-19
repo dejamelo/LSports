@@ -59,7 +59,7 @@ async function main(){
  const ready=after.status==='ok'&&stable===true;
  console.log(JSON.stringify({operation:'shutdown.diagnose',status:ready?'ready_for_export':'blocked',readOnly:true,providerRequests:0,workerStarted:false,awsChanged:false,
   owner,checkpointObservation:{before:first,after:second,changed:JSON.stringify(first)!==JSON.stringify(second)},journalsStable:stable,
-  currentEvidence:after,observationWindowSeconds:5,pendingStage:'not_proven_in_existing_process',loadedCodeVersion:'unknown',
+  currentEvidence:after,observationWindowSeconds:5,pendingStage:/^T/.test(String((owner as {processState?:{state?:string}}).processState?.state||''))?'os_stopped_before_javascript_progress':'not_proven_in_existing_process',loadedCodeVersion:'unknown',
   note:'No signals or lock removal. Socket state and persisted phase do not identify a specific pending Promise. Logs may predate this signal; no raw commands, endpoints, log paths or payloads printed.'}));
  process.exitCode=ready?0:2;
 }
