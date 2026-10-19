@@ -97,3 +97,50 @@ fonte, além dos testes locais de plataforma/feed, sem chamadas LSports.
 A aplicação real na AWS e login autenticado pelo proprietário continuam sendo
 validações da execução no Mac, não são declarados concluídos pelo teste local.
 Apostas sem feed válido permanecem recusadas pelo servidor.
+
+## Checkout do Mac com alterações rastreadas
+
+`TRACKED_CHANGES_PRESERVED` em 7bafc84 era emitido no Mac, antes de selecionar a
+chave ou abrir SSH. Não veio do servidor; nesse bloqueio nenhuma API/worker foi
+alterada. O executor antigo não mostrava os caminhos. Sem acesso ao checkout do
+Mac, não é possível atribuir nomes reais às mudanças com base só nesse código.
+
+Para retomar SEM alterar, stashear ou descartar o trabalho local, usar a versão
+commitada do executor em diretório temporário, explicitando o commit publicado:
+
+```bash
+bash <<'MAC'
+set -euo pipefail
+cd "$HOME/LSports"
+git fetch origin feat/sportsbook-demo
+ADL_TARGET="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+ADL_RUN="$(mktemp -d "${TMPDIR:-/tmp}/adl-api-update.XXXXXX")"
+git archive "$ADL_TARGET" deploy/homologation | tar -x -C "$ADL_RUN"
+node "$ADL_RUN/deploy/homologation/update-adl-api.mjs" \
+  --repo "$PWD" --commit "$ADL_TARGET" --preserve-local-changes
+MAC
+```
+
+Não usa `git pull`, merge, reset, clean ou stash; HEAD, índice, arquivos e
+exclusões locais permanecem. `local_source_comparison` identifica ambiente,
+commit pretendido, HEAD local, caminhos/status, renomes, modos Git, diferenças
+de conteúdo do working tree e índice em relação ao commit pretendido. Conteúdo,
+patches e segredos não aparecem no terminal.
+
+Antes de SSH, o executor cria backup 0700/0600 em:
+`~/Library/Application Support/ADL/Backups/LocalSource/panel-api-local-*`.
+Preserva patches binários separados staged/unstaged, índice, bytes locais,
+versão do índice, versão pretendida, exclusões/renomes/symlinks/modos e manifesto
+SHA-256 verificado. Detecta mudanças durante a cópia e bloqueia nesse caso.
+A cópia local é preservada; não se publica no servidor.
+
+`--preserve-local-changes` significa **publicar exclusivamente o commit
+explicitamente indicado**, deixando as edições locais de fora. Não significa
+mesclar ou aprovar automaticamente essas edições. Inclusive o Python remoto é
+lido do objeto Git desse commit, não do arquivo possivelmente alterado no Mac.
+A etapa AWS mantém backup, compatibilidade e rollback descritos acima.
+
+Para incorporar uma edição local à publicação, revisá-la e criar um commit
+separado posteriormente; não reaplicar patches automaticamente. Para consulta
+sem SSH, acrescentar `--inspect-local` ao mesmo executor (faz a cópia protegida
+quando necessário). Não compartilhar os arquivos `.private` no chat.

@@ -7,6 +7,7 @@ import {spawn,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {randomBytes} from 'node:crypto';
 import {createInterface} from 'node:readline/promises';
+import {inspectLocalSource} from './api-local-source.mjs';
 const HERE=path.dirname(fileURLToPath(import.meta.url)),ROOT=path.resolve(HERE,'../..');
 const exec=promisify(execFile),quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
 export function productionSource(name){
@@ -15,19 +16,32 @@ export function productionSource(name){
  ['scripts/bootstrap-platform.ts','scripts/recover-platform-access.ts'].includes(name);
 }
 async function main(){
- const sha=(await exec('git',['rev-parse','HEAD'],{cwd:ROOT})).stdout.trim();
+ const options=process.argv.slice(2);let repo=ROOT,ref='HEAD',preserve=false,inspect=false;
+ for(let i=0;i<options.length;i++){
+  if(options[i]==='--repo'&&options[i+1])repo=path.resolve(options[++i]);
+  else if(options[i]==='--commit'&&options[i+1])ref=options[++i];
+  else if(options[i]==='--preserve-local-changes')preserve=true;
+  else if(options[i]==='--inspect-local')inspect=true;
+  else throw Error('INVALID_OPTION');
+ }
+ if(ref.startsWith('-'))throw Error('INVALID_COMMIT_REF');
+ const sha=(await exec('git',['rev-parse','--verify',ref+'^{commit}'],{cwd:repo})).stdout.trim();
  if(!/^[a-f0-9]{40}$/.test(sha))throw Error('COMMIT_INVALID');
- if((await exec('git',['status','--porcelain','--untracked-files=no'],{cwd:ROOT})).stdout.trim())throw Error('TRACKED_CHANGES_PRESERVED');
+ const local=await inspectLocalSource(repo,sha,path.join(os.homedir(),'Library','Application Support','ADL','Backups','LocalSource'));
+ console.log(JSON.stringify({stage:'local_source_comparison',status:local.trackedChanges.length?'preserved':'clean',...local,remoteChangesRequested:false}));
+ if(inspect)return;
+ if(local.trackedChanges.length&&!preserve)throw Error('TRACKED_CHANGES_PRESERVED');
+ if(preserve&&ref==='HEAD')throw Error('EXPLICIT_INTENDED_COMMIT_REQUIRED');
  const keys=(await fs.readdir(path.join(os.homedir(),'Downloads'),{withFileTypes:true})).filter(x=>x.isFile()&&/Lottery.*Key\.pem$/.test(x.name));
  if(keys.length!==1)throw Error('EXACTLY_ONE_SSH_KEY_REQUIRED');
- const source=await fs.readFile(path.join(HERE,'update-adl-api.py'),'utf8');
+ const source=(await exec('git',['show',sha+':deploy/homologation/update-adl-api.py'],{cwd:repo,maxBuffer:1024*1024})).stdout;
  const args=['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com'];
  const lines=[];
  const ssh=spawn('ssh',[...args,'sudo -n python3 -c '+quote(source)+' '+quote(sha)],{stdio:['pipe','pipe','pipe']});
  ssh.stderr.resume();let pending='';
  ssh.stdout.on('data',chunk=>{pending+=chunk;let end;while((end=pending.indexOf('\n'))>=0){const line=pending.slice(0,end);pending=pending.slice(end+1);try{const d=JSON.parse(line);lines.push(d);console.log(JSON.stringify(d));}catch{/* no raw SSH output */}}});
- const names=(await exec('git',['ls-tree','-r','--name-only',sha],{cwd:ROOT,maxBuffer:4*1024*1024})).stdout.trim().split('\n').filter(productionSource);
- const archive=spawn('git',['archive','--format=tar',sha,...names],{cwd:ROOT,stdio:['ignore','pipe','pipe']});archive.stderr.resume();
+ const names=(await exec('git',['ls-tree','-r','--name-only','-z',sha],{cwd:repo,maxBuffer:4*1024*1024})).stdout.split('\0').filter(Boolean).filter(productionSource);
+ const archive=spawn('git',['archive','--format=tar',sha,...names],{cwd:repo,stdio:['ignore','pipe','pipe']});archive.stderr.resume();
  const exit=p=>new Promise((r,j)=>{p.on('error',j);p.on('close',r);});
  const finished=Promise.all([exit(ssh),exit(archive)]);ssh.stdin.on('error',()=>{});archive.stdout.pipe(ssh.stdin);
  const codes=await finished;
