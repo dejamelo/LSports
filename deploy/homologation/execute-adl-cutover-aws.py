@@ -64,6 +64,7 @@ def cutover_main():
         raw=sys.stdin.buffer.read(1024*1024+1);require(len(raw)<=1024*1024,'HANDOFF_SIZE_LIMIT')
         request=json.loads(raw);action=request.get('action')
         if action=='patch_worker':return patch_worker(request)
+        if action=='repair_snapshot':return repair_snapshot(request)
         if action=='preflight':return inspect_aws()
         handoff=request['handoff'];audit=handoff['audit']
         require(action in ('import','start','status','recover_start'),'INVALID_ACTION')

@@ -34,7 +34,7 @@ async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFi
 export async function run(args){
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
@@ -48,22 +48,29 @@ export async function run(args){
   const keys=(await fs.readdir(path.join(os.homedir(),'Downloads'),{withFileTypes:true})).filter(f=>f.isFile()&&/Lottery.*Key\.pem$/.test(f.name));if(keys.length!==1)throw Error('SSH_KEY_NOT_UNIQUE_OR_AVAILABLE');
   const common=(await fs.readFile(path.join(here,'resume-adl-api.py'),'utf8')).split("if __name__=='__main__':")[0];
   const inspect=(await fs.readFile(path.join(here,'inspect-cutover-aws.py'),'utf8')).split("if __name__=='__main__':")[0];
-  const source=common+'\n'+inspect+'\n'+await fs.readFile(path.join(here,'patch-adl-worker-image.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'execute-adl-cutover-aws.py'),'utf8');
+  const source=common+'\n'+inspect+'\n'+await fs.readFile(path.join(here,'patch-adl-worker-image.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'repair-adl-snapshot.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'execute-adl-cutover-aws.py'),'utf8');
   const remote=async(action,extra={})=>{
    const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com','sudo -n python3 -c '+quote(source)],JSON.stringify({action,...extra}),360000);
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
   stage='remote_consumer_gate';const pre=await remote('preflight');
-  if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||String(pre.workerModel?.memoryLimitBytes)!=='4294967296'||String(pre.workerModel?.prematchCapMB)!=='256'||String(pre.workerModel?.inplayCapMB)!=='128')throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
+  if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||String(pre.workerModel?.memoryLimitBytes)!=='4294967296'||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
-  if(args[4]==='--validate-only'){
+  if(['--validate-only','--repair-snapshot'].includes(args[4])){
    stage='validation_resume_gate';
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
    if(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running)throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
    const mac=rows.find(r=>r.operation==='cutover.audit');if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
+   if(args[4]==='--repair-snapshot'){
+    stage='snapshot_capacity_repair';
+    const {createHash}=await import('node:crypto');const sourceHashes={};
+    for(const name of ['provider.ts','diagnostics.ts','snapshot-capacity.ts'])sourceHashes[name]=createHash('sha256').update(await command('git',['show','HEAD:apps/worker/src/'+name],undefined,10000,true)).digest('hex');
+    const result=await remote('repair_snapshot',{handoff,freshAuditAt:mac.capturedAt,sourceHashes});
+    ledger.steps.snapshot_capacity_repair={status:'ok',at:new Date().toISOString(),result};await save();
+   }
    stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress);return;
   }
   stage='local_protection';

@@ -386,3 +386,40 @@ Snapshots só são considerados validados em sessões atuais, com baseline pront
 checkpoint recente. Keepalive, dados restaurados e mercados encerrados continuam
 insuficientes para liberar cotações. Sessão autenticada de iframe ainda exige a
 operação de homologação própria; esse monitor não declara iframe validado.
+
+### Dimensionar um snapshot que excedeu 128 MiB na AWS
+
+`--repair-snapshot` exige migração concluída e Mac sem consumidor. Inspeciona o
+container atual, sua imagem, limites de Compose/Docker, cgroup memory.max/current,
+e a admissão V8/availableMemory com o mesmo ambiente dentro do container. O probe
+é um processo auxiliar, não mede o heap ocupado do processo principal; a proteção
+real continua sendo recalculada pelo worker imediatamente antes de cada snapshot.
+Verifica hashes dos três módulos HTTP/capacidade contra a revisão Git preparada;
+fonte diferente bloqueia, sem patch indiscriminado de imagem antiga.
+
+A lane é identificada pelo erro e pela capacidade efetiva: só eleva de 128 para
+256 MiB se houver response_size_limit com HTTP 200 e responseLimitBytes=134217728
+para aquela lane. Não presume que seja PreMatch. Se a lane já usa 256 MiB, não
+reinicia nem eleva acima do teto suportado. A outra lane mantém sua configuração.
+
+Mantém container em 4 GiB e NODE_OPTIONS existente (heap 3072 MiB). O orçamento
+para 256 MiB é 2112 MiB; exige admissão do probe e margem conservadora do cgroup
+antes de qualquer parada. Recusa preventiva preserva o worker running e imprime
+valores numéricos. Não aumenta heap para contornar RAM disponível.
+
+Quando há ajuste comprovado: backup protegido de deployment/inspeção, SIGTERM único
+sem SIGKILL, aguarda até 90 s, exige saída e liberação dos locks pelo próprio worker,
+copia checkpoint/journals offline e verifica SHA-256 por streaming. Só então adiciona
+override do limite da lane, compara o modelo inteiro, preserva recibo e atualiza a
+referência de sessão da validação. Recria somente worker, sem build/pull/deps, e
+retoma a validação dos snapshots atuais. Não toca em bilhetes, POSNET, credenciais,
+assinaturas ou journals; cooldowns persistidos continuam impostos pelo agendador.
+Se o encerramento não terminar ou houver lock, não força nem remove: registra a
+etapa e interrompe. Uma falha posterior preserva backups para recuperação explícita.
+
+`distribution_still_off`/AMQP 320 são coletados separadamente nos logs e sessionEnds;
+o ajuste de tamanho não os declara resolvidos. Local_operation_cooldown após uma
+falha de volume é o adiamento preservado pelo scheduler, não prova HTTP 429.
+O monitor não chama startDistribution nem diagnose:trade; o worker existente usa
+sua rotina normal. Persistindo OFF/320, encaminhar a cronologia UTC ao ticket
+217525 para confirmar o motivo do broker e o estado dos pacotes Test.
