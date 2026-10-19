@@ -43,6 +43,8 @@ def classify(data):
         'image_unavailable':lambda:'no such image' in text or 'pull access denied' in text,
         'network_missing':lambda:'network' in text and 'not found' in text,
         'disk_full':lambda:'no space left on device' in text,
+        'module_not_found':lambda:'err_module_not_found' in text or 'module_not_found' in text,
+        'unknown_file_extension':lambda:'err_unknown_file_extension' in text,
         'permission_denied':lambda:'permission denied' in text or 'eacces' in text,
         'sqlite_open_failed':lambda:'sqlite_cantopen' in text or 'unable to open database' in text,
         'read_only_filesystem':lambda:'read-only file system' in text or 'erofs' in text,

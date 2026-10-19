@@ -221,3 +221,45 @@ Validação local: sete testes de retomada, incluindo prova pelo parser Compose,
 gates de causa conhecida, diferenças inesperadas bloqueadas e API-only sem build;
 Engine rejeitou a forma antiga e aceitou a corrigida. Não declarar leitura do
 log AWS ou saúde da API real antes da saída do operador.
+
+### API exit 1 after tmpfs repair — source access diagnostic
+
+The protected release receiver uses umask 077 and Python's `tarfile` data filter.
+Directory modes are discarded by that filter; extracted source directories become
+root-owned 0700. COPY preserves them, while the runtime is USER node. This defect
+is reproduced locally; the Mac report alone does not prove it caused the AWS exit.
+
+Run on the Mac (no AWS worker or POSNET changes):
+
+```sh
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/repair-adl-runtime.mjs --apply
+```
+
+Without `--apply`, the command only reads private log classifications and runs
+network-disabled, read-only Node filesystem probes against the exact local image.
+No application code, environment files, credentials or data volumes enter those
+probes. Root is used only for a comparison probe; the application stays non-root.
+The command prints fixed error categories and access results, never raw logs.
+
+Apply requires both module/access failure in the private API logs and EACCES for
+non-root with successful root reads. Missing files, unrecognized causes, a running
+AWS worker or unrelated model changes block repair. Existing Compose overrides
+are honored, including the completed tmpfs repair. Backup includes the previous
+metadata, resolved model, image metadata and private API logs in a root-only
+`/var/backups/adl-runtime-repair-*` directory before configuration changes.
+
+The derived image is built offline FROM the immutable existing image ID, changing
+only source-directory traversal and source-file readability. No npm installation,
+registry pull, live-volume chmod/chown or deletion occurs. Both service image
+references are prepared consistently, but only `api` is recreated with no-deps,
+no-build and pull-never. Original image is retained. The saved deployment metadata
+lists the new override and backup. Success requires control HTTP 200 AND Docker
+health=healthy. Failure identifies its stage and whether API mutation was requested;
+retain the backup and report that sanitized result before retrying. Do not use the
+original prepare script or manually start the AWS worker.
+
+Future full image builds normalize these same source permissions in
+Dockerfile.homologation; secrets, env and runtime trees are outside that operation.
+The AWS cause and startup remain unvalidated until the operator runs this command.

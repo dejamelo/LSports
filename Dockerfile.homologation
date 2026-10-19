@@ -10,6 +10,8 @@ RUN --mount=type=secret,id=build_ca \
       NODE_EXTRA_CA_CERTS=/run/secrets/build_ca npm ci; \
     else npm ci; fi \
     && npm run build \
+    && find /app/apps /app/packages /app/scripts -type d -exec chmod 0755 {} + \
+    && find /app/apps /app/packages /app/scripts -type f -exec chmod a+r {} + \
     && mkdir -p /app/.runtime/feed /app/.runtime/platform \
     && chown -R node:node /app/.runtime
 ENV NODE_ENV=production
