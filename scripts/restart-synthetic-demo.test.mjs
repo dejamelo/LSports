@@ -96,7 +96,7 @@ test(
       path = await import("node:path"),
       { fileURLToPath, pathToFileURL } = await import("node:url");
     const exec = promisify(execFile);
-    for (const port of [3101, 5174, 43762]) {
+    for (const port of [3101, 5174, 43762, 43763]) {
       try {
         const { stdout } = await exec("lsof", [
           "-nP",
@@ -132,8 +132,8 @@ test(
       path.join(root, "scripts/synthetic-demo.ts"),
       `import {startSyntheticDemo} from ${JSON.stringify(pathToFileURL(path.join(repo, "scripts/synthetic-demo.ts")).href)};const demo=await startSyntheticDemo({directory:${JSON.stringify(path.join(root, "isolated-data"))}});console.log('isolated-demo-ready');for(const sig of ['SIGTERM','SIGINT'])process.once(sig,()=>void demo.close());`,
     );
-    let old, helper;
-    const ready = (child) =>
+    let old, helper, replacement;
+    const ready = (child, marker="isolated-demo-ready") =>
       new Promise((resolve, reject) => {
         const timer = setTimeout(
           () => reject(Error("Isolated demo not ready")),
@@ -142,7 +142,7 @@ test(
         let out = "";
         child.stdout.on("data", (chunk) => {
           out += chunk;
-          if (out.includes("isolated-demo-ready")) {
+          if (out.includes(marker)) {
             clearTimeout(timer);
             resolve();
           }
@@ -150,7 +150,7 @@ test(
         child.once("error", reject);
         child.once("exit", (code) => {
           clearTimeout(timer);
-          if (!out.includes("isolated-demo-ready"))
+          if (!out.includes(marker))
             reject(Error("Isolated demo exited " + code));
         });
         child.stderr.resume();
@@ -160,12 +160,12 @@ test(
         ? Promise.resolve(child.exitCode)
         : new Promise((resolve) => child.once("exit", resolve));
     try {
-      old = spawn(
-        process.execPath,
-        ["--import", "tsx", "scripts/synthetic-demo.ts"],
-        { cwd: root, stdio: ["ignore", "pipe", "pipe"] },
-      );
+      const modern=await fs.readFile(path.join(root,'scripts/restart-synthetic-demo.mjs'),'utf8');
+      // Reproduce the released controller that held its port while the demo ran.
+      await fs.writeFile(path.join(root,'scripts/restart-synthetic-demo.mjs'),`import{createServer}from'node:net';import{spawn}from'node:child_process';const lease=createServer();await new Promise(r=>lease.listen(43762,'127.0.0.1',r));const child=spawn(process.execPath,['--import','tsx','scripts/synthetic-demo.ts'],{stdio:'inherit'});process.once('SIGTERM',()=>child.kill('SIGTERM'));await new Promise(r=>child.once('exit',r));await new Promise(r=>lease.close(r));`);
+      old=spawn(process.execPath,['scripts/restart-synthetic-demo.mjs'],{cwd:root,stdio:['ignore','pipe','pipe']});
       await ready(old);
+      await fs.writeFile(path.join(root,'scripts/restart-synthetic-demo.mjs'),modern);
       const manifest = await fs.readFile(
         path.join(root, "isolated-data/manifest.json"),
         "utf8",
@@ -174,7 +174,7 @@ test(
         cwd: root,
         stdio: ["ignore", "pipe", "pipe"],
       });
-      await ready(helper);
+      await ready(helper,'"stage":"demo_ready"');
       assert.equal(await exited(old), 0);
       assert.equal(
         await fs.readFile(
@@ -183,9 +183,11 @@ test(
         ),
         manifest,
       );
-      helper.kill("SIGTERM");
-      assert.equal(await exited(helper), 0);
+      replacement=spawn(process.execPath,['scripts/restart-synthetic-demo.mjs'],{cwd:root,stdio:['ignore','pipe','pipe']});
+      await ready(replacement,'"stage":"demo_ready"');assert.equal(await exited(helper),0);
+      replacement.kill('SIGTERM');assert.equal(await exited(replacement),0);
     } finally {
+      if(replacement&&replacement.exitCode===null){replacement.kill('SIGTERM');await exited(replacement);}
       if (helper && helper.exitCode === null) {
         helper.kill("SIGTERM");
         await exited(helper);

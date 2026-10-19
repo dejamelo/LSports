@@ -94,9 +94,9 @@ async function command(bin, args) {
     throw Error("DEMO_INSPECTION_FAILED_NO_RAW_OUTPUT");
   }
 }
-async function owners() {
+async function owners(ports = [3101, 5174]) {
   return Promise.all(
-    [3101, 5174].map(async (port) => [
+    ports.map(async (port) => [
       ...new Set(
         (
           await command("lsof", [
@@ -116,11 +116,12 @@ async function owners() {
   );
 }
 async function inspect(pid) {
-  const [uid, started, cmd, cwd] = await Promise.all([
+  const [uid, started, cmd, cwd, parentPid] = await Promise.all([
     command("ps", ["-p", String(pid), "-o", "uid="]),
     command("ps", ["-p", String(pid), "-o", "lstart="]),
     command("ps", ["-p", String(pid), "-o", "command="]),
     command("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]),
+    command("ps", ["-p", String(pid), "-o", "ppid="]),
   ]);
   if (!started.trim()) return null;
   const directories = cwd
@@ -130,6 +131,8 @@ async function inspect(pid) {
   return {
     pid,
     uid: Number(uid.trim()),
+    parentPid: Number(parentPid.trim()),
+    controllerVerified:/^(?:\S*\/)?node\s+(?:\S*\/)?scripts\/restart-synthetic-demo\.mjs\s*$/.test(cmd.trim()),
     started: started.trim(),
     cwd: directories.length === 1 ? directories[0] : "",
     scriptVerified:
@@ -145,10 +148,22 @@ async function main() {
     await new Promise((resolve, reject) => {
       lease.once("error", () => reject(Error("DEMO_RESTART_ALREADY_RUNNING")));
       lease.listen(
-        { host: "127.0.0.1", port: 43762, exclusive: true },
+        { host: "127.0.0.1", port: 43763, exclusive: true },
         resolve,
       );
     });
+    // Older versions held 43762 for the entire demo lifetime. Verify that
+    // exact controller and its listening child before requesting normal stop.
+    const [legacy] = await owners([43762]);
+    if(legacy.length){
+      check(legacy.length===1,'LEGACY_DEMO_CONTROLLER_UNVERIFIED');
+      const controller=await inspect(legacy[0]),listening=await owners();
+      check(listening.every(pids=>pids.length===1)&&listening[0][0]===listening[1][0],'LEGACY_DEMO_CHILD_UNVERIFIED');
+      const child=await inspect(listening[0][0]),expectedRoot=await realpath(root);
+      check(controller?.controllerVerified&&controller.uid===process.getuid()&&controller.cwd===expectedRoot&&verifiedDemo(child,expectedRoot,process.getuid())&&child.parentPid===controller.pid,'LEGACY_DEMO_CONTROLLER_UNVERIFIED');
+      await stopVerifiedDemo({owners:async()=>{const [ids]=await owners([43762]);return [ids,ids];},inspect:async pid=>{const owner=await inspect(pid);return owner?{...owner,scriptVerified:owner.controllerVerified}:null;},signal:process.kill,expectedRoot,uid:process.getuid()});
+      emit({stage:'legacy_demo_controller',status:'stopped',workersChanged:false});
+    }
     const result = await stopVerifiedDemo({
       owners,
       inspect,
@@ -172,13 +187,21 @@ async function main() {
       ["--import", "tsx", "scripts/synthetic-demo.ts"],
       { cwd: root, stdio: "inherit" },
     );
-    const stop = () => child.kill("SIGTERM");
+    let stopRequested=false;const stop = () => {stopRequested=true;child.kill("SIGTERM");};
     process.once("SIGTERM", stop);
+    const closed=new Promise((resolve,reject)=>{child.once("error",()=>reject(Error("DEMO_START_FAILED")));child.once("close",resolve);});void closed.catch(()=>{});
     try {
-      const code = await new Promise((resolve, reject) => {
-        child.once("error", () => reject(Error("DEMO_START_FAILED")));
-        child.once("close", resolve);
-      });
+      const deadline=Date.now()+20000;let ready=false;
+      while(Date.now()<deadline&&child.exitCode===null){
+        try{const response=await fetch('http://localhost:3101/api/control/status',{signal:AbortSignal.timeout(1000)});if(response.ok&&response.headers.get('X-ADL-Test-Only')==='synthetic-isolated'&&(await response.json()).initialized===true){const listeners=await owners();if(listeners.every(ids=>ids.length===1&&ids[0]===child.pid)){ready=true;break;}}}catch{}
+        await delay(100);
+      }
+      if(stopRequested){process.exitCode=(await closed)??0;return;}
+      check(ready,'DEMO_NOT_READY_NO_FORCE');
+      // Exclusion protects restart/start, not the entire lifetime of the demo.
+      await new Promise(resolve=>lease.close(resolve));
+      emit({stage:'demo_ready',status:'ok',restartLeaseReleased:true,workersChanged:false});
+      const code = await closed;
       process.exitCode = code ?? 1;
     } finally {
       process.removeListener("SIGTERM", stop);

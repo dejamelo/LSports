@@ -1,3 +1,4 @@
+import {usePresentation} from "./usePresentation";
 import {minorInput,stakeShortcuts,type StakeLimits} from "./stake-limits";
 import {majorToMinor,formatMinor,minor,returnMinor} from '@lsports/contracts';
 import { sportsbookApi, embedded, getEmbedContext } from "./sportsbook-api";
@@ -39,6 +40,7 @@ const money = (v: number) =>
   new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(v);
 export default function App() {
   const embedScope=getEmbedContext();
+  const presentation=usePresentation(embedScope?.channel||"web");
   const [feed, setFeed] = useState<EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:StakeLimits}>();
   const [error, setError] = useState("");
   const [tab, setTab] = useState("Prepartido");
@@ -47,6 +49,8 @@ export default function App() {
   const [picks, setPicks] = useState<Pick[]>([]);
   const [amount, setAmount] = useState(embedded ? "" : "1000");
   const [message, setMessage] = useState("");
+  const slipContent=useRef<HTMLDivElement>(null);
+  useEffect(()=>{if(message)requestAnimationFrame(()=>slipContent.current?.querySelector<HTMLElement>(".success,.ticket-error")?.scrollIntoView({block:"nearest"}));},[message]);
   const [messageKind,setMessageKind] = useState<"success"|"error">("error");
   const amountInitialized=useRef(false);
   useEffect(()=>{
@@ -58,6 +62,9 @@ export default function App() {
   const [ticketRefresh,setTicketRefresh] = useState(0);
   const submission = useRef<{payload:string;key:string} | undefined>(undefined);
   const inFlight = useRef(false);
+  const [reviewed,setReviewed]=useState("");
+  const [registeredId,setRegisteredId]=useState("");
+  const [focusTicketId,setFocusTicketId]=useState("");
   const [mobileMenu, setMobileMenu] = useState(false);
   const [mobileSlip, setMobileSlip] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -147,6 +154,7 @@ export default function App() {
           .includes(query.toLocaleLowerCase("es-AR")),
     ) ?? [];
   const toggle = (event: SportEvent, selection: Selection) => {
+    if(presentation.format==="pos")setMobileSlip(true);
     setMessage("");
     setPicks((old) =>
       old.some((p) => p.selection.id === selection.id)
@@ -174,7 +182,11 @@ export default function App() {
     }catch(error){amountError=error instanceof Error?error.message:'Revisá el importe.';}
   }else valid=Number.isFinite(stake)&&stake>0&&stake<=1000000;
   const quickStakes=embedScope && limits ? stakeShortcuts(limits,oddsMicros).map(value=>({value:minorInput(value,embedScope.currency),label:formatMinor(value,embedScope.currency)})) : embedded ? [] : [500,1000,5000].map(value=>({value:String(value),label:money(value)}));
+  const posReview=embedScope?.channel==="pos" || presentation.format==="pos";
+  const reviewFingerprint=JSON.stringify({amount,picks:currentPicks.map(p=>[p.event.id,p.selection.id,p.selection.odds])});
+  const reviewReady=reviewed===reviewFingerprint;
   const submitTicket = async () => {
+    if(posReview && !reviewReady){setReviewed(reviewFingerprint);return;}
     if(inFlight.current) return;
     const payload=JSON.stringify({...embedScope,stakeMinor:embedScope?simulatedMinor:Math.round(stake*100),selections:currentPicks.map(p=>({eventId:p.event.id,
       marketId:p.event.markets?.find(m=>m.selections.some(s=>s.id===p.selection.id))?.id || "demo",
@@ -192,6 +204,7 @@ export default function App() {
       const result=await r.json();
       if(!r.ok) {setMessage(result.error || "No se pudo aceptar el billete.");return;}
       if(r.status!==201 || typeof result.id!=='string' || !result.id){setMessage("Respuesta no confirmada. Revisá el historial antes de reintentar el mismo billete.");return;}
+      setRegisteredId(result.id);
       setMessageKind("success");
       setMessage(`Billete de prueba registrado: ${result.id}. Sin dinero real.`);
       setTicketRefresh(n=>n+1);
@@ -206,7 +219,7 @@ export default function App() {
       </div>
     );
   return (
-    <>
+    <div className={`sportsbook presentation-${presentation.format} ${presentation.compact?"compact-sportsbook":""}`} data-session-channel={embedScope?.channel||"web"} data-presentation={presentation.format} style={presentation.style}>
       <header className="header">
         <div className="brand" aria-label="Apuesta DEPORTIVA LAT">
           <span className="brand-icon" aria-hidden="true">
@@ -218,9 +231,9 @@ export default function App() {
           </span>
         </div>
         <nav>
-          <a className="active" href="/sportsbook">
+          <button className="active" onClick={()=>chooseTab("Prepartido")}>
             Deportes
-          </a>
+          </button>
           <button onClick={() => chooseTab("En vivo")}>
             En vivo <i />
           </button>
@@ -242,6 +255,7 @@ export default function App() {
         </span>
         <span className="notice-age">18+</span>
       </div>
+      <nav className="sports-rail" aria-label="Deportes disponibles">{sports.map(s=><button key={s.id} aria-pressed={sport===s.id} onClick={()=>chooseSport(s.id)}><span>{s.icon}</span>{s.name}</button>)}</nav>
       <div className="layout">
         <aside className={`sidebar ${mobileMenu ? "expanded" : ""}`}>
           <div className="side-label">EXPLORÁ LA ACCIÓN</div>
@@ -512,7 +526,7 @@ export default function App() {
                 : "Eventos y cuotas ficticios. Modo demo separado de la integración real. Sin apuestas ni dinero real."}
             </p>
           </div>
-          <TicketHistory refresh={ticketRefresh}/>
+          <TicketHistory refresh={ticketRefresh} focusTicketId={focusTicketId}/>
           <footer>
             <span>
               © {new Date().getFullYear()} Apuesta DEPORTIVA LAT ·{" "}
@@ -521,7 +535,7 @@ export default function App() {
             <span>Jugá con responsabilidad. 18+</span>
           </footer>
         </main>
-        <aside className={`betslip ${mobileSlip ? "slip-open" : ""}`}>
+        <aside aria-label="Billete de simulación" className={`betslip ${mobileSlip ? "slip-open" : ""}`}>
           <div className="slip-title">
             <h2>
               <Ticket size={20} /> Mi billete <span>{picks.length}</span>
@@ -534,17 +548,18 @@ export default function App() {
               <X size={18} />
             </button>
           </div>
+          <div className="slip-content" ref={slipContent}>
           <div className="slip-mode">
             SIMULADOR <span>Sin dinero real</span>
           </div>
-          {embedScope && limits && <section className="slip-limits" aria-label="Límites de la operación">
-            <strong>Límites · {embedScope.currency}</strong>
+          {embedScope && limits && <section className="slip-limits" aria-label="Límites de la operación"><details open={!presentation.compact}>
+            <summary>Límites · {embedScope.currency}</summary>
             <p>Por billete: {formatMinor(limits.minStakeMinor,embedScope.currency)} a {formatMinor(limits.maxStakeMinor,embedScope.currency)}.</p>
             <p>Retorno potencial máximo: {formatMinor(limits.maxReturnMinor,embedScope.currency)}.</p>
             <p>{limits.allowRepeatedTickets ? 'Se permiten nuevos billetes del jugador en el mismo evento.' : 'Un solo billete del jugador por evento.'}</p>
             <p>Máximo por jugador/evento: {limits.maxTicketsPerPlayerEvent === null ? 'sin límite de cantidad configurado' : `${limits.maxTicketsPerPlayerEvent} ${limits.maxTicketsPerPlayerEvent===1?"billete":"billetes"}`}; acumulado: {limits.maxStakePerPlayerEventMinor === null ? 'sin límite configurado' : formatMinor(limits.maxStakePerPlayerEventMinor,embedScope.currency)}.</p>
             <p>Selecciones del mismo evento en una combinada: bloqueadas. El servidor verifica límites y acumulados actuales al confirmar.</p>
-          </section>}
+          </details></section>}
           {picks.length === 0 ? (
             <div className="slip-empty">
               <div className="ticket-art">
@@ -621,6 +636,7 @@ export default function App() {
                   min="1"
                   max="1000000"
                   value={amount}
+                  onFocus={e=>{const input=e.currentTarget;requestAnimationFrame(()=>input.scrollIntoView({block:"nearest"}));}}
                   onChange={(e) => {
                     setAmount(e.target.value);
                     setMessage("");
@@ -667,15 +683,8 @@ export default function App() {
                     </button>
                   </div>
                 )}
-                <button
-                  className="simulate"
-                  disabled={submitting || !valid || picksBlocked || pricesChanged}
-                  onClick={submitTicket}
-                >
-                  <Zap size={16} /> {submitting ? "Validando…" : "Simular billete"}
-                </button>
                 {messageKind==="success" && message.startsWith("Billete de prueba registrado:") && <button onClick={()=>{
-                  submission.current=undefined;try{sessionStorage.removeItem("adl-pending-test-ticket");}catch{}setPicks([]);setMessage("");
+                  setRegisteredId("");setReviewed("");submission.current=undefined;try{sessionStorage.removeItem("adl-pending-test-ticket");}catch{}setPicks([]);setMessage("");
                 }}>Armar otro billete de prueba</button>}
                 <p className="slip-fine">
                   {embedScope?`Simulación en ${embedScope.currency}. Sin dinero real, depósitos ni retiros.`:"Puntos ficticios. Sin depósitos ni retiros."}
@@ -689,6 +698,17 @@ export default function App() {
               </div>
             </>
           )}
+          </div>
+          {posReview && reviewReady && !registeredId && <section className="pos-review" aria-label="Revisión del billete"><strong>Revisá antes de confirmar · SIMULACIÓN</strong><p>{currentPicks.map(p=>`${p.event.home} ${p.event.away || ""} · ${p.selection.label} · cuota ${p.selection.odds}`).join(" / ")}</p><p>Importe: {amount} {embedScope?.currency || "pts"} · Retorno potencial: {simulatedReturn || "—"}</p><small>El servidor vuelve a validar cuotas, estado y límites al confirmar.</small><button onClick={()=>setReviewed("")}>Volver a editar</button></section>}
+          {registeredId && <button onClick={()=>{setFocusTicketId(registeredId);setMobileSlip(false);}}>Ver billete registrado</button>}
+          {picks.length>0&&<div className="slip-confirm">                <button
+                  className="simulate"
+                  disabled={!!registeredId || submitting || !valid || picksBlocked || pricesChanged}
+                  onClick={submitTicket}
+                >
+                  <Zap size={16} /> {submitting ? "Validando…" : registeredId ? "Billete registrado" : posReview ? reviewReady ? "Confirmar simulación" : "Revisar billete" : "Simular billete"}
+                </button>
+</div>}
           <div className="slip-bottom">
             <ShieldCheck size={16} />
             <span>
@@ -701,10 +721,11 @@ export default function App() {
       </div>
       <button
         className="mobile-slip-button"
+        aria-expanded={mobileSlip}
         onClick={() => setMobileSlip(!mobileSlip)}
       >
         <Ticket size={19} /> Mi billete <b>{picks.length}</b>
       </button>
-    </>
+    </div>
   );
 }

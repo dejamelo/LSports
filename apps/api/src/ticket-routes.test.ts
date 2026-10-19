@@ -16,7 +16,7 @@ test('HTTP admission is persistent and idempotent; receipt escapes names; histor
   const send=()=>fetch(`${base}/tickets`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':'http-test-0001'},body:JSON.stringify(body)});
   const results=await Promise.all([send(),send()]);assert(results.every(r=>r.status===201));const tickets=await Promise.all(results.map(r=>r.json()));assert.equal(tickets[0].id,tickets[1].id);
   assert.equal((await(await fetch(`${base}/tickets`)).json()).total,1);
-  const html=await(await fetch(`${base}/tickets/${tickets[0].id}/receipt`)).text();assert.match(html,/&lt;script&gt;secret-name/);assert(!html.includes('<script>secret-name'));
+  const html=await(await fetch(`${base}/tickets/${tickets[0].id}/receipt`)).text();assert.match(html,/&lt;script&gt;secret-name/);assert(!html.includes('<script>secret-name'));assert.match(html,/SIMULACIÓN/);assert.match(html,/Retorno potencial al aceptar:/);assert.match(html,/size:80mm auto/);const reprint=await(await fetch(`${base}/tickets/${tickets[0].id}/receipt`)).text();assert.equal(reprint,html);assert.equal((await(await fetch(`${base}/tickets`)).json()).total,1);
   feed.ticketOutcomes=[{eventId:event.id,marketId:body.selections[0].marketId,selectionId:event.selections[0].id,settlement:2,updatedAt:new Date().toISOString()}];
   let saved=await(await fetch(`${base}/tickets/${tickets[0].id}`)).json();assert.equal(saved.status,'WON');assert.equal(saved.revision,1);
   saved=await(await fetch(`${base}/tickets/${tickets[0].id}`)).json();assert.equal(saved.revision,1);

@@ -232,7 +232,7 @@ export default function ControlPanel() {
       setNotice("Datos locales actualizados. Sin consultas al proveedor.");
     });
   return (
-    <div className="control">
+    <div className={`control ${admin && tab === "Sportsbook" ? "control-preview-mode" : ""}`}>
       <header className="control-header">
         <a className="control-brand" href="/control">
           <span>ADL</span>

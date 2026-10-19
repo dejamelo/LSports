@@ -117,3 +117,79 @@ negativa de origem externa, manifesto/credenciais preservados, navegador pelos
 três canais (Web/Móvil/POS), guardas de identidade/reutilização de PID e reinício
 real de um runner com diretório temporário exclusivo. Nenhum acesso à LSports,
 POSNET, worker ou ambiente AWS ocorreu nesses testes.
+
+## Apresentações Web, Móvil e POS
+
+A prévia usa pixels CSS reais, sem zoom ou escala:
+
+| Formato | Dimensão preferida | Apresentação |
+| --- | --- | --- |
+| Web | 1440 × 900 | Navegação lateral, eventos e bilhete lateral |
+| Móvil | 390 × 844 | Uma coluna, cabeçalho compacto, esportes horizontais com quebra de linha, botão inferior do bilhete |
+| POS | 480 × 800 | Sem banner grande; busca/eventos/cuotas, alvos de toque de 44–60px e confirmação fixa |
+
+O painel mostra a dimensão **efetiva**. A largura e a altura são reduzidas quando
+não cabem na tela externa; o conteúdo reflui, não é reduzido por zoom. Nos formatos
+compactos, informações de diagnóstico detalhadas permanecem no painel; o
+sportsbook mantém o estado resumido do feed e os bloqueios do backend.
+
+Depois de abrir o iframe, **Formato de la vista previa** muda somente tamanho e
+apresentação do mesmo documento. Não recria sessão, não muda o canal autorizado,
+não limpa seleções nem o valor digitado. Para mudar o canal de autenticação,
+feche o iframe e crie uma sessão nova. A mensagem de apresentação é aceita apenas
+do pai da mesma origem; não altera token, credencial, moeda, jogador ou regras.
+
+**Simular teclado abierto** reduz a altura disponível em 320px, respeitando o
+espaço mínimo da tela. O bilhete tem conteúdo rolável e confirmação separada;
+em alturas pequenas ocupa a área útil e usa seu botão de fechar, liberando o
+espaço do atalho inferior. O aplicativo observa resize/VisualViewport e mantém
+os campos focados alcançáveis. Isso é validação de viewport reduzido, **não**
+homologação do teclado físico, APK, WebView, impressora ou terminal real. Pais de
+iframe devem fornecer uma área que acompanhe o viewport disponível do aparelho.
+
+Capturas de dados **sintéticos isolados**:
+
+- [Web](previews/sportsbook-web-isolated.png)
+- [Móvil](previews/sportsbook-mobile-isolated.png)
+- [POS](previews/sportsbook-pos-isolated.png)
+- [Bilhete POS](previews/sportsbook-pos-ticket-isolated.png)
+
+O roteiro `scripts/validate-channel-layouts.mts` testa os três canais autenticados,
+redimensionamento sem nova troca de sessão, seleções/valor preservados, tela externa
+de 320px, ausência de overflow horizontal e campo/confirmar sem sobreposição,
+inclusive na página externa do painel. Os roteiros existentes continuam cobrindo
+aceite/recusa, histórico, comprovante e liquidação em armazenamento temporário.
+
+### POS: revisión, confirmación y comprobante (simulación)
+
+En la sesión POS: elegir cuota → informar importe → **Revisar billete** →
+**Confirmar simulación** → **Ver billete registrado** → abrir comprobante.
+Cambiar importe o selecciones invalida la revisión. El servidor conserva la
+validación de origen, sesión, identidad, precios, estado, límites y riesgo.
+La presentación POS también muestra revisión cuando se usa como vista previa.
+
+La referencia idempotente se conserva para el mismo contenido. La prueba aislada
+intercepta una respuesta DESPUÉS de recibir HTTP 201 del servidor y la pierde:
+el reintento devuelve el mismo ID. El bloqueo síncrono evita dos solicitudes por
+doble clic. Tras confirmación visible el botón queda deshabilitado hasta armar
+otro billete. No cambiar el billete después de una respuesta no confirmada:
+consultar historial o reintentar exactamente el mismo contenido. No se promete
+continuidad de la clave tras cerrar/recargar una sesión iframe.
+
+El comprobante HTML reutiliza el billete persistido: ID, fecha ISO UTC, evento,
+mercado, selección, cuota aceptada, importe, retorno potencial exacto calculado
+con cuotas aceptadas, resultado y revisiones. Indica SIMULACIÓN sin valor fiscal
+ni monetario. CSS de impresión para rollo de 80 mm, margen de 3 mm. Reabrir e
+imprimir no crea apuestas. El navegador abre el diálogo, sin confirmar papel
+impreso ni estado físico de la impresora.
+
+No hay APK, SDK Android ni driver de impresora en este repositorio. Existe el
+protocolo legado `/api/posnet/test/capabilities` con trabajos y ACK de impresión
+para billetes `posnet_test`; no es prueba de compatibilidad ni reemplaza la
+sesión POS aislada por cliente/operación. En modo plataforma no se deben abrir
+rutas anónimas legadas para conectar un terminal. POSNET Lottery permanece aparte.
+
+Pendiente físico: identificar APK y contrato autenticado/bridge nativo, modelo
+de terminal e impresora, SDK/driver, papel (80 mm preparado; 58 mm requiere
+adaptación y prueba), teclado Android real, corte de papel, caracteres españoles,
+lectura del ID, reconexión y reimpresión del mismo ID. No se validó dispositivo.

@@ -1,4 +1,4 @@
-import {formatMinor} from '@lsports/contracts';
+import {formatMinor,returnMinor} from '@lsports/contracts';
 import express from 'express';
 import type { EventSource, TestTicket, OperationTicket } from '@lsports/contracts';
 import { TicketStore, TicketError } from '@lsports/feed-store/tickets';
@@ -6,10 +6,10 @@ const escape = (value: unknown) => String(value).replace(/[&<>"']/g, c => ({'&':
 export function receipt(ticket: TestTicket | OperationTicket) {
   const points = (n: number | string | null) => n === null ? 'Pendiente' : ticket.currency==='TEST_POINTS' ? `${(Number(n)/100).toFixed(2)} pts` : formatMinor(String(n),ticket.currency);
   return `<!doctype html><html lang="es-AR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Comprobante de prueba · Apuesta DEPORTIVA LAT</title>
-<style>body{font:14px monospace;max-width:500px;margin:24px auto;padding:12px}li{margin:16px 0;overflow-wrap:anywhere}h1{font-size:20px}small{overflow-wrap:anywhere}@media print{@page{margin:8mm}body{margin:0;max-width:80mm}button{display:none}}</style>
-<h1>ADL · Apuesta DEPORTIVA LAT</h1><h2>PRUEBA · SIN VALOR MONETARIO NI FISCAL</h2><small>ID: ${escape(ticket.id)}</small><p>${escape(ticket.createdAt)} · ${escape(ticket.mode)}</p>
+<style>body{font:12px monospace;overflow-wrap:anywhere;max-width:74mm;margin:24px auto;padding:12px}li{margin:16px 0;overflow-wrap:anywhere}h1{font-size:20px}small{overflow-wrap:anywhere}@media print{@page{size:80mm auto;margin:3mm}body{margin:0;width:74mm;max-width:100%}button{display:none}}</style>
+<h1>ADL · Apuesta DEPORTIVA LAT</h1><h2>SIMULACIÓN · PRUEBA · SIN VALOR MONETARIO NI FISCAL</h2><small>ID: ${escape(ticket.id)}</small><p>${escape(ticket.createdAt)} (UTC) · ${escape(ticket.mode)}</p>
 ${'operationId' in ticket ? `<p>Cliente: ${escape(ticket.clientId)}<br>Operación: ${escape(ticket.operationId)}<br>Moneda simulada: ${escape(ticket.currency)}<br>Canal: ${escape(ticket.channel)}${ticket.terminalId?` · Terminal ${escape(ticket.terminalId)}`:''}</p>`:''}
-<p>Importe ficticio: ${points(ticket.stakeMinor)}<br>Estado: ${escape(ticket.status)} · Revisión ${ticket.revision}<br>Retorno simulado: ${points(ticket.payoutMinor)}</p>
+<p>Importe ficticio: ${points(ticket.stakeMinor)}<br>Retorno potencial al aceptar: ${points(returnMinor(String(ticket.stakeMinor),ticket.selections.map(s=>s.oddsMicros)))}<br>Estado: ${escape(ticket.status)} · Revisión ${ticket.revision}<br>Retorno simulado: ${points(ticket.payoutMinor)}</p>
 <ol>${ticket.selections.map(s => `<li>${escape(s.eventName)}<br>${escape(s.marketName)} · ${escape(s.selectionName)}<br>Cuota aceptada: ${s.acceptedOdds}<br>${escape(s.resultDescription)} (settlement ${escape(s.settlement ?? 'pendiente')})</li>`).join('')}</ol>
 <details><summary>Historial de revisiones</summary>${ticket.history.map(h => `<p>${h.revision} · ${escape(h.at)} · ${escape(h.status)} · ${points(h.payoutMinor)}<br>${escape(h.reason)}</p>`).join('')}</details>
 <p>Sin depósitos, retiros ni cobros. Consultá el historial para comprobar correcciones posteriores.</p><button onclick="window.print()">Imprimir comprobante de prueba</button></html>`;
