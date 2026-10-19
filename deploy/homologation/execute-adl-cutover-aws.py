@@ -65,6 +65,7 @@ def cutover_main():
         request=json.loads(raw);action=request.get('action')
         if action=='patch_worker':return patch_worker(request)
         if action=='repair_snapshot':return repair_snapshot(request)
+        if action=='upgrade_partitioned':return upgrade_partitioned(request)
         if action=='preflight':return inspect_aws()
         handoff=request['handoff'];audit=handoff['audit']
         require(action in ('import','start','status','recover_start'),'INVALID_ACTION')
@@ -205,12 +206,12 @@ def cutover_main():
         return 2
 
 # Explicit fields only: provider exception text, URLs and message payloads never leave SSH.
-FEED_OPERATIONS={'amqp.connection','amqp.channel','amqp.consume','amqp.connect','snapshot.events','snapshot.outright.fixtures','snapshot.outright.markets','distribution.start','distribution.status','feed.decode','feed.apply','feed.stale','worker.start','file.persist'}
+FEED_OPERATIONS={'subscriptions.list','amqp.connection','amqp.channel','amqp.consume','amqp.connect','snapshot.events','snapshot.outright.fixtures','snapshot.outright.markets','distribution.start','distribution.status','feed.decode','feed.apply','feed.stale','worker.start','file.persist'}
 def safe_feed_diagnostic(value):
     if not isinstance(value,dict):return {}
     out={}
     enums={'operation':FEED_OPERATIONS,'category':{'network','rate_limited','invalid_response','authentication_rejected','authentication_or_permission','permission_denied','response_limit','unexpected','configuration','invalid_message','unsupported_message','supplier_error'},
-       'reason':{'connection_closed','channel_closed','consumer_cancelled','consumer_conflict','distribution_still_off','timeout','memory_budget_exceeded','response_size_limit','application_error','null_response_body','missing_response_body','sdk_conversion','sdk_validation','unknown_exception','provider_interrupted','unsupported_message_type'},
+       'reason':{'invalid_snapshot','connection_closed','channel_closed','consumer_cancelled','consumer_conflict','distribution_still_off','timeout','memory_budget_exceeded','response_size_limit','application_error','null_response_body','missing_response_body','sdk_conversion','sdk_validation','unknown_exception','provider_interrupted','unsupported_message_type'},
        'rateLimitSource':{'supplier_http','local_in_flight','local_host_cooldown','local_operation_cooldown'}}
     for key,allowed in enums.items():
         if isinstance(value.get(key),str) and value[key] in allowed:out[key]=value[key]
@@ -224,7 +225,14 @@ def safe_feed_diagnostic(value):
     metadata=value.get('messageMetadata')
     if isinstance(metadata,dict):
         kind=metadata.get('messageType')
-        if type(kind) is int and 0<=kind<=65535:out['messageMetadata']={'messageType':kind}
+        if type(kind) is int and 0<=kind<=65535:
+            safe={'messageType':kind};shape=metadata.get('entityShape')
+            if isinstance(shape,dict):
+                safe_shape={k:v for k,v in shape.items() if k in ('seasons','leagueFixtureRows','leagueFixtureMissingRows') and type(v) is int and v>=0}
+                if shape.get('competition') in ('object','missing_or_invalid'):safe_shape['competition']=shape['competition']
+                if type(shape.get('flatEventsPresent')) is bool:safe_shape['flatEventsPresent']=shape['flatEventsPresent']
+                safe['entityShape']=safe_shape
+            out['messageMetadata']=safe
     for key,allowed in {'deliveryDisposition':{'requeue_requested','unacknowledged_until_close'},'retryPolicy':{'restart_required'}}.items():
         if isinstance(value.get(key),str) and value[key] in allowed:out[key]=value[key]
     if isinstance(value.get('coordinator'),dict):out['coordinator']=safe_coordinator(value['coordinator'])
@@ -236,6 +244,8 @@ def safe_coordinator(value):
         if type(value.get(key)) is int:out[key]=value[key]
     for key in ('at','completedAt'):
         if isinstance(value.get(key),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',value[key]):out[key]=value[key]
+    if type(value.get('partitionPart')) is int and 0<=value['partitionPart']<=50000:out['partitionPart']=value['partitionPart']
+    if isinstance(value.get('recoveryId'),str) and re.fullmatch('[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',value['recoveryId']):out['recoveryId']=value['recoveryId']
     if value.get('outcome') in ('reserved','success','rate_limited','failed'):out['outcome']=value['outcome']
     if isinstance(value.get('failure'),dict):out['failure']=safe_feed_diagnostic(value['failure'])
     return out
@@ -263,7 +273,7 @@ def feed_evidence(directory,consumers):
         schedule=schedule_checked(json.loads(target.read_bytes()))
         entries=[]
         for key,due in schedule['due'].items():
-            match=re.fullmatch(r'(4510|4511):(snapshot\.(?:events|outright\.fixtures|outright\.markets))',key)
+            match=re.fullmatch(r'(4510|4511):(snapshot\.(?:events|outright\.fixtures|outright\.markets)|subscriptions\.list)',key)
             if not match:continue
             coordinator=(schedule.get('requests') or {}).get(key) or {}
             entries.append({'packageId':int(match[1]),'operation':match[2],'dueAt':datetime.datetime.fromtimestamp(due/1000,datetime.timezone.utc).isoformat().replace('+00:00','Z'),'coordinator':safe_coordinator(coordinator)})
@@ -281,11 +291,13 @@ def cutover_status(directory,start_requested):
     available=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))*1024
     require(available>path.stat().st_size*8+64*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
     feed=json.loads(path.read_bytes());lanes={}
-    fields=('phase','session','lastSnapshotAt','lastSnapshotAttemptAt','lastSnapshotErrorAt','recoveryProgress')
+    fields=('phase','session','lastSnapshotAt','lastSnapshotAttemptAt','lastSnapshotErrorAt','recoveryProgress','partitionRecovery')
     for lane in ('prematch','inplay'):
         source=feed.get('connections',{}).get(lane,{})
         lanes[lane]={k:source.get(k) for k in fields}
-        coverage=(feed.get('coverage',{}).get(lane,{}) or {}).get('activity',{})
+        lane_coverage=feed.get('coverage',{}).get(lane,{}) or {}
+        coverage=lane_coverage.get('activity',{})
+        lanes[lane]['decodedMessagesByType']={k:v for k,v in (lane_coverage.get('messagesByType') or {}).items() if re.fullmatch('[0-9]{1,5}',k) and type(v) is int and v>=0}
         lanes[lane]['updates']={k:coverage.get(k) for k in ('lastDataDecodedAt','lastMarketDecodedAt','lastSettlementDecodedAt','lastControlDecodedAt')}
         for key in ('diagnostic','lastSnapshotDiagnostic'):
             lanes[lane][key]=safe_feed_diagnostic(source.get(key))

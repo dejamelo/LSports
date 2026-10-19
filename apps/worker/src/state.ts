@@ -133,7 +133,7 @@ export class TradeState {
     else if(duplicate)activity.lastDuplicateDecodedAt=now;
     else if(events>0){
       activity.lastDataDecodedAt=now;
-      if([1,2,37,39].includes(type))activity.lastEventDecodedAt=now;
+      if([1,2,37,38,39].includes(type))activity.lastEventDecodedAt=now;
       if([3,40,41].includes(type))activity.lastMarketDecodedAt=now;
       if([35,42].includes(type))activity.lastSettlementDecodedAt=now;
     }
@@ -308,6 +308,15 @@ export class TradeState {
         row.marketAt.set(key, Math.max(at, marketTime));
       }
     }
+  }
+  beginPartitionedSnapshot(lane:Lane){
+    // Keep prior outcomes/versions, but never release prices absent from this baseline.
+    for(const row of this.rows[lane].values())if(!row.outright){row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+  }
+  finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit){
+    this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&ids.has(id)));
+    this.metrics[lane].snapshot=audit;
+    this.set(lane,{lastSnapshotAt:new Date().toISOString(),snapshotEvents:ids.size});
   }
   replace(lane: Lane, events: TradeEvent[], at: number, audit?: SnapshotAudit) {
     this.metrics[lane].snapshot = audit;

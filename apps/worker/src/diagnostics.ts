@@ -18,6 +18,7 @@ export type Operation = IntegrationDiagnostic["operation"];
 export type Protocol = IntegrationDiagnostic["protocol"];
 type Observation = {
   lane?:import("@lsports/contracts").Lane;
+  responseLimitMiB?:number;
   operation?: Operation;
   rawResponse?: unknown;
   responseInspection?: import("@lsports/contracts").HttpResponseInspection;
@@ -125,11 +126,14 @@ function observe(
 }
 axios.defaults.adapter = async (config) => {
   const observation = observations.getStore();
-  if(observation?.operation==="snapshot.events"){
+  if(observation?.operation==="snapshot.events"||observation?.responseLimitMiB!==undefined){
     let capacity:ReturnType<typeof snapshotCapacity>;
-    try{capacity=snapshotCapacity(process.env,undefined,observation.lane);}catch{throw configError("configuration",[observation.lane==="inplay"?"LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB":"LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB"],"Límite snapshot inválido: debe ser un entero entre 1 y 256 MiB.");}
+    try{const normal=snapshotCapacity(process.env,undefined,observation.lane);const requested=observation.responseLimitMiB;
+      if(requested!==undefined&&(!Number.isSafeInteger(requested)||requested<1||requested>normal.limitBytes/1048576))throw Error('INVALID_BOUNDED_LIMIT');
+      capacity=requested===undefined?normal:snapshotCapacity({...process.env,[observation.lane==='inplay'?'LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB']:String(requested)},undefined,observation.lane);
+    }catch{throw configError("configuration",[observation.lane==="inplay"?"LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB":"LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB"],"Límite snapshot inválido: debe ser un entero entre 1 y 256 MiB.");}
     observation.responseLimitBytes=capacity.limitBytes;
-    if(!capacity.allowed)throw new OperationError({operation:observation.operation,protocol:"local",category:"response_limit",reason:"memory_budget_exceeded",stage:"request",responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,snapshotMemory:capacity.memory,deferred:true,message:"Snapshot aplazado sin HTTP: espacio insuficiente en heap para el presupuesto de conversión. Revisá capacidad del proceso; no se modifica la proyección."});
+    if(!capacity.allowed)throw new OperationError({operation:observation.operation||"snapshot.events",protocol:"local",category:"response_limit",reason:"memory_budget_exceeded",stage:"request",responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,snapshotMemory:capacity.memory,deferred:true,message:"Snapshot aplazado sin HTTP: espacio insuficiente en heap para el presupuesto de conversión. Revisá capacidad del proceso; no se modifica la proyección."});
     config.maxContentLength=capacity.limitBytes;
   }
   if (observation) {
@@ -440,7 +444,7 @@ export async function operation<T>(
   name: Operation,
   protocol: Protocol,
   action: () => Promise<T>,
-  context?:{lane:import("@lsports/contracts").Lane},
+  context?:{lane:import("@lsports/contracts").Lane;responseLimitMiB?:number},
 ): Promise<T> {
   const observation: Observation = { operation: name, startedAt: Date.now(),...context };
   return observations.run(observation, async () => {
@@ -451,7 +455,7 @@ export async function operation<T>(
       throw new OperationError({ ...diagnostic,
         ...(observation.httpStatus && diagnostic.httpStatus === undefined ? { httpStatus: observation.httpStatus } : {}),
         ...(observation.providerStatus && diagnostic.providerStatus === undefined ? { providerStatus: observation.providerStatus } : {}),
-        ...((name.startsWith("snapshot.") || name.startsWith("distribution.")) && observation.responseInspection ? { responseInspection: observation.responseInspection } : {}),
+        ...((name.startsWith("snapshot.") || name.startsWith("distribution.") || name==="subscriptions.list") && observation.responseInspection ? { responseInspection: observation.responseInspection } : {}),
       });
     } finally {
       // Do not retain a full snapshot through an HTTP/AsyncLocalStorage resource.

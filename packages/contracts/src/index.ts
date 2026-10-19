@@ -309,7 +309,7 @@ export interface IntegrationDiagnostic {
   deferred?: boolean;
   rateLimitSource?: "supplier_http" | "local_in_flight" | "local_host_cooldown" | "local_operation_cooldown";
   requesterPid?: number;
-  coordinator?: { packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage" | "responseLimitBytes" | "timeoutMs" | "memoryBudgetBytes" | "memoryHeadroomBytes" | "snapshotMemory"> };
+  coordinator?: { recoveryId?:string;partitionPart?:number;packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage" | "responseLimitBytes" | "timeoutMs" | "memoryBudgetBytes" | "memoryHeadroomBytes" | "snapshotMemory"> };
   timeoutMs?: number;
   responseLimitBytes?: number;
   memoryBudgetBytes?: number;
@@ -334,7 +334,7 @@ export interface IntegrationDiagnostic {
   deliveryDisposition?: "requeue_requested" | "unacknowledged_until_close";
 }
 export interface FeedMessageMetadata {
-  entityShape?: {competition:"object"|"missing_or_invalid";seasons:number|null;flatEventsPresent:boolean;seasonEvents:(number|null)[]};
+  entityShape?: {leagueFixtureRows?:number;leagueFixtureMissingRows?:number;competition:"object"|"missing_or_invalid";seasons:number|null;flatEventsPresent:boolean;seasonEvents:(number|null)[]};
   wireBytes: number;
   decodedBytes?: number;
   contentType: string;
@@ -363,6 +363,7 @@ export interface ConnectionState {
   session?: {id:string;startedAt:string};
   sessionEnds?: {id:string;startedAt:string;endedAt:string;diagnostic:IntegrationDiagnostic}[];
   lastSnapshotDiagnostic?: IntegrationDiagnostic;
+  partitionRecovery?:{recoveryId:string;stage:"inventory"|"batches"|"verify"|"complete"|"waiting";inventory:number;completedFixtures:number;batches:number;maxResponseBytes:number;retryAt?:string;inventoryDigest?:string;lastBatch?:{requested:number;received:number;missing:number;unexpected:number;exampleMissingFixtures:number[]}};
   recoveryProgress?:{stage:"snapshot"|"handoff"|"waiting_retry"|"idle";startedAt:string;completedAt?:string;queuedAtHandoff?:number;processedAtHandoff?:number;lastProgressAt?:string;regularSnapshotReady:boolean;nextRegularAttemptAt?:string};
   diagnostic?: IntegrationDiagnostic;
   phase: "starting" | "recovering" | "connected" | "error" | "stopped";
@@ -382,7 +383,8 @@ export interface SnapshotAudit {
   providerRows?: number;
   sdkRows: number;
   acceptedRows: number;
-  filters: "none";
+  filters: "none" | "fixtures";
+  partition?: {inventory:number;completedFixtures:number;batches:number;maxResponseBytes:number;complete:boolean};
 }
 export interface CoverageStats {
   activity?:FeedActivity;

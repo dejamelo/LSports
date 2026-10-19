@@ -109,3 +109,21 @@ test('a failed reservation is recorded; retry 15 seconds later in the same proce
   assert.equal(calls,2);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('partition continuations respect prior cooldown, host spacing and supplier backoff without blocking InPlay',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-parts-'));let now=1700000000000,calls=0;
+ const options={root:join(dir,'feed'),now:()=>now,random:()=>0,spacingMs:5000,refreshMs:300000};const scheduler=new SnapshotScheduler('https://stm-snapshot.lsports.eu',4511,options),inplay=new SnapshotScheduler('https://stm-snapshot.lsports.eu',4510,options);
+ const recoveryId='isolated-recovery';
+ try{
+  await scheduler.run('snapshot.events',async()=>{calls++;});
+  await assert.rejects(scheduler.run('snapshot.events',async()=>{calls++;},{recoveryId,part:0}));assert.equal(calls,1);
+  now+=300000;await scheduler.run('snapshot.events',async()=>{calls++;},{recoveryId,part:0});
+  await assert.rejects(scheduler.run('snapshot.events',async()=>{calls++;},{recoveryId,part:1}),e=>e instanceof OperationError&&e.diagnostic.rateLimitSource==='local_host_cooldown');
+  now+=5000;await inplay.run('snapshot.events',async()=>{calls++;});
+  now+=5000;await scheduler.run('snapshot.events',async()=>{calls++;},{recoveryId,part:1});
+  now+=5000;await assert.rejects(scheduler.run('snapshot.events',async()=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'rate_limited',httpStatus:429,retryAfterMs:60000,message:'isolated'});},{recoveryId,part:2}));
+  now+=5000;await assert.rejects(scheduler.run('snapshot.events',async()=>{calls++;},{recoveryId,part:2}));assert.equal(calls,4);
+  now+=55000;await scheduler.run('snapshot.events',async()=>{calls++;},{recoveryId,part:2});
+  now+=5000;await assert.rejects(new SnapshotScheduler('https://stm-snapshot.lsports.eu',4511,options).run('snapshot.events',async()=>{calls++;},{recoveryId:'new-session',part:0}));assert.equal(calls,5);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

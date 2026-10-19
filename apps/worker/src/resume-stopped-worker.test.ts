@@ -49,7 +49,7 @@ test('timeout after CONT sends no further signals and does not delete locks',asy
 for(const queuedTerm of [true,false])test('OS-stopped fixture persists and unlocks after '+(queuedTerm?'queued TERM + CONT':'CONT + verified TERM'),{timeout:15000},async()=>{
  const {spawn,execFile}=await import('node:child_process');const {promisify}=await import('node:util');
  const fs=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
- const {setTimeout:delay}=await import('node:timers/promises');const {once}=await import('node:events');
+ const {setTimeout:delay}=await import('node:timers/promises');const once=(await import('node:events')).default.once;
  const {readOwner,pathAbsent}=await import('../../../scripts/stop-owned-worker.js');
  const dir=await fs.mkdtemp(join(tmpdir(),'adl-stopped-fixture-'));const path=join(dir,'feed.json');const db=join(dir,'tickets.sqlite');
  const child=spawn(process.execPath,['--import','tsx','apps/worker/src/test-fixtures/shutdown.ts',path,db],{stdio:['ignore','pipe','pipe']});
@@ -57,7 +57,7 @@ for(const queuedTerm of [true,false])test('OS-stopped fixture persists and unloc
  try{
   await new Promise<void>((resolve,reject)=>{child.stdout!.on('data',d=>{output+=d;if(output.includes('READY'))resolve();});child.once('exit',()=>reject(Error('FIXTURE_EXITED_EARLY')));});
   child.kill('SIGSTOP');
-  const state=async()=> (await promisify(execFile)('ps',['-p',String(child.pid),'-o','state='])).stdout.trim();
+  const state=async()=>{try{return (await promisify(execFile)('ps',['-p',String(child.pid),'-o','state='])).stdout.trim();}catch(error){const e=error as {code?:number;stdout?:string};if(e.code===1&&!e.stdout?.trim())return '';throw error;}};
   for(let n=0;n<100&&!/^T/.test(await state());n++)await delay(10);
   assert.match(await state(),/^T/);if(queuedTerm)child.kill('SIGTERM');await delay(100);assert.equal(child.exitCode,null);
   const uid=process.getuid!();const info={pid:child.pid!,parentPid:process.pid,uid,startedAt:'isolated-spawn-identity',args:'node /isolated/apps/worker/src/index.ts'};
@@ -94,7 +94,7 @@ test('observed suspended concurrently parent is preserved: only lock owner gets 
 });
 
 test('real suspended supervisor stays stopped while child drains, unlocks and becomes unreaped', {timeout:15000},async()=>{
- const {spawn}=await import('node:child_process');const {once}=await import('node:events');
+ const {spawn}=await import('node:child_process');const once=(await import('node:events')).default.once;
  const fs=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {setTimeout:delay}=await import('node:timers/promises');
  const {processIdentity,processStateCode,readOwner,pathAbsent}=await import('../../../scripts/stop-owned-worker.js');
  const dir=await fs.mkdtemp(join(tmpdir(),'adl-stopped-supervisor-'));const file=join(dir,'feed.json');

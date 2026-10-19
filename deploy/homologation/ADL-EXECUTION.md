@@ -649,3 +649,11 @@ dos dados persistidos. Use [RESUMABLE-CUTOVER.md](RESUMABLE-CUTOVER.md). O coman
 único `complete-adl-cutover.mjs --pid 12811 --parent 12809 --recover-and-cutover`
 substitui novas tentativas manuais de TERM/CONT/drain e não pede nova aprovação.
 Nunca anunciar execução Mac/AWS a partir dos testes isolados.
+
+### PreMatch acima de 256 MiB + OutrightLeagueFixtureUpdate (38)
+
+A atualização usa recuperação por inventário integral e lotes limitados, sem aumentar
+cap/heap e sem repetir a migração. Execute o comando `--partitioned-recovery` em
+[PARTITIONED-RECOVERY.md](PARTITIONED-RECOVERY.md). O mesmo executor prepara e testa
+imagem offline antes da parada, faz SIGTERM/backup offline, mantém overrides e
+retoma a validação real. Não reinicie o consumidor do Mac.

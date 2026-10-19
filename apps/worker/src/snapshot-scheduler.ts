@@ -20,7 +20,7 @@ export class SnapshotScheduler {
       retryAt: new Date(retryAt).toISOString(), retryAfterMs: Math.max(0, retryAt - this.now()),
       message: 'Consulta snapshot aplazada por coordinación local; no se realizó una nueva solicitud ni se interpreta como ausencia de eventos.' });
   }
-  async run<T>(name: Operation, action: () => Promise<T>): Promise<T> {
+  async run<T>(name: Operation, action: () => Promise<T>, continuation?: {recoveryId:string;part:number}): Promise<T> {
     const lockPath = `${this.path}.lock`;
     await mkdir(dirname(this.path), { recursive: true });
     let lock;
@@ -47,7 +47,7 @@ export class SnapshotScheduler {
           }
           if (stillDead) await rm(lockPath, { force: true });
         } finally { await recovery.close(); await rm(`${lockPath}.reclaim`, { force: true }); }
-        return this.run(name, action);
+        return this.run(name, action, continuation);
       }
       return this.defer(name, this.now() + (this.options.spacingMs ?? 5000));
     }
@@ -62,14 +62,16 @@ export class SnapshotScheduler {
         schedule = saved;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       const key = `${this.packageId}:${name}`;
-      const due = Math.max(schedule.nextAt, schedule.due[key] || 0);
-      if (due > this.now()) return this.defer(name, due, (schedule.due[key] || 0) >= schedule.nextAt ? "local_operation_cooldown" : "local_host_cooldown", (schedule.due[key] || 0) >= schedule.nextAt ? schedule.requests?.[key] || schedule.lastRequest : schedule.lastRequest);
+      const previous=schedule.requests?.[key];
+      const ownSuccess=!!continuation&&previous?.recoveryId===continuation.recoveryId&&previous.outcome==='success'&&previous.partitionPart!==undefined&&continuation.part===previous.partitionPart+1;
+      const due = Math.max(schedule.nextAt, ownSuccess?0:schedule.due[key] || 0);
+      if (due > this.now()) return this.defer(name, due, !ownSuccess && (schedule.due[key] || 0) >= schedule.nextAt ? "local_operation_cooldown" : "local_host_cooldown", !ownSuccess && (schedule.due[key] || 0) >= schedule.nextAt ? schedule.requests?.[key] || schedule.lastRequest : schedule.lastRequest);
       const save = async () => {
         const temp = `${this.path}.${process.pid}.tmp`;
         await writeFile(temp, JSON.stringify(schedule), { mode: 0o600 }); await rename(temp, this.path);
       };
       // Persist reservation before the request, including process-crash recovery.
-      schedule.lastRequest = {packageId:this.packageId, operation:name, pid:process.pid, at:new Date(this.now()).toISOString(), outcome:"reserved"};
+      schedule.lastRequest = {packageId:this.packageId, operation:name, pid:process.pid, at:new Date(this.now()).toISOString(), outcome:"reserved",...(continuation?{recoveryId:continuation.recoveryId,partitionPart:continuation.part}:{})};
       (schedule.requests ||= {})[key] = schedule.lastRequest;
       schedule.nextAt = this.now() + (this.options.spacingMs ?? 5000);
       schedule.due[key] = this.now() + (this.options.refreshMs ?? 300000);

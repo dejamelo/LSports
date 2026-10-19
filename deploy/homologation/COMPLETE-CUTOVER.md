@@ -507,3 +507,7 @@ completo e o contrato da resposta. Todos os grupos devem concluir, persistir e p
 pelo handoff ordenado antes de marcar baseline pronto; preservar versões e liquidações.
 Datas antigas nunca viram odds atuais. Esse fluxo particionado ainda não foi implantado.
 Uma falha histórica sozinha não autoriza ajuste, reinício ou nova consulta antecipada.
+
+A recuperação particionada indicada no relatório está implementada por
+`--partitioned-recovery`: consulte [PARTITIONED-RECOVERY.md](PARTITIONED-RECOVERY.md).
+O modo utiliza o diagnóstico protegido existente e não repete a migração.

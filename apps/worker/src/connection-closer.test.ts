@@ -6,7 +6,7 @@ import {connectionCloser} from './connection-closer.js';
 
 test('actual amqplib ChannelModel: socket close without CloseOk leaves SDK promise pending, but cleanup finishes',async()=>{
  const require=createRequire(import.meta.url);const {ChannelModel}=require('amqplib/lib/channel_model.js');
- const transport=Object.assign(new EventEmitter(),{calls:0,close(_callback:()=>void){this.calls++;queueMicrotask(()=>this.emit('close'));}});
+ const transport=Object.assign(new EventEmitter(),{calls:0,close(_callback:()=>void){this.calls++;queueMicrotask(()=>transport.emit('close'));}});
  const model=new ChannelModel(transport);let sdkSettled=false;const original=model.close.bind(model);
  model.close=()=>{const promise=original();void promise.then(()=>{sdkSettled=true;});return promise;};
  const close=connectionCloser(model);const first=close();assert.equal(close(),first);

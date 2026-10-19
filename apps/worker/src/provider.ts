@@ -1,3 +1,4 @@
+import {partitionedSnapshot,type PartitionSink} from './partitioned-snapshot.js';
 import {snapshotEvidence} from "./snapshot-evidence.js";
 import {normalizeSdkTimestamps,attachTimestampPrecision} from './timestamp-contract.js';
 import { inspectSettlements } from "./settlement-evidence.js";
@@ -46,6 +47,7 @@ axios.defaults.maxContentLength = 50 * 1024 * 1024;
 axios.defaults.maxRedirects = 0;
 export interface ProviderClients {
   snapshot(): Promise<TradeEvent[]>;
+  snapshotPartitioned?:(sink:PartitionSink)=>Promise<import("./partitioned-snapshot.js").PartitionProgress>;
   outrightFixtures?: () => Promise<TradeEvent[]>;
   outrightTimestampRejections?: () => import("@lsports/contracts").TimestampInspection[];
   outrightMarkets?: (fixtureIds?: number[]) => Promise<TradeEvent[]>;
@@ -72,8 +74,10 @@ export function clients(
   config: PackageConfig,
   urls: { snapshotUrl: string; customersUrl: string },
   scheduling?: Pick<SnapshotScheduler, "run">,
+  inventoryScheduling?: Pick<SnapshotScheduler,"run">,
 ): ProviderClients {
   const scheduler = scheduling || new SnapshotScheduler(urls.snapshotUrl, config.packageId);
+  const inventoryCoordinator=inventoryScheduling||new SnapshotScheduler(urls.customersUrl,config.packageId);
   const snapshotRequest = <T>(name: import("./diagnostics.js").Operation, action: () => Promise<T>) => scheduler.run(name, () => operation(name, "http", action,{lane:config.lane}));
   const credentials = {
     packageId: config.packageId,
@@ -110,6 +114,39 @@ export function clients(
   let recoveredFixtureIds: number[] | undefined;
   let marketRequest: import("@lsports/contracts").SnapshotRequestInspection | undefined;
   const outrightInspections: NonNullable<ReturnType<NonNullable<ProviderClients["outrightResponseInspections"]>>> = {};
+  const decodeRegular=(response: unknown):TradeEvent[]=>{
+        if (response === undefined || response === null)
+          throw new Error("Invalid snapshot response");
+        const rows = (Array.isArray(response) ? response : [response]) as TradeEvent[];
+        if (
+          rows.some(
+            (e) =>
+              !Number.isSafeInteger(e.fixtureId) ||
+              !e.fixture ||
+              typeof e.fixture !== "object" ||
+              Array.isArray(e.fixture),
+          )
+        )
+          throw new Error("Invalid snapshot event");
+        const evidence = responseEvidence();
+        let rawSnapshot=snapshotResponsePayload();
+        if(typeof rawSnapshot==='string')rawSnapshot=IdSafeJsonParser.parse(rawSnapshot);
+        audit = {
+          transport:evidence.transport,
+          content:snapshotEvidence(rawSnapshot,rows),
+          bodyShape: evidence.bodyShape,
+          providerRows: evidence.providerRows,
+          sdkRows: rows.length,
+          acceptedRows: rows.length,
+          filters: "none",
+        };
+        if (evidence.providerRows !== rows.length)
+          throw new Error("Invalid snapshot response: row count mismatch");
+        let raw = snapshotResponsePayload();
+        if(typeof raw==='string')raw=IdSafeJsonParser.parse(raw);
+        if(raw && typeof raw==='object' && 'Body' in raw){const body=(raw as any).Body;attachTimestampPrecision(Array.isArray(body)?body:[body],rows);}
+        return rows;
+  };
   return {
     snapshotAudit: () => audit,
     outrightTimestampRejections: () => structuredClone(rejectedTimestamps),
@@ -143,7 +180,7 @@ export function clients(
       },
     } : {}),
     async subscriptions() {
-      return operation("subscriptions.list", "http", async () => {
+      return inventoryCoordinator.run('subscriptions.list',()=>operation("subscriptions.list", "http", async () => {
         const response = await subscription.getSubscriptions(
           new GetSubscriptionsRequestDto({}),
         );
@@ -154,7 +191,7 @@ export function clients(
         )
           throw new Error("Invalid subscriptions response");
         return { fixtures: response.fixtures.length };
-      });
+      }));
     },
     async quota() {
       return operation("subscriptions.quota", "http", async () => {
@@ -189,43 +226,33 @@ export function clients(
         return { fixtures: response.fixtures.length };
       });
     },
+    ...(config.lane==='prematch'&&process.env.LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT==='true'?{
+      async snapshotPartitioned(sink:PartitionSink){
+        const customersScheduler=inventoryCoordinator;
+        const result=await partitionedSnapshot({
+          inventory:async(recoveryId,part)=>customersScheduler.run('subscriptions.list',()=>operation('subscriptions.list','http',async()=>{
+            const response=await subscription.getSubscriptions(new GetSubscriptionsRequestDto({}));
+            let raw=snapshotResponsePayload();if(typeof raw==='string')raw=IdSafeJsonParser.parse(raw);
+            const rawFixtures=(raw as {Body?:{Fixtures?:unknown[]}}|undefined)?.Body?.Fixtures;
+            if(!response||!Array.isArray(response.fixtures)||responseEvidence().fixturesCount!==response.fixtures.length||!Array.isArray(rawFixtures)||rawFixtures.some((v,i)=>v!==response.fixtures[i])||snapshotResponseInspection()?.applicationErrorFields)throw new Error('Incomplete subscription inventory response');
+            return response.fixtures;
+          },{lane:config.lane,responseLimitMiB:2}),{recoveryId,part}),
+          events:async(ids,recoveryId,part,responseMiB,markStarted)=>scheduler.run('snapshot.events',()=>operation('snapshot.events','http',async()=>{
+            markStarted();const rows=decodeRegular(await snapshot.getEvents(new GetEventRequestDto({fixtures:ids})));
+            return rows;
+          },{lane:config.lane,responseLimitMiB:responseMiB}),{recoveryId,part}),
+        },sink);
+        audit={bodyShape:'array',providerRows:result.completedFixtures,sdkRows:result.completedFixtures,acceptedRows:result.completedFixtures,filters:'fixtures',partition:{inventory:result.inventory,completedFixtures:result.completedFixtures,batches:result.batches,maxResponseBytes:result.maxResponseBytes,complete:true}};
+        return result;
+      },
+    }:{}),
     async snapshot(): Promise<TradeEvent[]> {
       return snapshotRequest("snapshot.events", async () => {
         const response =
           config.lane === "inplay"
             ? await snapshot.getEvents(new GetInPlayEventRequestDto({}))
             : await snapshot.getEvents(new GetEventRequestDto({}));
-        if (response === undefined || response === null)
-          throw new Error("Invalid snapshot response");
-        const rows = Array.isArray(response) ? response : [response];
-        if (
-          rows.some(
-            (e) =>
-              !Number.isSafeInteger(e.fixtureId) ||
-              !e.fixture ||
-              typeof e.fixture !== "object" ||
-              Array.isArray(e.fixture),
-          )
-        )
-          throw new Error("Invalid snapshot event");
-        const evidence = responseEvidence();
-        let rawSnapshot=snapshotResponsePayload();
-        if(typeof rawSnapshot==='string')rawSnapshot=IdSafeJsonParser.parse(rawSnapshot);
-        audit = {
-          transport:evidence.transport,
-          content:snapshotEvidence(rawSnapshot,rows),
-          bodyShape: evidence.bodyShape,
-          providerRows: evidence.providerRows,
-          sdkRows: rows.length,
-          acceptedRows: rows.length,
-          filters: "none",
-        };
-        if (evidence.providerRows !== rows.length)
-          throw new Error("Invalid snapshot response: row count mismatch");
-        let raw = snapshotResponsePayload();
-        if(typeof raw==='string')raw=IdSafeJsonParser.parse(raw);
-        if(raw && typeof raw==='object' && 'Body' in raw){const body=(raw as any).Body;attachTimestampPrecision(Array.isArray(body)?body:[body],rows);}
-        return rows;
+        return decodeRegular(response);
       });
     },
     async catalog() {

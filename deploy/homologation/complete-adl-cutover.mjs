@@ -67,6 +67,6 @@ async function main(){
   nextStep:'AWS platform needs its own administrator, client/operation and temporary iframe session. Keep Mac worker stopped. No provider query retries outside scheduler.'});
  if(!ready)process.exitCode=2;
 }
-if((process.argv.includes('--recover-and-cutover')||process.argv.includes('--validate-only')||process.argv.includes('--repair-snapshot')||process.argv.includes('--snapshot-report'))){
+if((process.argv.includes('--recover-and-cutover')||process.argv.includes('--validate-only')||process.argv.includes('--repair-snapshot')||process.argv.includes('--snapshot-report')||process.argv.includes('--partitioned-recovery'))){
  import('./resumable-adl-cutover.mjs').then(module=>module.run(process.argv.slice(2))).catch(()=>{emit({stage:'executor_start',status:'blocked',reason:'RESUMABLE_EXECUTOR_START_FAILED'});process.exitCode=2;});
 }else main().catch(error=>{emit({stage,status:'blocked',reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED',workerStartConfirmed:started,handoffPath,macMustRemainStopped:true,posnetChanged:false,note:'Preserve locks, journals and backups. No repeated signals, automatic Mac restart, AWS worker duplication or raw stderr.'});process.exitCode=2;});

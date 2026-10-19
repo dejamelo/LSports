@@ -1,3 +1,4 @@
+import {leagueFixtureEvents} from './league-fixtures.js';
 import {leagueMarketEvents} from "./league-markets.js";
 import {providerTimestamp,normalizeSdkTimestamps,attachTimestampPrecision,hasInvalidProviderTimestamp} from './timestamp-contract.js';
 import { inspectSettlements } from "./settlement-evidence.js";
@@ -294,7 +295,7 @@ export function decodeMessage(
     );
   metadata.guidSource ??= envelopeGuid ? "envelope" : "transport";
   if (!headers.MessageGuid) metadata.warnings!.push("transport_guid_absent");
-  if (![1, 2, 3, 31, 32, 35, 37, 39, 40, 41, 42].includes(type))
+  if (![1, 2, 3, 31, 32, 35, 37, 38, 39, 40, 41, 42].includes(type))
     fail(
       "unsupported_message_type",
       "entity",
@@ -338,9 +339,10 @@ export function decodeMessage(
   if (metadata.timestampSource !== "timestamp_in_ms")
     metadata.warnings!.push("transport_timestamp_absent_or_invalid");
   const body = envelope.Body;
-  if(type===40){
+  if(type===40||type===38){
     const competition=object(body)&&object(body.Competition)?body.Competition:undefined;
     metadata.entityShape={competition:competition?"object":"missing_or_invalid",seasons:Array.isArray(competition?.Competitions)?competition.Competitions.length:null,
+      ...(type===38&&Array.isArray(competition?.Competitions)?(()=>{const events=competition.Competitions.flatMap((s:unknown)=>object(s)&&Array.isArray(s.Events)?s.Events:[]);return {leagueFixtureRows:events.filter((e:unknown)=>object(e)&&object(e.OutrightLeague)).length,leagueFixtureMissingRows:events.filter((e:unknown)=>!object(e)||!object(e.OutrightLeague)).length};})():{}),
       flatEventsPresent:!!competition&&Object.hasOwn(competition,"Events"),
       seasonEvents:Array.isArray(competition?.Competitions)?competition.Competitions.map((s:unknown)=>object(s)&&Array.isArray(s.Events)?s.Events.length:null).slice(0,10):[]};
   }
@@ -348,7 +350,7 @@ export function decodeMessage(
   if (
     type !== 31 &&
     type !== 32 &&
-    ![37, 39, 40, 41, 42].includes(type) &&
+    ![37, 38, 39, 40, 41, 42].includes(type) &&
     (!object(body) || !Array.isArray(body.Events))
   )
     fail(
@@ -416,6 +418,7 @@ export function decodeMessage(
   let keepAliveActiveEvents: number | undefined;
   try {
     const value = (body || {}) as Record<string, unknown>;
+    if (type === 38) events = leagueFixtureEvents(value);
     if (type === 40) events = leagueMarketEvents(value);
     if (type === 37) {
       const competition = transform(value, OutrightFixtureUpdate).competition;
@@ -488,7 +491,7 @@ export function decodeMessage(
         !Number.isSafeInteger(e.fixtureId) ||
         e.fixtureId <= 0 ||
         (type === 1 && !e.fixture) ||
-        (type === 37 && !e.outright?.fixture) ||
+        ([37,38].includes(type) && !e.outright?.fixture) ||
         (type === 39 && !e.outrightScore) ||
         ([3, 35, 40, 41, 42].includes(type) && !Array.isArray(e.markets)) ||
         (type === 2 && !e.livescore && !e.fixture),

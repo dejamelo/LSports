@@ -1,3 +1,4 @@
+import {snapshotCapacity} from './snapshot-capacity.js';
 import { connectionCloser } from './connection-closer.js';
 import {randomUUID} from "node:crypto";
 import { platformEnabled, PlatformStore } from "@lsports/feed-store/platform";
@@ -370,14 +371,37 @@ export async function session(
       requireOpen();
       await save();
       requireOpen();
-      let rows: import("./state.js").TradeEvent[] | undefined;
+      let rows: import("./state.js").TradeEvent[] | undefined;let partitionCompleted=false;
       if (Date.now() >= nextDue["snapshot.events"]) {
         const started = Date.now();
         state.set(lane,{lastSnapshotAttemptAt:new Date(started).toISOString()});
         try {
-          rows = await api.snapshot();
+          if(lane==='prematch'&&api.snapshotPartitioned){
+            regularSnapshotReady=false;state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,regularSnapshotReady:false}});
+            let inventory=new Set<number>();
+            const result=await api.snapshotPartitioned({assertOpen:requireOpen,
+              begin:async ids=>{
+                requireOpen();inventory=new Set(ids);state.beginPartitionedSnapshot(lane);await save();
+                // Long partition runs must not hold 100 deliveries unacknowledged through cooldowns.
+                // Merge live AMQP and snapshot batches on the SAME serial persist-before-ACK chain.
+                // Provider versions still arbitrate values; phase remains recovering until all batches verify.
+                const prefix=buffered;buffered=[];
+                const handoff=processing.then(async()=>{for(const msg of prefix){await processMessage(msg);if(closed)break;}});
+                processing=handoff;bufferingForSnapshot=false;await handoff;requireOpen();
+              },
+              batch:async(batch,at)=>{
+                requireOpen();const capacity=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'64'},undefined,lane);
+                if(!capacity.allowed)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,message:'Memoria insuficiente para aplicar/persistir el lote; baseline incompleto.'});
+                const applied=processing.then(async()=>{requireOpen();state.apply(lane,batch.map(event=>({...event,marketRecovery:true})),at,{source:'snapshot',receivedAt:Date.now()});await save();});
+                processing=applied;await applied;
+              },
+              progress:async progress=>{requireOpen();state.set(lane,{partitionRecovery:progress});await save();},
+            });
+            requireOpen();state.finishPartitionedSnapshot(lane,inventory,api.snapshotAudit?.());partitionCompleted=true;
+            console.info(JSON.stringify({lane,operation:'snapshot.events',status:'partitioned_complete',...result}));
+          }else rows = await api.snapshot();
           if (closed || signal.aborted) throw failure || new Error("Disconnected during recovery");
-          state.replace(lane, rows, started, api.snapshotAudit?.());
+          if(rows!==undefined)state.replace(lane, rows, started, api.snapshotAudit?.());
           regularSnapshotReady = true;
           state.set(lane, { diagnostic: undefined, lastSnapshotDiagnostic: undefined });
           nextDue["snapshot.events"] = Date.now() + Math.max(300000, config.recoveryMs);
@@ -428,7 +452,7 @@ export async function session(
       if (outrightRecovery.diagnostics?.length) outrightRecovery.status = outrightRecovery.diagnostics.some(d => d.category === "rate_limited") ? "rate_limited" : "partial";
       outrightRecovery.marketRequest = api.outrightMarketRequest?.();
       state.set(lane, { outrightRecovery });
-      if (rows !== undefined) seen.clear();
+      if (rows !== undefined||partitionCompleted) seen.clear();
       // Capture a FINITE prefix and hand the same serial chain to live delivery.
       // Do not wait for a continuously replenished buffer to become empty.
       // No await between installing the prefix and switching delivery mode:
@@ -451,7 +475,7 @@ export async function session(
       state.set(lane, {
         phase: regularSnapshotReady ? "connected" : "recovering",
         recoveryProgress:{...state.connections[lane].recoveryProgress!,stage:regularSnapshotReady?"idle":"waiting_retry",regularSnapshotReady,completedAt:new Date().toISOString(),nextRegularAttemptAt:new Date(nextDue["snapshot.events"]).toISOString()},
-        message: !regularSnapshotReady ? "AMQP activo; snapshot inicial pendiente. Cuotas bloqueadas hasta completar la recuperación." : rows !== undefined && rows.length
+        message: partitionCompleted ? "Feed conectado; snapshot particionado completo e inventario verificado." : !regularSnapshotReady ? "AMQP activo; snapshot inicial pendiente. Cuotas bloqueadas hasta completar la recuperación." : rows !== undefined && rows.length
           ? "Feed conectado; snapshot recuperado." + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : "")
           : (rows === undefined ? "Feed AMQP conectado; recuperación HTTP pendiente." : "Feed conectado; snapshot regular vacío (0 fixtures).") + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : " Recuperación Outright consultada por separado."),
       });
@@ -459,8 +483,8 @@ export async function session(
       console.log(
         JSON.stringify({
           lane,
-          status: rows === undefined ? "snapshot_deferred" : "snapshot_recovered",
-          ...(rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
+          status: partitionCompleted?"partitioned_snapshot_recovered":rows === undefined ? "snapshot_deferred" : "snapshot_recovered",
+          ...(partitionCompleted?{events:state.connections[lane].snapshotEvents,partitioned:true}:rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
           snapshotAudit: api.snapshotAudit?.(),
           coverage: state.feed().coverage?.[lane],
         }),

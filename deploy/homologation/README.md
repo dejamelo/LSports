@@ -128,3 +128,6 @@ Falha da preparação em api_start: há retomada específica sem rebuild em
 `resume-adl-api.mjs --apply`. Ela confirma o erro de tmpfs no log privado, informa
 estado parcial e corrige apenas esse defeito por override persistido. Ver a seção
 final de ADL-EXECUTION.md. Não repetir prepare-adl-aws, DNS, envs ou o corte Mac.
+
+- [PreMatch particionado e mensagem 38](PARTITIONED-RECOVERY.md): atualização retomável
+  do worker já migrado, preservando InPlay, memória, journals e POSNET.

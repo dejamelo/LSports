@@ -29,7 +29,7 @@ test('timeout preserves owner/lock and never escalates or repeats CONT',async()=
  await assert.rejects(drainSupervisor(f.io,11,9,'/repo',501,3),/DRAIN_TIMEOUT_NO_MORE_SIGNALS/);assert.deepEqual(f.signals,[9]);
 });
 test('real stdout backpressure under stopped concurrently drains with parent-only CONT',{timeout:20000},async()=>{
- const fs=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {spawn}=await import('node:child_process');const {once}=await import('node:events');const {setTimeout:delay}=await import('node:timers/promises');
+ const fs=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {spawn}=await import('node:child_process');const once=(await import('node:events')).default.once;const {setTimeout:delay}=await import('node:timers/promises');
  const {processIdentity,processStateCode,readOwner,pathAbsent}=await import('../../../scripts/stop-owned-worker.js');
  const dir=await fs.mkdtemp(join(tmpdir(),'adl-supervisor-backpressure-'));const file=join(dir,'checkpoint');const fixtureFile=join(dir,'child.cjs');
  await fs.writeFile(fixtureFile,`const fs=require('node:fs');const p=process.argv[2];fs.writeFileSync(p+'.lock',String(process.pid));let i=0,stopping=false;const t=setInterval(()=>fs.writeFileSync(p,'PENDING '+(++i)),40);process.on('SIGTERM',()=>{if(stopping)return;stopping=true;process.stdout.write(Buffer.alloc(8*1024*1024,120),()=>{clearInterval(t);fs.writeFileSync(p,'DRAINED');fs.unlinkSync(p+'.lock');});});console.log('READY:'+process.pid);`);
