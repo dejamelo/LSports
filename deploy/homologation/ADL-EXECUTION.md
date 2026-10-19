@@ -502,3 +502,48 @@ npm/concurrently), persistência/restauração, dois bilhetes isolados preservad
 locks próprios/concorrentes e cooldown; tipagem direcionada dos novos scripts passou.
 O teste real de sinal usa apenas o harness isolado, sem conexão ao fornecedor.
 A parada e notBeforeUTC do Mac continuam dependendo da execução pelo operador.
+
+### SIGTERM emitido, timeout com lock preservado: observar sem novo sinal
+
+O operador confirmou `signalRequested=true` e
+`GRACEFUL_SHUTDOWN_TIMEOUT_LOCK_PRESERVED`, sem exportação ou partida AWS. Isso
+não comprova se o processo continua vivo neste momento nem em qual Promise
+parou. Não executar novamente o comando de parada, SIGTERM/SIGINT adicional,
+SIGKILL, remoção de lock ou inicialização para contornar.
+
+Próximo comando no Mac:
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/diagnose-adl-shutdown.mjs
+```
+
+Somente leitura: reidentifica dono do lock/UID/cwd e processo, lê `ps` e `lsof`
+sem imprimir comandos, caminhos, IPs ou endpoints, observa checkpoint/journals
+por 5 segundos e executa a auditoria novamente. Mostra:
+
+- processo/parent PID verificados, estado, tempo e CPU, sem argv;
+- conexões por classe de porta AMQP/HTTPS e estado (ESTABLISHED, CLOSE_WAIT etc.);
+- stdout/stderr como terminal/pipe/arquivo/socket, sem ler terminal ou consumir pipe;
+- somente se stdout/stderr forem arquivos regulares pertencentes ao usuário,
+  resume últimas 128 KiB em contadores fixos de worker.shutdown. Não imprime
+  conteúdo/erros/URLs; logs podem ser compartilhados ou anteriores ao sinal;
+- fases persistidas das lanes, estágio de recovery, alterações do checkpoint e
+  estabilidade dos journals; bloqueios atuais continuam preservados.
+
+No código, shutdown pode aguardar sessão (HTTP/snapshot), processamento das
+mensagens, persistência, fechamento AMQP e finalmente liberação do próprio lock.
+`connection.close()` é uma espera sem timeout explícito, mas isso sozinho não
+prova que seja o ponto pendente do processo Mac. A versão efetivamente carregada
+pelo processo antigo não é conhecida. Estado de socket, CPU ou fase gravada não
+identifica uma Promise nem comprova que o handler de SIGTERM executou.
+Por isso o relatório marca `pendingStage=not_proven_in_existing_process`; não
+aplica timeout de destruição ou correção especulativa no worker em execução.
+
+Se `status=ready_for_export`, a nova auditoria confirmou ausência de processos/
+locks e journals estáveis. Então executar `prepare-adl-cutover.mjs`, obtendo
+notBeforeUTC fresco. Se `blocked`, enviar só o JSON sanitizado para decidir o
+próximo passo com evidência. Dono morto com lock residual continua bloqueado,
+sem recuperação automática. Nenhum SSH, reload, worker start ou alteração POSNET,
+volumes, backups ou composeOverrides é realizado por essa observação.

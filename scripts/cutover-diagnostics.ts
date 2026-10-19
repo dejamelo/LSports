@@ -92,7 +92,15 @@ export async function diagnoseCutover(options:{state:string;refreshMs:number;now
    const valid=value!==null&&typeof value==='object'&&!Array.isArray(value);connections=valid?value.connections:undefined;
    const lanes=connections!==null&&typeof connections==='object'?connections as Record<string,unknown>:{};
    const present=(lane:string)=>lanes[lane]!==null&&typeof lanes[lane]==='object'&&!Array.isArray(lanes[lane]);
-   checkpoint={status:valid&&value?.mode==='connected'?'ok':'invalid',bytes:read.bytes,mode:valid&&value?.mode==='connected'?'connected':valid&&value?.mode==='demo'?'demo':'other',lanes:{prematch:present('prematch'),inplay:present('inplay')}};
+   const summary=(lane:string)=>{
+    const raw=(present(lane)?lanes[lane]:{}) as Record<string,unknown>;
+    const recovery=(raw.recoveryProgress&&typeof raw.recoveryProgress==='object'?raw.recoveryProgress:{}) as Record<string,unknown>;
+    const phases=['starting','recovering','connected','error','stopped'];const stages=['snapshot','handoff','waiting_retry','idle'];
+    return {phase:typeof raw.phase==='string'&&phases.includes(raw.phase)?raw.phase:'unknown',
+     recoveryStage:typeof recovery.stage==='string'&&stages.includes(recovery.stage)?recovery.stage:'unknown',
+     regularSnapshotReady:typeof recovery.regularSnapshotReady==='boolean'?recovery.regularSnapshotReady:null};
+   };
+   checkpoint={status:valid&&value?.mode==='connected'?'ok':'invalid',bytes:read.bytes,mode:valid&&value?.mode==='connected'?'connected':valid&&value?.mode==='demo'?'demo':'other',lanes:{prematch:present('prematch'),inplay:present('inplay')},laneState:{prematch:summary('prematch'),inplay:summary('inplay')}};
    if(!valid||value?.mode!=='connected')block('checkpoint','CONNECTED_EVIDENCE_REQUIRED');
    if(!present('prematch')||!present('inplay'))block('checkpoint','LANE_EVIDENCE_MISSING');
   }
