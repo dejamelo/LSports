@@ -126,3 +126,10 @@ campos de autenticação do SDK, espera antes da reconsulta, estado já ligado s
 novo Start, resposta desconhecida sanitizada, tipo booleano e rejeição HTTP 403.
 Não equivalem a nova validação real na AWS. A aplicação deve ser programada como
 atualização controlada, nunca reinício cego para testar repetidamente o provedor.
+
+## Aplicação autorizada e evidência posterior
+
+A mensagem acima preserva a evidência **anterior** à correção. Para aplicar com um
+único comando, ver [APPLY-DISTRIBUTION-2aa06f7.md](APPLY-DISTRIBUTION-2aa06f7.md).
+O executor gera um novo rascunho protegido fora do repositório com os resultados reais
+posteriores, sem reapresentar os horários históricos como se fossem da versão nova.

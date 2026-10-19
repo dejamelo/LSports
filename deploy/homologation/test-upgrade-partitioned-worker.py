@@ -4,7 +4,7 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
- def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False):
+ def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False,distribution=False):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();releases=root/'releases';release=releases/('a'*40);release.mkdir(parents=True);volume=root/'volume';volume.mkdir()
    original=secure/'old.json';original.write_text('{}');meta={'release':str(release),'composeOverrides':[str(original)]};(secure/'deployment.json').write_text(json.dumps(meta))
@@ -23,7 +23,7 @@ class Upgrade(unittest.TestCase):
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([images[args[3]]]).encode()
     if args[:2]==['docker','tag']:images[args[3]]=images['base'];return b''
-    if args[:2]==['docker','run']:return b'partitioned-offline-ok' if '--input-type=module' in args else json.dumps(hashes).encode()
+    if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok' if '--input-type=module' in args else json.dumps(hashes).encode()
     if args[:2]==['docker','build']:images[image]={'Id':'sha256:'+('c'*64),'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}};return b''
     if args[:2]==['docker','inspect']:
      return json.dumps([{'Image':images[selected]['Id'],'HostConfig':{'Memory':4294967296},'Config':{'Env':['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true']},'Mounts':[{'Destination':'/app/.runtime/feed','Type':'volume','RW':False,'Name':'feed'}]}]).encode()
@@ -35,11 +35,12 @@ class Upgrade(unittest.TestCase):
    NS.update(SECURE=secure,BACKUPS=backups,RELEASES=releases,run=run,model=model,states=states,control_status=lambda:200,snapshot_host_memory=lambda:12*1024**3,shutil=types.SimpleNamespace(**{**NS['shutil'].__dict__,'disk_usage':lambda _:types.SimpleNamespace(free=10*1024**3)}),os=types.SimpleNamespace(**{**os.__dict__,'geteuid':lambda:0}))
    def invoke(phase,base_hashes=hashes):
     out=io.StringIO();request={'phase':phase,'files':files,'baseHashes':base_hashes,'handoff':handoff,'freshAuditAt':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')}
+    if distribution:request['fixCommit']='2aa06f7'
     with contextlib.redirect_stdout(out):code=NS['upgrade_partitioned'](request)
     self.assertNotIn('MUST_NEVER_PRINT',out.getvalue());return code,json.loads(out.getvalue().splitlines()[-1])
    try:
     code,result=invoke('prepare',{**hashes,next(iter(hashes)):'bad'});self.assertEqual(code,2);self.assertEqual(result['reason'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH');self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
-    code,result=invoke('prepare');self.assertEqual(code,0,result);self.assertTrue(result['offlineType38Verified']);self.assertTrue(running);self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
+    code,result=invoke('prepare');self.assertEqual(code,0,result);self.assertTrue(result['offlineType38Verified']);self.assertEqual(result['offlinePropagationVerified'],distribution);self.assertTrue(running);self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
     if resume_stopped:
      progress_file=next(secure.glob('partitioned-upgrade-*.json'));progress=json.loads(progress_file.read_bytes());progress['phase']='stop_requested';progress_file.write_text(json.dumps(progress));running=False
     code,result=invoke('activate');self.assertEqual(code,0,result);self.assertTrue(running);self.assertEqual(selected,image);self.assertEqual(journal.read_bytes(),journal_before)
@@ -49,5 +50,6 @@ class Upgrade(unittest.TestCase):
     code,result=invoke('prepare');self.assertEqual(code,0,result);code,result=invoke('activate');self.assertEqual(code,0,result);self.assertTrue(result['reused']);self.assertEqual(len([c for c in calls if 'up' in c]),1);self.assertEqual(len([c for c in calls if c[:2]==['docker','build']]),1)
     self.assertTrue(all(c[-1]=='worker' and '--no-deps' in c and '--pull' in c for c in calls if 'up' in c))
    finally:NS.update(old)
+ def test_distribution_fix_is_tested_offline_before_single_worker_restart_and_reuses_result(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(distribution=True)
  def test_resume_after_already_requested_stop_does_not_signal_again(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(resume_stopped=True)
 if __name__=='__main__':unittest.main()

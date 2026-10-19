@@ -716,3 +716,13 @@ test('inventory wait processes and persists AMQP before begin(ids); rejected inv
  const work=session(pkg,{packages:[pkg],snapshotUrl:'https://snapshot.invalid',customersUrl:'https://customers.invalid',recoveryMs:300000,staleMs:90000},state,async()=>{if(state.feed().coverage?.prematch.messages===1)marketPersisted=true;if(state.connections.prematch.phase==='recovering'&&state.connections.prematch.recoveryProgress?.stage==='waiting_retry'){persisted++;assert.equal(closed,0);assert.equal(state.connections.prematch.lastSnapshotDiagnostic?.snapshotValidation?.code,'inventory_invalid_ids');assert.equal(state.connections.prematch.recoveryProgress.regularSnapshotReady,false);abort.abort();}},abort.signal,{clientFactory:()=>fake,connect:(async()=>connection) as unknown as typeof amqp.connect});
  await work;assert.ok(persisted>0);assert.equal(starts,1);assert.equal(closed,1);assert.equal(acks,1);assert.equal(state.feed().events.flatMap(e=>e.selections).some(s=>s.available),false);
 });
+
+
+test('distribution observations persist before propagating a failed Start without opening AMQP',async()=>{
+ const{OperationError}=await import('./diagnostics.js');const state=new TradeState(),abort=new AbortController();let saved=false;
+ const observations=[{stage:'after_propagation' as const,observedAtUTC:'2026-10-19T14:00:03Z',bodyIsDistributionOn:false,sdkIsDistributionOn:false,elapsedSinceStartMs:2002,propagationDelayMs:2000}];
+ const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'unused',port:5672,tls:false,queue:'_4511_'};
+ const fake:ReturnType<typeof clients>={async snapshot(){assert.fail('Snapshot cannot run before activation');},async catalog(){return[];},async distributionStatus(){assert.fail('Unused status stub');},distributionObservations:()=>observations,async startDistribution(){throw new OperationError({operation:'distribution.start',protocol:'http',category:'invalid_response',reason:'distribution_still_off',message:'ISOLATED'});}};
+ await assert.rejects(session(pkg,{packages:[pkg],snapshotUrl:'https://snapshot.invalid',customersUrl:'https://customers.invalid',recoveryMs:300000,staleMs:90000},state,async()=>{if(state.connections.prematch.distributionObservations?.length)saved=true;},abort.signal,{clientFactory:()=>fake,connect:(async()=>{assert.fail('Do not connect MQ after failed distribution activation');}) as unknown as typeof amqp.connect}),OperationError);
+ assert.equal(saved,true);assert.deepEqual(state.connections.prematch.distributionObservations,observations);
+});

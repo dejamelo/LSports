@@ -48,6 +48,7 @@ axios.defaults.timeout = 20000;
 axios.defaults.maxContentLength = 50 * 1024 * 1024;
 axios.defaults.maxRedirects = 0;
 export interface ProviderClients {
+  distributionObservations?:()=>import("@lsports/contracts").DistributionObservation[];
   snapshot(): Promise<TradeEvent[]>;
   snapshotPartitioned?:(sink:PartitionSink)=>Promise<import("./partitioned-snapshot.js").PartitionProgress>;
   outrightFixtures?: () => Promise<TradeEvent[]>;
@@ -111,6 +112,12 @@ export function clients(
     ...options,
     restApiBaseUrl: urls.customersUrl,
   });
+  const distributionObservations:import('@lsports/contracts').DistributionObservation[]=[];
+  let startReturnedAt:number|undefined;let startReturnedMonotonic:number|undefined;
+  const recordDistribution=(entry:import('@lsports/contracts').DistributionObservation)=>{
+    distributionObservations.push(entry);if(distributionObservations.length>3)distributionObservations.shift();
+    console.info(JSON.stringify({lane:config.lane,packageId:config.packageId,operation:entry.stage==='start_response'?'distribution.start':'distribution.status',status:'observed',distributionObservation:entry}));
+  };
   let rejectedTimestamps: import("@lsports/contracts").TimestampInspection[] = [];
   let audit: SnapshotAudit | undefined;
   let recoveredFixtureIds: number[] | undefined;
@@ -263,12 +270,17 @@ export function clients(
         return sports;
       });
     },
+    distributionObservations:()=>distributionObservations.map(entry=>({...entry})),
     async distributionStatus() {
       return operation("distribution.status", "http", async () => {
         const status =
           await distribution.getDistributionStatus(StatusResponseBody);
         if (!status || typeof status.isDistributionOn !== "boolean")
           throw new Error("Distribution status missing");
+        const raw=(snapshotResponsePayload() as {Body?:{IsDistributionOn?:unknown}}|undefined)?.Body?.IsDistributionOn;
+        const now=Date.now();
+        recordDistribution({stage:startReturnedAt===undefined?'before_start':'after_propagation',observedAtUTC:new Date(now).toISOString(),...(typeof raw==='boolean'?{bodyIsDistributionOn:raw}:{}),sdkIsDistributionOn:status.isDistributionOn,
+          ...(startReturnedAt!==undefined?{startReturnedAtUTC:new Date(startReturnedAt).toISOString(),elapsedSinceStartMs:Math.max(0,Math.round(performance.now()-startReturnedMonotonic!)),propagationDelayMs:DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS}:{})});
         return status;
       });
     },
@@ -283,6 +295,7 @@ export function clients(
             response?.message===StartMessage.alreadyActive?'already_active' as const:
             response?.message==null?'missing' as const:'unrecognized' as const;
         });
+        startReturnedAt=Date.now();startReturnedMonotonic=performance.now();recordDistribution({stage:'start_response',observedAtUTC:new Date(startReturnedAt).toISOString(),startMessage,propagationDelayMs:DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS});
         // Official DistributionUtil.start waits for propagation BEFORE checkStatus.
         // The existing session delay runs after this method and cannot replace it.
         await new Promise<void>(resolve=>setTimeout(resolve,DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS));

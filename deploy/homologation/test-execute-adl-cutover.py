@@ -14,6 +14,9 @@ exec((HERE/'resume-adl-api.py').read_text().split("if __name__=='__main__':")[0]
 exec((HERE/'execute-adl-cutover-aws.py').read_text().split("if __name__=='__main__':")[0],NS)
 
 class Cutover(unittest.TestCase):
+ def test_distribution_observations_expose_raw_boolean_and_times_only(self):
+  row={'stage':'after_propagation','bodyIsDistributionOn':False,'sdkIsDistributionOn':False,'observedAtUTC':'2026-10-19T14:00:03Z','elapsedSinceStartMs':2001,'propagationDelayMs':2000,'secret':'MUST_NEVER_PRINT','startMessage':'MUST_NEVER_PRINT'}
+  safe=NS['safe_distribution_observation'](row);self.assertEqual(safe['bodyIsDistributionOn'],False);self.assertEqual(safe['elapsedSinceStartMs'],2001);self.assertNotIn('MUST_NEVER_PRINT',json.dumps(safe))
  def test_distribution_details_allow_only_official_enum_labels_and_delay(self):
   safe=NS['safe_feed_diagnostic']({'distributionInspection':{'before':False,'startRequested':True,'after':False,'startMessage':'activated','propagationDelayMs':2000,'password':'MUST_NEVER_PRINT'}})
   self.assertEqual(safe['distributionInspection']['startMessage'],'activated');self.assertEqual(safe['distributionInspection']['propagationDelayMs'],2000);self.assertNotIn('MUST_NEVER_PRINT',json.dumps(safe))

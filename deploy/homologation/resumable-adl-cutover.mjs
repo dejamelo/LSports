@@ -5,6 +5,7 @@ import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:net';
 import {spawn} from 'node:child_process';
+import {validateDistribution} from './distribution-validation.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(here,'../..');
 const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
@@ -14,10 +15,10 @@ export async function step(ledger,name,save,action){
  ledger.currentStage=name;ledger.steps[name]={status:'started',at:new Date().toISOString()};await save();emit({stage:name,status:'running'});
  const result=await action();ledger.steps[name]={status:'ok',at:new Date().toISOString(),result};await save();return result;
 }
-async function command(bin,args,input,timeout=180000,raw=false){
+async function command(bin,args,input,timeout=180000,raw=false,quiet=false){
  return new Promise((resolve,reject)=>{
   const child=spawn(bin,args,{cwd:root,stdio:['pipe','pipe','pipe']});let buffer='',all='',bytes=0,stderr='';const rows=[];
-  const parse=line=>{try{const row=JSON.parse(line);if(typeof row.operation==='string'&&/^(cutover\.|shutdown\.)/.test(row.operation)){rows.push(row);console.log(JSON.stringify(row));}}catch{}};
+  const parse=line=>{try{const row=JSON.parse(line);if(typeof row.operation==='string'&&/^(cutover\.|shutdown\.)/.test(row.operation)){rows.push(row);if(!quiet||row.status==='blocked')console.log(JSON.stringify(row));}}catch{}};
   child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
   const timer=setTimeout(()=>{child.kill('SIGTERM');reject(Error('HELPER_TIMEOUT_PRESERVED'));},timeout);
   child.stdout.on('data',chunk=>{bytes+=chunk.length;if(bytes>4*1024*1024){child.kill('SIGTERM');return;}if(raw){all+=chunk;return;}buffer+=chunk;const lines=buffer.split('\n');buffer=lines.pop();lines.forEach(parse);});
@@ -34,7 +35,7 @@ async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFi
 export async function run(args){
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--partitioned-recovery','--inventory-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
@@ -49,18 +50,18 @@ export async function run(args){
   const common=(await fs.readFile(path.join(here,'resume-adl-api.py'),'utf8')).split("if __name__=='__main__':")[0];
   const inspect=(await fs.readFile(path.join(here,'inspect-cutover-aws.py'),'utf8')).split("if __name__=='__main__':")[0];
   const source=common+'\n'+inspect+'\n'+await fs.readFile(path.join(here,'patch-adl-worker-image.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'repair-adl-snapshot.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'upgrade-partitioned-worker.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'execute-adl-cutover-aws.py'),'utf8');
-  const remote=async(action,extra={})=>{
-   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com','sudo -n python3 -c '+quote(source)],JSON.stringify({action,...extra}),360000);
+  const remote=async(action,extra={},quiet=false)=>{
+   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com','sudo -n python3 -c '+quote(source)],JSON.stringify({action,...extra}),360000,false,quiet);
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
   stage='remote_consumer_gate';const pre=await remote('preflight');
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!(args[4]==='--repair-snapshot'?['2147483648','4294967296']:['4294967296']).includes(String(pre.workerModel?.memoryLimitBytes))||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
-  if(['--validate-only','--repair-snapshot','--snapshot-report','--partitioned-recovery','--inventory-repair'].includes(args[4])){
+  if(['--validate-only','--repair-snapshot','--snapshot-report','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
    stage='validation_resume_gate';
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
-   if(!['--partitioned-recovery','--inventory-repair'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
+   if(!['--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
    const mac=rows.find(r=>r.operation==='cutover.audit');if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
@@ -77,10 +78,19 @@ export async function run(args){
     }
     ledger.steps.snapshot_capacity_repair={status:'ok',at:new Date().toISOString(),result};await save();
    }
-   if(['--partitioned-recovery','--inventory-repair'].includes(args[4])){
+   if(['--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
     stage='partitioned_upgrade';
-    const report=await protectedJson(path.join(folder,`snapshot-volume-${pid}-${parent}.json`));
-    if(report.report?.decisions?.prematch!=='bounded_partitioned_recovery_required_no_cap_increase'||!report.report.rows?.some(row=>row.lane==='prematch'&&row.classification==='current_limit_exceeded'&&row.httpStatus===200&&row.attemptLimitBytes===268435456))throw Error('SAVED_VOLUME_DIAGNOSIS_NOT_CONFIRMED');
+    const distributionMode=args[4]==='--distribution-repair';
+    if(!distributionMode){
+     const report=await protectedJson(path.join(folder,`snapshot-volume-${pid}-${parent}.json`));
+     if(report.report?.decisions?.prematch!=='bounded_partitioned_recovery_required_no_cap_increase'||!report.report.rows?.some(row=>row.lane==='prematch'&&row.classification==='current_limit_exceeded'&&row.httpStatus===200&&row.attemptLimitBytes===268435456))throw Error('SAVED_VOLUME_DIAGNOSIS_NOT_CONFIRMED');
+    }else{
+     if(ledger.steps.partitioned_upgrade?.status!=='ok')throw Error('DISTRIBUTION_REPAIR_REQUIRES_EXISTING_UPGRADE');
+     await command('git',['merge-base','--is-ancestor','2aa06f7','HEAD'],undefined,10000,true);
+     const changed=(await command('git',['diff','--name-only','2aa06f7','HEAD','--','apps/worker/src','packages/contracts/src'],undefined,10000,true)).trim().split('\n').filter(n=>n&&!n.endsWith('.test.ts'));
+     if(changed.some(n=>!['apps/worker/src/connected.ts','apps/worker/src/provider.ts','packages/contracts/src/index.ts'].includes(n)))throw Error('UNRELATED_RUNTIME_CHANGES_IN_DISTRIBUTION_PATCH');
+     const current=await remote('status',{handoff});ledger.distributionPreFixEvidence??={at:new Date().toISOString(),previous:ledger.lastValidation,current};await save();
+    }
     if(args[4]==='--inventory-repair'){
      if(ledger.steps.partitioned_upgrade?.status!=='ok')throw Error('INVENTORY_REPAIR_REQUIRES_COMPLETED_PARTITIONED_UPGRADE');
      const previous=ledger.lastValidation,current=await remote('status',{handoff});
@@ -89,14 +99,17 @@ export async function run(args){
     }
     const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts'].map(name=>'apps/worker/src/'+name);names.push('packages/contracts/src/index.ts');
     const {createHash}=await import('node:crypto'),files={},baseHashes={};
-    const baseRef=args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
+    const baseRef=distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
     for(const name of names){files[name]=await command('git',['show','HEAD:'+name],undefined,10000,true);baseHashes[name]=existing.includes(name)?createHash('sha256').update(await command('git',['show',baseRef+':'+name],undefined,10000,true)).digest('hex'):null;}
-    const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes});
-    ledger.steps.partitioned_image={status:'ok',at:new Date().toISOString(),result:prepared};await save();
+    const repairOptions=distributionMode?{fixCommit:'2aa06f7'}:{};
+    const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
+    if(distributionMode&&prepared.offlinePropagationVerified!==true)throw Error('DISTRIBUTION_PROPAGATION_TEST_UNVERIFIED');
+    ledger.steps[distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
     const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);const fresh=freshRows.find(r=>r.operation==='cutover.audit');
     if(fresh?.status!=='ok'||fresh.matchingWorkerProcesses!==0||fresh.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
-    const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt});
-    ledger.steps.partitioned_upgrade={status:'ok',at:new Date().toISOString(),result:activated};await save();
+    const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});
+    ledger.steps[distributionMode?'distribution_upgrade':'partitioned_upgrade']={status:'ok',at:new Date().toISOString(),result:activated};await save();
+    if(distributionMode){stage='distribution_validation';await validateDistribution((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,path.join(folder,`support-217525-post-2aa06f7-${pid}-${parent}.md`));return;}
     stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress,45*60000,args[4]==='--inventory-repair');return;
    }
    stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress);return;

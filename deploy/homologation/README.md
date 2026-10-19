@@ -138,3 +138,7 @@ Inventário sem avanço após 5069beb: [INVENTORY-RECOVERY.md](INVENTORY-RECOVER
 Revisão da ativação e mensagem preliminar para o ticket 217525:
 [SUPPORT-217525-DISTRIBUTION.md](SUPPORT-217525-DISTRIBUTION.md). Correção preparada,
 sem reinício/implantação automática.
+
+Aplicação autorizada da correção de distribuição, com status bruto e rascunho
+pós-correção: [APPLY-DISTRIBUTION-2aa06f7.md](APPLY-DISTRIBUTION-2aa06f7.md)
+(`--distribution-repair`, somente worker; retomável).

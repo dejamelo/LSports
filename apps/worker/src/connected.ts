@@ -195,7 +195,10 @@ export async function session(
   });
   await save();
   const api = dependencies.clientFactory(pkg, config);
-  await api.startDistribution();
+  try{await api.startDistribution();}finally{
+    const observations=api.distributionObservations?.();
+    if(observations){state.set(lane,{distributionObservations:observations});await save();}
+  }
   await delay(2000, undefined, { signal });
   if (signal.aborted) return;
   const connection = await connectMq(pkg, dependencies.connect);

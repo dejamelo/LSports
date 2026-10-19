@@ -207,6 +207,18 @@ def cutover_main():
 
 # Explicit fields only: provider exception text, URLs and message payloads never leave SSH.
 FEED_OPERATIONS={'subscriptions.list','amqp.connection','amqp.channel','amqp.consume','amqp.connect','snapshot.events','snapshot.outright.fixtures','snapshot.outright.markets','distribution.start','distribution.status','feed.decode','feed.apply','feed.stale','worker.start','file.persist'}
+def safe_distribution_observation(value):
+    out={}
+    if value.get('stage') in ('before_start','start_response','after_propagation'):out['stage']=value['stage']
+    for key in ('observedAtUTC','startReturnedAtUTC'):
+        if isinstance(value.get(key),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',value[key]):out[key]=value[key]
+    for key in ('bodyIsDistributionOn','sdkIsDistributionOn'):
+        if type(value.get(key)) is bool:out[key]=value[key]
+    for key in ('elapsedSinceStartMs','propagationDelayMs'):
+        if type(value.get(key)) is int and 0<=value[key]<=3600000:out[key]=value[key]
+    if value.get('startMessage') in ('activated','already_active','missing','unrecognized'):out['startMessage']=value['startMessage']
+    return out
+
 def safe_feed_diagnostic(value):
     if not isinstance(value,dict):return {}
     out={}
@@ -238,6 +250,7 @@ def safe_feed_diagnostic(value):
       'El lote no contiene exactamente los fixtures solicitados; baseline incompleto, cuotas bloqueadas.':'batch_id_mismatch',
       'El inventario cambió durante la recuperación; se requiere otro baseline completo.':'inventory_changed'}
     if isinstance(value.get('message'),str) and value['message'] in legacy:out['legacyValidationCause']=legacy[value['message']]
+    if isinstance(value.get('distributionObservation'),dict):out['distributionObservation']=safe_distribution_observation(value['distributionObservation'])
     metadata=value.get('messageMetadata')
     if isinstance(metadata,dict):
         kind=metadata.get('messageType')
@@ -299,6 +312,7 @@ def feed_evidence(directory,consumers):
 def cutover_status(directory,start_requested):
     consumers=states('worker');path=directory/'trade-feed.json';result={'operation':'cutover.aws','stage':'status','readOnly':True,'workers':consumers,'posnetChanged':False}
     result['evidence']=feed_evidence(directory,consumers)
+    result['validationSinceUTC']=start_requested
     if any(c.get('state')=='exited' for c in consumers):
         result['workerFailure']=inspect_worker_failure(consumers)[0]
     if not path.exists():
@@ -311,6 +325,7 @@ def cutover_status(directory,start_requested):
     for lane in ('prematch','inplay'):
         source=feed.get('connections',{}).get(lane,{})
         lanes[lane]={k:source.get(k) for k in fields}
+        lanes[lane]['distributionObservations']=[safe_distribution_observation(o) for o in source.get('distributionObservations',[])[-3:] if isinstance(o,dict)]
         lane_coverage=feed.get('coverage',{}).get(lane,{}) or {}
         coverage=lane_coverage.get('activity',{})
         lanes[lane]['decodedMessagesByType']={k:v for k,v in (lane_coverage.get('messagesByType') or {}).items() if re.fullmatch('[0-9]{1,5}',k) and type(v) is int and v>=0}

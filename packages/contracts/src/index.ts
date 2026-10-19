@@ -209,6 +209,12 @@ export interface SnapshotValidationInspection {
   rawCount?:number;sdkCount?:number;invalidCount?:number;requested?:number;received?:number;missing?:number;unexpected?:number;
   itemTypes?:Partial<Record<'number'|'string'|'object'|'null'|'array'|'boolean'|'other',number>>;
 }
+export interface DistributionObservation {
+  stage:'before_start'|'start_response'|'after_propagation';observedAtUTC:string;
+  bodyIsDistributionOn?:boolean;sdkIsDistributionOn?:boolean;
+  startReturnedAtUTC?:string;elapsedSinceStartMs?:number;propagationDelayMs?:number;
+  startMessage?:'activated'|'already_active'|'missing'|'unrecognized';
+}
 export interface IntegrationDiagnostic {
   snapshotValidation?:SnapshotValidationInspection;
   requestInspection?: SnapshotRequestInspection;
@@ -368,6 +374,7 @@ export interface FeedMessageMetadata {
   warnings?: string[];
 }
 export interface ConnectionState {
+  distributionObservations?:DistributionObservation[];
   session?: {id:string;startedAt:string};
   sessionEnds?: {id:string;startedAt:string;endedAt:string;diagnostic:IntegrationDiagnostic}[];
   lastSnapshotDiagnostic?: IntegrationDiagnostic;
