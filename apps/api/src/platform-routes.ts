@@ -1,4 +1,4 @@
-import {feedEvidence} from "./feed-evidence.js";
+import { feedEvidence } from "./feed-evidence.js";
 import { walletReadiness, assertSimulation } from "./wallet-port.js";
 import express from "express";
 import { readFile } from "node:fs/promises";
@@ -191,12 +191,10 @@ export function platformRoutes(
   );
   router.get("/api/control/clients/:id/operations", (req, res) =>
     res.json({
-      operations: platform
-        .operations(admin(req), req.params.id)
-        .map((op) => ({
-          ...op,
-          effectiveLimits: platform.effectiveOperationLimits(op.id),
-        })),
+      operations: platform.operations(admin(req), req.params.id).map((op) => ({
+        ...op,
+        effectiveLimits: platform.effectiveOperationLimits(op.id),
+      })),
     }),
   );
   router.post("/api/control/clients/:id/operations", (req, res) =>
@@ -231,7 +229,103 @@ export function platformRoutes(
         ),
       ),
   );
+
+  router.post("/api/control/password", async (req, res) => {
+    const actor = admin(req, true),
+      input = body(req);
+    await platform.changePassword(
+      actor,
+      input.currentPassword,
+      input.newPassword,
+    );
+    res.clearCookie("adl_admin", {
+      path: "/api/control",
+      httpOnly: true,
+      secure,
+      sameSite: "strict",
+    });
+    res.json({ ok: true });
+  });
+  router.post("/api/control/clients/:id/access", async (req, res) => {
+    await platform.resetClientAccess(
+      admin(req, true),
+      req.params.id,
+      body(req).newPassword,
+    );
+    res.json({ ok: true });
+  });
   const opPath = "/api/control/clients/:id/operations/:operationId";
+  router.get(`${opPath}/terminals`, (req, res) =>
+    res.json({
+      terminals: platform.terminals(
+        admin(req),
+        req.params.id,
+        req.params.operationId,
+      ),
+    }),
+  );
+  router.post(`${opPath}/terminals`, (req, res) =>
+    res
+      .status(201)
+      .json(
+        platform.saveTerminal(
+          admin(req, true),
+          req.params.id,
+          req.params.operationId,
+          body(req),
+        ),
+      ),
+  );
+  router.post(`${opPath}/preview`, (req, res) => {
+    const actor = admin(req, true);
+    assertSimulation(body(req));
+    const session = platform.preview(
+      actor,
+      req.params.id,
+      req.params.operationId,
+      publicOrigin,
+      body(req),
+    );
+    res
+      .status(201)
+      .json({
+        iframeUrl: `${publicOrigin}/embed/${session.clientId}/${session.operationId}/sportsbook#code=${session.code}`,
+        expiresIn: session.expiresIn,
+        financialMode: "simulation",
+      });
+  });
+  router.get(`${opPath}/tickets`, (req, res) => {
+    const op = platform.authorizeOperation(
+      admin(req),
+      req.params.id,
+      req.params.operationId,
+    );
+    const offset = Number(req.query.offset || 0);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1000000)
+      throw new PlatformError("INVALID_OFFSET", "Página inválida.");
+    if (
+      req.query.q !== undefined &&
+      (typeof req.query.q !== "string" || req.query.q.length > 120)
+    )
+      throw new PlatformError("INVALID_SEARCH", "Búsqueda inválida.");
+    res.json(
+      tickets
+        .store(op.id)
+        .list(undefined, offset, 30, String(req.query.q || "")),
+    );
+  });
+  router.get(`${opPath}/tickets/:ticketId`, (req, res) => {
+    const op = platform.authorizeOperation(
+        admin(req),
+        req.params.id,
+        req.params.operationId,
+      ),
+      ticket = tickets.store(op.id).get(req.params.ticketId);
+    if (!ticket)
+      throw new PlatformError("NOT_FOUND", "Billete no encontrado.", 404);
+    res.json(ticket);
+  });
+
   router.get(`${opPath}/credentials`, (req, res) =>
     res.json({
       credentials: platform.credentials(
@@ -366,8 +460,12 @@ export function platformRoutes(
     );
     res.json(tickets.store(op.id).report());
   });
-  router.get(`${opPath}/feed-evidence`, async (req,res)=>{
-    platform.authorizeOperation(admin(req),req.params.id,req.params.operationId);
+  router.get(`${opPath}/feed-evidence`, async (req, res) => {
+    platform.authorizeOperation(
+      admin(req),
+      req.params.id,
+      req.params.operationId,
+    );
     res.json(feedEvidence(await source.getEvents()));
   });
   router.get(`${opPath}/diagnostics`, async (req, res) => {
@@ -415,14 +513,12 @@ export function platformRoutes(
     const access = auth(req);
     const input = body(req);
     const session = platform.createEmbed(access, input);
-    res
-      .status(201)
-      .json({
-        testOnly: true,
-        financialMode: "simulation",
-        expiresIn: session.expiresIn,
-        iframeUrl: `${publicOrigin}/embed/${session.clientId}/${session.operationId}/sportsbook#code=${session.code}`,
-      });
+    res.status(201).json({
+      testOnly: true,
+      financialMode: "simulation",
+      expiresIn: session.expiresIn,
+      iframeUrl: `${publicOrigin}/embed/${session.clientId}/${session.operationId}/sportsbook#code=${session.code}`,
+    });
   });
   router.post("/api/integration/v1/embed-exchange", (req, res) => {
     sameOrigin(req);
@@ -458,14 +554,12 @@ export function platformRoutes(
   });
   router.all("/api/integration/v1/wallet/{*operation}", (req, res) => {
     auth(req);
-    res
-      .status(501)
-      .json({
-        code: "WALLET_CONTRACT_PENDING",
-        error:
-          "Contrato de cartera pendiente. No se ejecutó ninguna operación financiera.",
-        wallet: walletReadiness,
-      });
+    res.status(501).json({
+      code: "WALLET_CONTRACT_PENDING",
+      error:
+        "Contrato de cartera pendiente. No se ejecutó ninguna operación financiera.",
+      wallet: walletReadiness,
+    });
   });
   router.get("/api/integration/v1/events", async (req, res) => {
     const access = auth(req);
@@ -580,12 +674,10 @@ export function platformRoutes(
         .type("html")
         .send(await readFile(resolve(webDist, "index.html"), "utf8"));
     } catch {
-      res
-        .status(503)
-        .json({
-          code: "WEB_BUILD_REQUIRED",
-          error: "Ejecutá npm run build para servir el iframe.",
-        });
+      res.status(503).json({
+        code: "WEB_BUILD_REQUIRED",
+        error: "Ejecutá npm run build para servir el iframe.",
+      });
     }
   });
   router.get("/control", async (_req, res) => {
@@ -599,12 +691,10 @@ export function platformRoutes(
         .type("html")
         .send(await readFile(resolve(webDist, "index.html"), "utf8"));
     } catch {
-      res
-        .status(503)
-        .json({
-          code: "WEB_BUILD_REQUIRED",
-          error: "Ejecutá npm run build para abrir el panel.",
-        });
+      res.status(503).json({
+        code: "WEB_BUILD_REQUIRED",
+        error: "Ejecutá npm run build para abrir el panel.",
+      });
     }
   });
   // Fail closed: platform mode never falls through to anonymous legacy tickets,
@@ -617,12 +707,10 @@ export function platformRoutes(
       res.status(404).json({ error: "Ruta no encontrada." });
       return;
     }
-    res
-      .status(401)
-      .json({
-        code: "PLATFORM_AUTH_REQUIRED",
-        error: "Usá el acceso administrativo o la integración autenticada.",
-      });
+    res.status(401).json({
+      code: "PLATFORM_AUTH_REQUIRED",
+      error: "Usá el acceso administrativo o la integración autenticada.",
+    });
   });
   router.use(
     (
@@ -644,20 +732,16 @@ export function platformRoutes(
       else if ((error as { type?: string })?.type === "entity.parse.failed")
         res.status(400).json({ code: "INVALID_JSON", error: "JSON inválido." });
       else if ((error as { type?: string })?.type === "entity.too.large")
-        res
-          .status(413)
-          .json({
-            code: "BODY_TOO_LARGE",
-            error: "Solicitud demasiado grande.",
-          });
+        res.status(413).json({
+          code: "BODY_TOO_LARGE",
+          error: "Solicitud demasiado grande.",
+        });
       else
-        res
-          .status(500)
-          .json({
-            code: "PLATFORM_OPERATION_FAILED",
-            error:
-              "No se pudo completar la operación. No se publican datos internos.",
-          });
+        res.status(500).json({
+          code: "PLATFORM_OPERATION_FAILED",
+          error:
+            "No se pudo completar la operación. No se publican datos internos.",
+        });
     },
   );
   return {

@@ -48,6 +48,11 @@ const auditLabels: Record<string, string> = {
   "credential.revoked": "Credencial revocada",
   "auth.login": "Ingreso al panel",
   "auth.logout": "Cierre de sesión",
+  "auth.password.changed": "Contraseña actualizada",
+  "auth.access.reset": "Acceso del cliente restablecido",
+  "auth.access.recovered": "Acceso de plataforma recuperado",
+  "terminal.updated": "Terminal registrado o actualizado",
+  "embed.preview.created": "Vista previa del iframe abierta",
   "auth.login.rejected": "Ingreso rechazado",
   "platform.admin.created": "Administrador de plataforma creado",
 };
@@ -55,6 +60,7 @@ export default function ControlPanel() {
   const [admin, setAdmin] = useState<Admin>(),
     [csrf, setCsrf] = useState(""),
     [loading, setLoading] = useState(true);
+  const [recovering, setRecovering] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   useEffect(() => setShowPassword(false), [admin]);
   const [error, setError] = useState(""),
@@ -64,6 +70,7 @@ export default function ControlPanel() {
     [selected, setSelected] = useState(""),
     [tab, setTab] = useState("Resumen");
   const [audit, setAudit] = useState<Audit[]>([]);
+  const [clientName, setClientName] = useState("");
   const [domains, setDomains] = useState(""),
     [displayName, setDisplayName] = useState(""),
     [accepting, setAccepting] = useState(true);
@@ -84,12 +91,25 @@ export default function ControlPanel() {
       },
       body: data === undefined ? undefined : JSON.stringify(data),
       credentials: "same-origin",
+      signal: AbortSignal.timeout(10000),
+    }).catch(() => {
+      throw Error(
+        "No se pudo conectar con el panel. Verificá la conexión y reintentá.",
+      );
     });
-    const result = await response.json().catch(() => ({
-      error: "Panel no disponible. Verificá PLATFORM_ENABLED y el build.",
-    }));
+    const result = await response.json().catch(() => {
+      throw Error(
+        "Respuesta inválida del panel. Reintentá o contactá al administrador.",
+      );
+    });
     if (!response.ok) {
-      if (response.status === 401 && path !== "/login") setAdmin(undefined);
+      if (response.status === 401 && path !== "/login") {
+        setAdmin(undefined);
+        setCsrf("");
+        setClients([]);
+        setSelected("");
+        throw Error("Tu sesión venció. Iniciá sesión nuevamente.");
+      }
       throw Error(result.error || "No se pudo completar la operación.");
     }
     return result;
@@ -126,7 +146,12 @@ export default function ControlPanel() {
           setCsrf(result.csrf);
         }
       })
-      .catch(() => {})
+      .catch((e) => {
+        if (active && !e.message.includes("sesión venció"))
+          setError(
+            "No se pudo verificar la sesión. Comprobá la conexión y reintentá.",
+          );
+      })
       .finally(() => {
         if (active) setLoading(false);
       });
@@ -140,6 +165,7 @@ export default function ControlPanel() {
   }, [admin]);
   useEffect(() => {
     if (client) {
+      setClientName(client.name);
       setDomains(client.domains.join("\n"));
       setDisplayName(client.settings.displayName);
       setAccepting(client.settings.acceptingTickets);
@@ -179,6 +205,7 @@ export default function ControlPanel() {
     action(async () => {
       if (!client) return;
       await api(`/clients/${client.id}`, "PATCH", {
+        name: clientName,
         domains: domains
           .split(/\n/)
           .map((s) => s.trim())
@@ -219,9 +246,11 @@ export default function ControlPanel() {
         </span>
         {admin && (
           <button
+            disabled={busy}
             onClick={() =>
               void action(async () => {
                 await api("/logout", "POST", {});
+                setNotice("Sesión cerrada.");
                 setAdmin(undefined);
                 setCsrf("");
                 setClients([]);
@@ -258,6 +287,7 @@ export default function ControlPanel() {
           </div>
           <form onSubmit={login} className="control-card">
             <h2>Ingresá al panel</h2>
+            {notice && <p role="status">{notice}</p>}
             <p>Usá tu cuenta de plataforma o de cliente.</p>
             <label>
               Email
@@ -310,6 +340,18 @@ export default function ControlPanel() {
                   : "Ingresar"}
               <ChevronRight size={17} />
             </button>
+            <button type="button" onClick={() => setRecovering((v) => !v)}>
+              Recuperar acceso
+            </button>
+            {recovering && (
+              <p role="status">
+                Si administrás un cliente, pedile al administrador de la
+                plataforma que restablezca tu acceso. Para recuperar la cuenta
+                de plataforma, el responsable del servidor debe usar el
+                procedimiento protegido de recuperación. No enviamos emails ni
+                pedimos contraseñas por chat.
+              </p>
+            )}
             <small>
               El primer administrador se crea desde el servidor con{" "}
               <code>npm run platform:bootstrap</code>. No hay cuentas
@@ -357,6 +399,10 @@ export default function ControlPanel() {
               { name: "Configuración", icon: ShieldCheck },
               { name: "Credenciales", icon: KeyRound },
               { name: "Riesgo", icon: Activity },
+              { name: "Sportsbook", icon: Activity },
+              { name: "Billetes", icon: ScrollText },
+              { name: "Terminales", icon: Users },
+              { name: "Acceso", icon: KeyRound },
               { name: "Auditoría", icon: ScrollText },
             ].map(({ name, icon: Icon }) => (
               <button
@@ -407,6 +453,92 @@ export default function ControlPanel() {
               <p role="alert" className="control-error">
                 {error}
               </p>
+            )}
+            {tab === "Acceso" && !creating && (
+              <section className="control-card">
+                <h2>Acceso administrativo</h2>
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const form = event.currentTarget,
+                      data = new FormData(form);
+                    void action(async () => {
+                      await api("/password", "POST", {
+                        currentPassword: data.get("current"),
+                        newPassword: data.get("next"),
+                      });
+                      form.reset();
+                      setAdmin(undefined);
+                      setCsrf("");
+                      setClients([]);
+                      setNotice(
+                        "Contraseña actualizada. Iniciá sesión nuevamente.",
+                      );
+                    });
+                  }}
+                >
+                  <label>
+                    Contraseña actual
+                    <input
+                      name="current"
+                      type="password"
+                      autoComplete="current-password"
+                      required
+                      maxLength={256}
+                    />
+                  </label>
+                  <label>
+                    Nueva contraseña
+                    <input
+                      name="next"
+                      type="password"
+                      autoComplete="new-password"
+                      required
+                      minLength={12}
+                      maxLength={256}
+                    />
+                  </label>
+                  <button disabled={busy}>Cambiar mi contraseña</button>
+                </form>
+                {admin.role === "platform_admin" && client && (
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const form = event.currentTarget,
+                        data = new FormData(form);
+                      void action(async () => {
+                        await api(`/clients/${client.id}/access`, "POST", {
+                          newPassword: data.get("password"),
+                        });
+                        form.reset();
+                        setNotice(
+                          "Acceso del cliente restablecido. Sesiones anteriores cerradas.",
+                        );
+                      });
+                    }}
+                  >
+                    <h3>Restablecer acceso · {client.name}</h3>
+                    <p>
+                      Entregá la nueva contraseña por un canal seguro. No se
+                      modifica ninguna credencial de integración.
+                    </p>
+                    <label>
+                      Nueva contraseña del administrador del cliente
+                      <input
+                        name="password"
+                        type="password"
+                        autoComplete="new-password"
+                        required
+                        minLength={12}
+                        maxLength={256}
+                      />
+                    </label>
+                    <button disabled={busy}>
+                      Restablecer acceso del cliente
+                    </button>
+                  </form>
+                )}
+              </section>
             )}
             {notice && (
               <p role="status" className="control-notice">
@@ -505,10 +637,19 @@ export default function ControlPanel() {
                     api={api}
                     onError={setError}
                     onNotice={setNotice}
+                    onBack={() => setTab("Resumen")}
                   />
                   {tab === "Configuración" && (
                     <section className="control-card control-form">
                       <h2>Configuración del cliente</h2>
+                      <label>
+                        Nombre del cliente
+                        <input
+                          value={clientName}
+                          maxLength={150}
+                          onChange={(e) => setClientName(e.target.value)}
+                        />
+                      </label>
                       <label>
                         Nombre visible del operador
                         <input

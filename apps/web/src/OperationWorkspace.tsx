@@ -1,3 +1,4 @@
+import OperationConsole from "./OperationConsole";
 import RiskPanel from "./RiskPanel";
 import { useEffect, useState } from "react";
 import {
@@ -131,6 +132,7 @@ export default function OperationWorkspace({
   api,
   onError,
   onNotice,
+  onBack,
 }: {
   clientId: string;
   platformAdmin: boolean;
@@ -138,6 +140,7 @@ export default function OperationWorkspace({
   api: Api;
   onError: (s: string) => void;
   onNotice: (s: string) => void;
+  onBack: () => void;
 }) {
   const [operations, setOperations] = useState<Operation[]>([]),
     [selected, setSelected] = useState(""),
@@ -252,7 +255,17 @@ export default function OperationWorkspace({
       active = false;
     };
   }, [selected, tab]);
-  if (!["Resumen", "Operaciones", "Credenciales", "Riesgo"].includes(tab))
+  if (
+    ![
+      "Resumen",
+      "Operaciones",
+      "Credenciales",
+      "Riesgo",
+      "Sportsbook",
+      "Billetes",
+      "Terminales",
+    ].includes(tab)
+  )
     return null;
   const canEdit = platformAdmin || !!op?.effectiveLimits.clientMayEdit;
   return (
@@ -357,6 +370,18 @@ export default function OperationWorkspace({
                 : "Nuevos billetes suspendidos"}
             </span>
           </div>
+          {diagnostic &&
+            (diagnostic.health !== "ok" ||
+              Object.values(diagnostic.connections || {}).some(
+                (lane: any) => lane.phase !== "connected",
+              )) && (
+              <p role="status" className="control-error">
+                Feed no disponible o incompleto. Los datos guardados no
+                confirman cuotas vigentes. El servidor bloquea las selecciones
+                sin validación actual; historial y resultados permanecen
+                disponibles.
+              </p>
+            )}
           {tab === "Resumen" && (
             <>
               <div className="control-metrics">
@@ -438,6 +463,15 @@ export default function OperationWorkspace({
                 ))}
               </section>
             </>
+          )}
+          {["Sportsbook", "Billetes", "Terminales"].includes(tab) && (
+            <OperationConsole
+              key={`${path}:${tab}`}
+              path={path}
+              tab={tab}
+              api={api}
+              back={onBack}
+            />
           )}
           {tab === "Operaciones" && (
             <>

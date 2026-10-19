@@ -72,6 +72,7 @@ export default function App() {
         const response = await sportsbookApi("/events", {
           signal: controller.signal,
         });
+        if(response.status===401)throw Error("Sesión vencida. Cerrá esta vista y pedí una nueva sesión al casino o desde el panel.");
         if (!response.ok) throw Error();
         const next = (await response.json()) as EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:StakeLimits};
         if (
@@ -83,9 +84,9 @@ export default function App() {
           setFeed(next);
           setError("");
         }
-      } catch {
+      } catch (failure) {
         if (!disposed)
-          setError("Sin conexión con la API. Cuotas y simulación bloqueadas.");
+          setError(failure instanceof Error&&failure.message.startsWith("Sesión vencida")?failure.message:"Sin conexión con la API. Cuotas y simulación bloqueadas.");
       } finally {
         clearTimeout(timeout);
         if (!disposed) timer = setTimeout(load, 3000);

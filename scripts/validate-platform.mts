@@ -234,7 +234,7 @@ try {
   const frame = casino.frameLocator("iframe");
   await frame.getByText("Equipo de prueba A", { exact: true }).waitFor();
   await frame.locator(".odds-row button").first().click();
-  await frame.getByLabel("Importe simulado (ARS)",{exact:true}).fill("10");
+  await frame.getByLabel("Importe simulado (ARS)", { exact: true }).fill("10");
   await frame
     .getByRole("button", { name: "Simular billete", exact: true })
     .click();
@@ -292,7 +292,7 @@ try {
     .getByRole("button", { name: "Armar otro billete de prueba", exact: true })
     .click();
   await frame.locator(".odds-row button").first().click();
-  await frame.getByLabel("Importe simulado (ARS)",{exact:true}).fill("10");
+  await frame.getByLabel("Importe simulado (ARS)", { exact: true }).fill("10");
   await frame
     .getByRole("button", { name: "Simular billete", exact: true })
     .click();
@@ -340,6 +340,70 @@ try {
   );
   await page.getByRole("button", { name: "Resumen", exact: true }).click();
   await page.getByText("Nuevos billetes pausados", { exact: true }).waitFor();
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.getByRole("button", { name: "Billetes", exact: true }).click();
+  await page.getByLabel("Buscar por ID de billete o jugador").fill("");
+  await page
+    .getByRole("button", { name: "Buscar billetes", exact: true })
+    .click();
+  await page.locator(".control-ticket-row").first().waitFor();
+  await page.locator(".control-ticket-row").first().click();
+  await page.getByRole("article", { name: "Detalle del billete" }).waitFor();
+  await page.getByRole("button", { name: "Terminales", exact: true }).click();
+  await page
+    .getByLabel("ID de terminal", { exact: true })
+    .fill("PRUEBA-POS-01");
+  await page
+    .getByLabel("Nombre del terminal", { exact: true })
+    .fill("POS PRUEBA AISLADA");
+  await page
+    .getByRole("button", { name: "Guardar terminal", exact: true })
+    .click();
+  await page.getByText("Terminal guardado.", { exact: true }).waitFor();
+  // Existing authorized parent remains permitted; add the panel origin explicitly,
+  // as an administrator must do. No origin bypass or automatic domain mutation.
+  platform.updateClient(admin, client.id, { domains: [parentOrigin, base] });
+  await page.getByRole("button", { name: "Sportsbook", exact: true }).click();
+  await page
+    .getByRole("button", {
+      name: "Abrir sportsbook de simulación",
+      exact: true,
+    })
+    .click();
+  const panelFrame = page.frameLocator(
+    'iframe[title="Sportsbook de simulación"]',
+  );
+  await panelFrame
+    .getByRole("heading", {
+      name: "Historial de billetes de prueba",
+      exact: true,
+    })
+    .waitFor();
+  assert(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  );
+  if (process.env.PANEL_SCREENSHOT)
+    await page.screenshot({
+      path: process.env.PANEL_SCREENSHOT,
+      fullPage: true,
+    });
+  await page
+    .getByRole("button", {
+      name: "Cerrar iframe y volver al resumen",
+      exact: true,
+    })
+    .click();
+  await page.getByText("Nuevos billetes pausados", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Salir", exact: true }).click();
+  await page.getByRole("heading", { name: "Ingresá al panel" }).waitFor();
+  await page
+    .getByRole("button", { name: "Recuperar acceso", exact: true })
+    .click();
+  await page
+    .getByText("Si administrás un cliente,", { exact: false })
+    .waitFor();
   assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
@@ -347,6 +411,11 @@ try {
       status: "ok",
       validated: [
         "admin_login",
+        "panel_ticket_search_details",
+        "terminal_registration",
+        "authorized_panel_iframe_and_return",
+        "tablet_1024px",
+        "logout_and_assisted_access_recovery",
         "create_client",
         "create_currency_operation",
         "server_only_key",

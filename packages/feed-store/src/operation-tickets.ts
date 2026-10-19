@@ -146,6 +146,8 @@ export class OperationTickets {
           return currentFeed;
         },
         (selections) => {
+          if (channel.channel === "pos")
+            this.platform.assertTerminal(op.id, channel.terminalId!);
           const current = this.platform.operation(op.id)!,
             client = this.platform.client(op.clientId)!;
           if (
@@ -170,13 +172,13 @@ export class OperationTickets {
           if (amount < minor(limits.minStakeMinor))
             throw new PlatformError(
               "STAKE_BELOW_MINIMUM",
-              `El mínimo por billete es ${formatMinor(limits.minStakeMinor,op.currency)}.`,
+              `El mínimo por billete es ${formatMinor(limits.minStakeMinor, op.currency)}.`,
               409,
             );
           if (amount > minor(limits.maxStakeMinor))
             throw new PlatformError(
               "STAKE_ABOVE_MAXIMUM",
-              `El máximo por billete es ${formatMinor(limits.maxStakeMinor,op.currency)}.`,
+              `El máximo por billete es ${formatMinor(limits.maxStakeMinor, op.currency)}.`,
               409,
             );
           if (
@@ -189,7 +191,7 @@ export class OperationTickets {
           )
             throw new PlatformError(
               "RETURN_LIMIT",
-              `El retorno potencial supera el máximo de ${formatMinor(limits.maxReturnMinor,op.currency)}.`,
+              `El retorno potencial supera el máximo de ${formatMinor(limits.maxReturnMinor, op.currency)}.`,
               409,
             );
           if (
@@ -225,7 +227,7 @@ export class OperationTickets {
             )
               throw new PlatformError(
                 "PLAYER_EVENT_TICKET_LIMIT",
-                `Alcanzaste el máximo de ${limits.maxTicketsPerPlayerEvent} ${limits.maxTicketsPerPlayerEvent===1?"billete":"billetes"} por jugador/evento.`,
+                `Alcanzaste el máximo de ${limits.maxTicketsPerPlayerEvent} ${limits.maxTicketsPerPlayerEvent === 1 ? "billete" : "billetes"} por jugador/evento.`,
                 409,
               );
             const accumulated = rows.reduce(
@@ -238,7 +240,7 @@ export class OperationTickets {
             )
               throw new PlatformError(
                 "PLAYER_EVENT_AMOUNT_LIMIT",
-                `El acumulado máximo por jugador/evento es ${formatMinor(limits.maxStakePerPlayerEventMinor,op.currency)}. Ya acumulaste ${formatMinor(accumulated.toString(),op.currency)}.`,
+                `El acumulado máximo por jugador/evento es ${formatMinor(limits.maxStakePerPlayerEventMinor, op.currency)}. Ya acumulaste ${formatMinor(accumulated.toString(), op.currency)}.`,
                 409,
               );
           }
@@ -293,27 +295,45 @@ export class OperationTickets {
     const ticket = this.core.get(id);
     return ticket ? this.view(ticket, context) : undefined;
   }
-  list(playerId?: string, offset = 0, limit = 50) {
-    const ids = (
-      playerId === undefined
-        ? this.db
-            .prepare(
-              "SELECT ticket_id FROM operation_context ORDER BY rowid DESC",
-            )
-            .all()
-        : this.db
-            .prepare(
-              "SELECT ticket_id FROM operation_context WHERE player_id=? ORDER BY rowid DESC",
-            )
-            .all(playerId)
-    ).map((row) => String(row.ticket_id));
+  list(playerId?: string, offset = 0, limit = 50, search = "") {
+    if (
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    )
+      throw new PlatformError("INVALID_PAGE", "Página inválida.");
+    const filters: string[] = [],
+      args: string[] = [];
+    if (playerId !== undefined) {
+      filters.push("player_id=?");
+      args.push(playerId);
+    }
+    if (search) {
+      filters.push(
+        "(instr(lower(ticket_id),lower(?))>0 OR instr(lower(player_id),lower(?))>0)",
+      );
+      args.push(search, search);
+    }
+    const where = filters.length ? " WHERE " + filters.join(" AND ") : "";
+    const total = Number(
+      this.db
+        .prepare("SELECT count(*) AS n FROM operation_context" + where)
+        .get(...args)!.n,
+    );
+    const ids = this.db
+      .prepare(
+        "SELECT ticket_id FROM operation_context" +
+          where +
+          " ORDER BY rowid DESC LIMIT ? OFFSET ?",
+      )
+      .all(...args, limit, offset);
     return {
-      tickets: ids
-        .slice(offset, offset + limit)
-        .map((id) => this.get(id, playerId)!),
-      total: ids.length,
+      tickets: ids.map((row) => this.get(String(row.ticket_id), playerId)!),
+      total,
       offset,
-      nextOffset: offset + limit < ids.length ? offset + limit : null,
+      nextOffset: offset + limit < total ? offset + limit : null,
     };
   }
   report(playerId?: string) {

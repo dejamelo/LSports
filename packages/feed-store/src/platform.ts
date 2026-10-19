@@ -206,6 +206,7 @@ export class PlatformStore {
     chmodSync(path, 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY,name TEXT NOT NULL,status TEXT NOT NULL,domains TEXT NOT NULL,settings TEXT NOT NULL,created TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS operation_terminals(operation_id TEXT NOT NULL REFERENCES operations(id),terminal_id TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(operation_id,terminal_id));
       CREATE TABLE IF NOT EXISTS admins(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL,client_id TEXT REFERENCES clients(id));
       CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES admins(id),csrf_hash TEXT NOT NULL,expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,client_id TEXT NOT NULL REFERENCES clients(id),name TEXT NOT NULL,country TEXT NOT NULL,currency TEXT NOT NULL,status TEXT NOT NULL,accepting INTEGER NOT NULL,client_edits INTEGER NOT NULL,limits TEXT NOT NULL,created TEXT NOT NULL,UNIQUE(id,client_id,currency));
@@ -271,6 +272,176 @@ export class PlatformStore {
       this.audit("bootstrap", null, "platform.admin.created", { adminId: id });
       return { id, email: normalized };
     });
+  }
+  async changePassword(
+    actor: Admin,
+    currentPassword: unknown,
+    nextPassword: unknown,
+  ) {
+    const stored = this.db
+      .prepare("SELECT password FROM admins WHERE id=?")
+      .get(actor.id) as { password: string } | undefined;
+    if (
+      !stored ||
+      typeof currentPassword !== "string" ||
+      currentPassword.length > 256 ||
+      !(await checkPassword(currentPassword, stored.password))
+    )
+      throw new PlatformError(
+        "INVALID_PASSWORD",
+        "La contraseña actual es incorrecta.",
+        403,
+      );
+    const hash = await passwordHash(nextPassword);
+    this.transaction(() => {
+      this.db
+        .prepare("UPDATE admins SET password=? WHERE id=?")
+        .run(hash, actor.id);
+      this.db.prepare("DELETE FROM sessions WHERE user_id=?").run(actor.id);
+      this.audit(actor.id, actor.clientId, "auth.password.changed");
+    });
+  }
+  async resetClientAccess(
+    actor: Admin,
+    clientId: string,
+    nextPassword: unknown,
+  ) {
+    this.authorize(actor);
+    this.authorize(actor, clientId);
+    const target = this.db
+      .prepare(
+        "SELECT id FROM admins WHERE client_id=? AND role='client_admin'",
+      )
+      .get(clientId) as { id: string } | undefined;
+    if (!target)
+      throw new PlatformError("NOT_FOUND", "Administrador no encontrado.", 404);
+    const hash = await passwordHash(nextPassword);
+    this.transaction(() => {
+      this.db
+        .prepare("UPDATE admins SET password=? WHERE id=?")
+        .run(hash, target.id);
+      this.db.prepare("DELETE FROM sessions WHERE user_id=?").run(target.id);
+      this.audit(actor.id, clientId, "auth.access.reset", {
+        adminId: target.id,
+      });
+    });
+  }
+  // Operator-only CLI recovery; deliberately not exposed as an HTTP endpoint.
+  async recoverPlatformAccess(rawEmail: unknown, nextPassword: unknown) {
+    const normalized = email(rawEmail),
+      target = this.db
+        .prepare(
+          "SELECT id FROM admins WHERE email=? AND role='platform_admin'",
+        )
+        .get(normalized) as { id: string } | undefined;
+    if (!target)
+      throw new PlatformError("NOT_FOUND", "Administrador no encontrado.", 404);
+    const hash = await passwordHash(nextPassword);
+    this.transaction(() => {
+      this.db
+        .prepare("UPDATE admins SET password=? WHERE id=?")
+        .run(hash, target.id);
+      this.db.prepare("DELETE FROM sessions WHERE user_id=?").run(target.id);
+      this.audit("local_operator", null, "auth.access.recovered", {
+        adminId: target.id,
+      });
+    });
+  }
+  terminals(actor: Admin, clientId: string, operationId: string) {
+    this.authorizeOperation(actor, clientId, operationId);
+    return this.db
+      .prepare(
+        "SELECT terminal_id as id,name,status FROM operation_terminals WHERE operation_id=? ORDER BY name",
+      )
+      .all(operationId);
+  }
+  saveTerminal(
+    actor: Admin,
+    clientId: string,
+    operationId: string,
+    input: Record<string, unknown>,
+  ) {
+    this.authorizeOperation(actor, clientId, operationId);
+    const id = integrationChannel("pos", input.id).terminalId!,
+      name = text(input.name, "nombre de terminal");
+    if (!["active", "suspended"].includes(String(input.status)))
+      throw new PlatformError("INVALID_STATUS", "Estado inválido.");
+    return this.transaction(() => {
+      const before = this.db
+        .prepare(
+          "SELECT name,status FROM operation_terminals WHERE operation_id=? AND terminal_id=?",
+        )
+        .get(operationId, id);
+      this.db
+        .prepare(
+          "INSERT INTO operation_terminals VALUES(?,?,?,?) ON CONFLICT(operation_id,terminal_id) DO UPDATE SET name=excluded.name,status=excluded.status",
+        )
+        .run(operationId, id, name, String(input.status));
+      this.audit(actor.id, clientId, "terminal.updated", {
+        operationId,
+        terminalId: id,
+        before: before || null,
+        after: { name, status: input.status },
+      });
+      return { id, name, status: input.status };
+    });
+  }
+  assertTerminal(operationId: string, terminalId: string) {
+    const managed = this.db
+      .prepare("SELECT 1 FROM operation_terminals WHERE operation_id=? LIMIT 1")
+      .get(operationId);
+    if (!managed) return; // Existing integrations retain their pre-registry contract.
+    const row = this.db
+      .prepare(
+        "SELECT status FROM operation_terminals WHERE operation_id=? AND terminal_id=?",
+      )
+      .get(operationId, terminalId);
+    if (row?.status !== "active")
+      throw new PlatformError(
+        "TERMINAL_UNAVAILABLE",
+        "Terminal no registrado o suspendido para esta operación.",
+        403,
+      );
+  }
+  preview(
+    actor: Admin,
+    clientId: string,
+    operationId: string,
+    parentOrigin: string,
+    input: Record<string, unknown>,
+  ) {
+    const op = this.authorizeOperation(actor, clientId, operationId);
+    assertBinding(op, input);
+    const key = this.db
+      .prepare(
+        "SELECT id FROM operation_credentials WHERE operation_id=? AND revoked IS NULL ORDER BY created DESC LIMIT 1",
+      )
+      .get(op.id) as { id: string } | undefined;
+    if (!key)
+      throw new PlatformError(
+        "CREDENTIAL_REQUIRED",
+        "Creá una credencial vigente para abrir el iframe.",
+        409,
+      );
+    const session = this.createEmbed(
+      { ...op, credentialId: key.id, kind: "server" },
+      {
+        clientId,
+        operationId,
+        currency: op.currency,
+        playerId: "control-demo:" + actor.id,
+        parentOrigin,
+        channel: input.channel ?? "web",
+        ...(input.terminalId !== undefined
+          ? { terminalId: input.terminalId }
+          : {}),
+      },
+    );
+    this.audit(actor.id, clientId, "embed.preview.created", {
+      operationId,
+      currency: op.currency,
+    });
+    return session;
   }
   private rateLimit(key: string) {
     const k = digest(key);
@@ -418,20 +589,18 @@ export class PlatformStore {
         );
       const id = randomUUID(),
         adminId = randomUUID();
-      this.db
-        .prepare("INSERT INTO clients VALUES(?,?,?,?,?,?)")
-        .run(
-          id,
-          name,
-          "active",
-          JSON.stringify(domains),
-          JSON.stringify({
-            acceptingTickets: true,
-            displayName: name,
-            locale: "es-AR",
-          }),
-          new Date(this.now()).toISOString(),
-        );
+      this.db.prepare("INSERT INTO clients VALUES(?,?,?,?,?,?)").run(
+        id,
+        name,
+        "active",
+        JSON.stringify(domains),
+        JSON.stringify({
+          acceptingTickets: true,
+          displayName: name,
+          locale: "es-AR",
+        }),
+        new Date(this.now()).toISOString(),
+      );
       this.db
         .prepare("INSERT INTO admins VALUES(?,?,?,?,?)")
         .run(adminId, normalized, hash, "client_admin", id);
@@ -445,6 +614,7 @@ export class PlatformStore {
     if (!client)
       throw new PlatformError("NOT_FOUND", "Cliente no encontrado.", 404);
     const previousDomains = JSON.stringify(client.domains);
+    if (input.name !== undefined) client.name = text(input.name, "nombre");
     if (input.status !== undefined) {
       this.authorize(actor);
       if (!["active", "suspended"].includes(String(input.status)))
@@ -469,8 +639,11 @@ export class PlatformStore {
     }
     return this.transaction(() => {
       this.db
-        .prepare("UPDATE clients SET status=?,domains=?,settings=? WHERE id=?")
+        .prepare(
+          "UPDATE clients SET name=?,status=?,domains=?,settings=? WHERE id=?",
+        )
         .run(
+          client.name,
           client.status,
           JSON.stringify(client.domains),
           JSON.stringify(client.settings),
@@ -882,9 +1055,7 @@ export class PlatformStore {
       });
     });
   }
-  integration(
-    value: string,
-  ):
+  integration(value: string):
     | (OperationScope & {
         credentialId: string;
         kind: "server" | "iframe";
@@ -928,6 +1099,8 @@ export class PlatformStore {
           terminal_id: string | null;
         }
       | undefined;
+    if (session?.channel === "pos")
+      this.assertTerminal(session.operation_id, session.terminal_id!);
     return session
       ? {
           clientId: session.client_id,
@@ -955,6 +1128,8 @@ export class PlatformStore {
     const playerId = text(input.playerId, "playerId", 120),
       parentOrigin = origins([input.parentOrigin])[0],
       device = integrationChannel(input.channel, input.terminalId);
+    if (device.channel === "pos")
+      this.assertTerminal(auth.operationId, device.terminalId!);
     const client = this.client(auth.clientId)!;
     if (!client.domains.includes(parentOrigin))
       throw new PlatformError(
@@ -1034,6 +1209,8 @@ export class PlatformStore {
           "Sesión inválida o vencida.",
           401,
         );
+      if (row.channel === "pos")
+        this.assertTerminal(row.operation_id, row.terminal_id!);
       const scope = {
         clientId: row.client_id,
         operationId: row.operation_id,

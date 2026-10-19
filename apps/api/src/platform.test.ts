@@ -1626,3 +1626,74 @@ test('feed evidence is scoped to authorized administrators and never settles a p
   const stores=new TenantTickets(s.platform);try{assert.equal(stores.store(a.operation.id).get(accepted.data.id)?.status,'PENDING');}finally{stores.close();}
  }finally{await s.close();}
 });
+
+test('panel preview uses existing server credential, authorized origin, fixed operation/currency and one-use session',async()=>{
+ const s=await setup();try{
+  const a=await s.create('previewa'),b=await s.create('previewb'),path=`/api/control/clients/${a.id}/operations/${a.operation.id}`;
+  assert.equal((await s.request(path+'/preview','POST',{},s.admin)).data.code,'CREDENTIAL_REQUIRED');
+  const key=await s.key(a.id);
+  assert.equal((await s.request(path+'/preview','POST',{},s.admin)).data.code,'DOMAIN_NOT_ALLOWED');
+  await s.request(`/api/control/clients/${a.id}`,'PATCH',{domains:[origin]},s.admin);
+  assert.equal((await s.request(path+'/preview','POST',{currency:'USD'},s.admin)).data.code,'SCOPE_MISMATCH');
+  const preview=await s.request(path+'/preview','POST',{},s.admin);assert.equal(preview.status,201);
+  assert(!JSON.stringify(preview.data).includes(key.value));assert.equal((await s.request(path+'/credentials','GET',undefined,s.admin)).data.credentials.length,1);
+  const code=new URL(preview.data.iframeUrl).hash.slice(6),input={code,clientId:a.id,operationId:a.operation.id};
+  const exchange=await s.request('/api/integration/v1/embed-exchange','POST',input);assert.equal(exchange.status,200);assert.equal(exchange.data.scope.currency,'ARS');assert(exchange.data.scope.playerId===undefined);assert(exchange.data.scope.clientId===a.id);
+  assert.equal((await s.request('/api/integration/v1/embed-exchange','POST',input)).status,401);
+  const client=await s.login('previewb@test.example','isolated-client-password');assert.equal((await s.request(path+'/preview','POST',{},client)).status,403);
+  assert.equal((await s.request(path+'/tickets','GET',undefined,client)).status,403);
+  assert.equal((await s.request(path+'/tickets?q=none','GET',undefined,s.admin)).data.total,0);
+  assert.equal((await s.request(path+'/tickets?offset=-1','GET',undefined,s.admin)).status,400);
+ }finally{await s.close();}
+});
+
+test('terminal registry is scoped, audited and blocks suspended or unknown POS admissions while preserving tickets',async()=>{
+ const s=await setup();try{
+  const a=await s.create('terminala'),b=await s.create('terminalb'),path=`/api/control/clients/${a.id}/operations/${a.operation.id}`,key=await s.key(a.id);
+  const client=await s.login('terminalb@test.example','isolated-client-password');
+  assert.equal((await s.request(path+'/terminals','POST',{id:'TEST-POS-01',name:'Prueba',status:'active'},client)).status,403);
+  assert.equal((await s.request(path+'/terminals','POST',{id:'TEST-POS-01',name:'Prueba',status:'active'},s.admin)).status,201);
+  const input={clientId:a.id,operationId:a.operation.id,currency:'ARS',playerId:'panel-pos',channel:'pos',terminalId:'TEST-POS-01',stakeMinor:'100',selections:[{eventId:'prematch:9001',marketId:'160',selectionId:'runner',expectedOdds:2.6233}]};
+  const send=(id:string,extra={})=>s.request('/api/integration/v1/tickets','POST',{...input,...extra},undefined,key.value,{'Idempotency-Key':id});
+  const accepted=await send('terminal-first');assert.equal(accepted.status,201);
+  assert.equal((await s.request(path+'/tickets?q=panel-pos','GET',undefined,s.admin)).data.total,1);
+  assert.equal((await s.request(path+'/tickets/'+accepted.data.id,'GET',undefined,s.admin)).data.id,accepted.data.id);
+  assert.equal((await s.request(path+'/terminals','POST',{id:'TEST-POS-01',name:'Prueba',status:'suspended'},s.admin)).status,201);
+  assert.equal((await send('terminal-second')).data.code,'TERMINAL_UNAVAILABLE');assert.equal((await send('terminal-third',{terminalId:'UNKNOWN-POS'})).data.code,'TERMINAL_UNAVAILABLE');
+  assert.equal((await send('terminal-first')).data.id,accepted.data.id);
+  assert.equal((await s.request(path+'/tickets','GET',undefined,s.admin)).data.total,1);
+  s.feed.ticketOutcomes=[{eventId:'prematch:9001',marketId:'160',selectionId:'runner',settlement:1,updatedAt:new Date().toISOString()}];
+  await s.request(path+'/diagnostics','GET',undefined,s.admin); // Normal reconcile path, no manual ticket editing.
+  const settled=(await s.request(path+'/tickets/'+accepted.data.id,'GET',undefined,s.admin)).data;
+  assert.equal(settled.status,'LOST');assert.equal(settled.revision,1);assert.equal(settled.selections[0].acceptedOdds,accepted.data.selections[0].acceptedOdds);
+  assert.equal((await s.request(`/api/control/clients/${b.id}/operations/${b.operation.id}/tickets/${accepted.data.id}`,'GET',undefined,s.admin)).status,404);
+ }finally{await s.close();}
+});
+
+test('access recovery resets client sessions only, requires platform role and password change closes own sessions',async()=>{
+ const s=await setup();try{
+  const a=await s.create('accessa'),client=await s.login('accessa@test.example','isolated-client-password');
+  assert.equal((await s.request(`/api/control/clients/${a.id}/access`,'POST',{newPassword:'new-password-isolated'},client)).status,403);
+  assert.equal((await s.request(`/api/control/clients/${a.id}/access`,'POST',{newPassword:'new-password-isolated'},s.admin)).status,200);
+  assert.equal((await s.request('/api/control/session','GET',undefined,client)).status,401);
+  const next=await s.login('accessa@test.example','new-password-isolated');
+  assert.equal((await s.request('/api/control/password','POST',{currentPassword:'wrong',newPassword:'next-password-isolated'},next)).status,403);
+  assert.equal((await s.request('/api/control/password','POST',{currentPassword:'new-password-isolated',newPassword:'next-password-isolated'},next)).status,200);
+  assert.equal((await s.request('/api/control/session','GET',undefined,next)).status,401);
+  await s.login('accessa@test.example','next-password-isolated');
+  assert.equal((await s.request('/api/control/session','GET',undefined,s.admin)).status,200);
+ }finally{await s.close();}
+});
+
+test('protected operator recovery CLI revokes platform sessions without changing integration credentials or accepted tickets',async()=>{
+ const s=await setup();try{
+  const a=await s.create('recovercli'),key=await s.key(a.id),{spawnSync}=await import('node:child_process'),{openSync,closeSync}=await import('node:fs');
+  const before=await readFile(join(s.directory,'credentials',key.id+'.key'),'utf8'),input=join(s.directory,'recovery.private.json');
+  await writeFile(input,JSON.stringify({action:'recover_platform_access',email:'platform@test.example',newPassword:'recovered-platform-password'}),{mode:0o600});
+  const fd=openSync(input,'r');let result;
+  try{result=spawnSync(process.execPath,['--import','tsx','scripts/recover-platform-access.ts'],{cwd:join(import.meta.dirname,'../../..'),env:{...process.env,PLATFORM_DATA_DIR:s.directory},stdio:[fd,'pipe','pipe'],encoding:'utf8',timeout:10000});}finally{closeSync(fd);}
+  assert.equal(result.status,0,result.stdout);assert(!result.stdout.includes('recovered-platform-password'));assert(!result.stderr.includes('recovered-platform-password'));
+  assert.equal((await s.request('/api/control/session','GET',undefined,s.admin)).status,401);
+  await s.login('platform@test.example','recovered-platform-password');assert.equal(await readFile(join(s.directory,'credentials',key.id+'.key'),'utf8'),before);assert(s.platform.integration(key.value));
+ }finally{await s.close();}
+});
