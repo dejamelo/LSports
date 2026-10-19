@@ -291,3 +291,12 @@ com callback CloseOk não executado, stdout represado por concurrently realmente
 suspenso e liberação após somente CONT do pai; ACK/persistência/requeue e reinício
 com dois bilhetes liquidados preservados. São testes isolados, não confirmação da
 parada real do Mac nem conexão validada com LSports.
+
+
+## Recuperação forçada autorizada e executor retomável — procedimento atual
+
+O usuário autorizou a terminação não cooperativa do worker antigo após proteção
+dos dados persistidos. Use [RESUMABLE-CUTOVER.md](RESUMABLE-CUTOVER.md). O comando
+único `complete-adl-cutover.mjs --pid 12811 --parent 12809 --recover-and-cutover`
+substitui novas tentativas manuais de TERM/CONT/drain e não pede nova aprovação.
+Nunca anunciar execução Mac/AWS a partir dos testes isolados.

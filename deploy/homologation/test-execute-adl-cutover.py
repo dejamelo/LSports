@@ -73,6 +73,7 @@ class Cutover(unittest.TestCase):
     finally:ns['sys'].stdin=old
    try:
     code,result=call('import');self.assertEqual(code,0,result);self.assertEqual(result['journals'],1)
+    count=len(list(backups.iterdir()));code,reused=call('import');self.assertEqual(code,0,reused);self.assertEqual(reused['reused'],True);self.assertEqual(len(list(backups.iterdir())),count)
     target=vol/('trade-feed.json'+name);self.assertEqual(target.stat().st_uid,1000);self.assertEqual(target.stat().st_mode&0o777,0o600)
     # An updated coordinator deadline must prevent start; no locks removed or gates written.
     target.write_text(json.dumps({**schedule,'nextAt':(ns['time'].time()+300)*1000}))
@@ -80,5 +81,6 @@ class Cutover(unittest.TestCase):
     target.write_text(json.dumps(schedule));code,result=call('start');self.assertEqual(code,0,result)
     after=json.loads((secure/'deployment.json').read_text());self.assertEqual(after['composeOverrides'][0],str(override));self.assertEqual(len(after['composeOverrides']),2)
     starts=[c for c in commands if 'up' in c];self.assertEqual(len(starts),1);self.assertEqual(starts[0][-1],'worker');self.assertIn('--no-deps',starts[0]);self.assertIn('--no-build',starts[0]);self.assertIn('never',starts[0]);self.assertIn(str(override),starts[0])
+    code,result=call('start');self.assertEqual(code,2);self.assertEqual(result['reason'],'WORKER_START_ALREADY_ATTEMPTED_INSPECT_BEFORE_RETRY')
    finally:ns.update(previous)
 if __name__=='__main__':unittest.main()

@@ -32,7 +32,10 @@ def cutover_main():
     try:
         require(os.geteuid()==0,'ROOT_REQUIRED')
         raw=sys.stdin.buffer.read(1024*1024+1);require(len(raw)<=1024*1024,'HANDOFF_SIZE_LIMIT')
-        request=json.loads(raw);action=request.get('action');handoff=request['handoff'];audit=handoff['audit']
+        request=json.loads(raw);action=request.get('action')
+        if action=='patch_worker':return patch_worker(request)
+        if action=='preflight':return inspect_aws()
+        handoff=request['handoff'];audit=handoff['audit']
         require(action in ('import','start','status'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(audit['operation']=='cutover.audit' and audit['readOnly'] is True,'INVALID_AUDIT')
@@ -55,8 +58,22 @@ def cutover_main():
         receipt=SECURE/('cutover-'+digest+'.json')
         if action=='status':
             saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'))
+        if request.get('expectedWorkerImage'):require(model(base)['services']['worker']['image']==request['expectedWorkerImage'],'WORKER_IMAGE_NOT_EXPECTED_CORRECTION')
         stage='no_consumer_gate'
-        require(not any(c['running'] for c in states('worker')),'AWS_WORKER_ALREADY_RUNNING')
+        running=[c for c in states('worker') if c['running']]
+        if action=='start' and running:
+            require(len(running)==1 and receipt.is_file(),'UNEXPECTED_RUNNING_WORKER')
+            saved=json.loads(receipt.read_bytes());require(saved.get('digest')==digest and saved.get('startRequestedAtUTC'),'RUNNING_WORKER_RECEIPT_UNVERIFIED')
+            container=json.loads(run(['docker','inspect',running[0]['id']]))[0]
+            expected_image=model(base)['services']['worker']['image'];expected_id=json.loads(run(['docker','image','inspect',expected_image]))[0]['Id']
+            require(container['Image']==expected_id,'RUNNING_WORKER_IMAGE_MISMATCH')
+            env=dict(item.split('=',1) for item in container.get('Config',{}).get('Env',[]) if '=' in item)
+            require(env.get('ADL_CAPACITY_APPROVED')=='yes' and env.get('ADL_MAC_WORKER_STOPPED')=='yes' and env.get('ADL_SUPPLIER_NOT_BEFORE_UTC')==saved['notBeforeUTC'],'RUNNING_WORKER_GATES_MISMATCH')
+            started=datetime.datetime.fromisoformat(container['State']['StartedAt'].replace('Z','+00:00')).timestamp()
+            intended=datetime.datetime.fromisoformat(saved['startRequestedAtUTC'].replace('Z','+00:00')).timestamp()
+            require(started>=intended-5 and started>=datetime.datetime.fromisoformat(saved['notBeforeUTC'].replace('Z','+00:00')).timestamp(),'RUNNING_WORKER_START_PREDATES_RECEIPT_OR_BARRIER')
+            emit(operation='cutover.aws',stage='start',status='ok',reused=True,workerStarted=True,posnetChanged=False);return 0
+        require(not running,'AWS_WORKER_ALREADY_RUNNING')
         require(not (directory/'trade-feed.json.lock').exists(),'AWS_WORKER_LOCK_PRESENT')
         require(not list(directory.glob('trade-feed.json.snapshot-*.lock')) and not list(directory.glob('trade-feed.json*.reclaim')),'AWS_SCHEDULER_LOCK_PRESENT')
         require(len(handoff['schedules'])==audit['journals'] and len(handoff['schedules'])>0,'JOURNAL_COUNT_MISMATCH')
@@ -67,7 +84,15 @@ def cutover_main():
             incoming[name]=schedule_checked(entry['schedule'])
         if action=='import':
             stage='journal_backup'
-            require(not receipt.exists(),'HANDOFF_ALREADY_IMPORTED')
+            if receipt.exists():
+                saved=json.loads(receipt.read_bytes());require(saved['digest']==digest,'HANDOFF_RECEIPT_MISMATCH')
+                for name,schedule in incoming.items():
+                    target=directory/name;require(target.is_file() and not target.is_symlink() and target.stat().st_size<=1024*1024,'IMPORTED_JOURNAL_MISSING')
+                    current=schedule_checked(json.loads(target.read_bytes()));require(merge_schedule(current,schedule)==current,'IMPORTED_JOURNAL_REGRESSED')
+                deadline=max(deadline,datetime.datetime.fromisoformat(saved['notBeforeUTC'].replace('Z','+00:00')).timestamp())
+                for target in directory.glob('trade-feed.json.snapshot-*.json'):
+                    current=schedule_checked(json.loads(target.read_bytes()));deadline=max(deadline,current['nextAt']/1000,*[n/1000 for n in current['due'].values()])
+                emit(operation='cutover.aws',stage='import',status='ok',reused=True,backup=saved['backup'],journals=len(incoming),notBeforeUTC=datetime.datetime.fromtimestamp(deadline,datetime.timezone.utc).isoformat().replace('+00:00','Z'),workerStarted=False,posnetChanged=False);return 0
             backup=Path(tempfile.mkdtemp(prefix='adl-cutover-',dir=BACKUPS));os.chmod(backup,0o700)
             private(backup/'deployment.before.json',(SECURE/'deployment.json').read_bytes())
             uid=directory.stat().st_uid;gid=directory.stat().st_gid
@@ -101,6 +126,7 @@ def cutover_main():
             s=schedule_checked(json.loads(target.read_bytes()));deadline=max(deadline,s['nextAt']/1000,*[n/1000 for n in s['due'].values()])
         require(time.time()>=deadline,'COOLDOWN_NOT_ELAPSED')
         require(request['freshAuditAt'].endswith('Z') and -5<=time.time()-datetime.datetime.fromisoformat(request['freshAuditAt'].replace('Z','+00:00')).timestamp()<60,'MAC_REAUDIT_EXPIRED')
+        require(not saved.get('startRequestedAtUTC'),'WORKER_START_ALREADY_ATTEMPTED_INSPECT_BEFORE_RETRY')
         stage='gates_overlay'
         previous=model(base);overlay=SECURE/('compose.cutover-'+digest[:16]+'.json')
         gates={'ADL_CAPACITY_APPROVED':'yes','ADL_MAC_WORKER_STOPPED':'yes','ADL_SUPPLIER_NOT_BEFORE_UTC':saved['notBeforeUTC']}
@@ -135,7 +161,7 @@ def cutover_status(directory,start_requested):
     for lane in ('prematch','inplay'):
         source=feed.get('connections',{}).get(lane,{})
         lanes[lane]={k:source.get(k) for k in fields}
-        coverage=feed.get('coverage',{}).get(lane,{})
+        coverage=(feed.get('coverage',{}).get(lane,{}) or {}).get('activity',{})
         lanes[lane]['updates']={k:coverage.get(k) for k in ('lastDataDecodedAt','lastMarketDecodedAt','lastSettlementDecodedAt','lastControlDecodedAt')}
         for key in ('diagnostic','lastSnapshotDiagnostic'):
             d=source.get(key) or {};lanes[lane][key]={k:d[k] for k in ('operation','category','reason','httpStatus','amqpCode','rateLimitSource','retryAt') if k in d}

@@ -640,3 +640,12 @@ no Mac”. O pai real é concurrently suspenso: preserve-o, retome somente o don
 `complete-adl-cutover.mjs --pid 12811` encadeia backup, parada, exportação, importação,
 cooldown, partida única e relatório. Não repetir scripts antigos individualmente.
 A plataforma AWS ainda precisa de bootstrap e operação/sessão para validar iframe.
+
+
+## Recuperação forçada autorizada e executor retomável — procedimento atual
+
+O usuário autorizou a terminação não cooperativa do worker antigo após proteção
+dos dados persistidos. Use [RESUMABLE-CUTOVER.md](RESUMABLE-CUTOVER.md). O comando
+único `complete-adl-cutover.mjs --pid 12811 --parent 12809 --recover-and-cutover`
+substitui novas tentativas manuais de TERM/CONT/drain e não pede nova aprovação.
+Nunca anunciar execução Mac/AWS a partir dos testes isolados.
