@@ -51,7 +51,7 @@ export async function run(args){
   const source=common+'\n'+inspect+'\n'+await fs.readFile(path.join(here,'patch-adl-worker-image.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'execute-adl-cutover-aws.py'),'utf8');
   const remote=async(action,extra={})=>{
    const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com','sudo -n python3 -c '+quote(source)],JSON.stringify({action,...extra}),360000);
-   const result=rows.find(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
+   const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
   stage='remote_consumer_gate';const pre=await remote('preflight');
@@ -87,7 +87,12 @@ export async function run(args){
    const fresh=await audit();const adopted=await remote('start',{handoff,freshAuditAt:fresh.capturedAt,expectedWorkerImage:ledger.steps.worker_image.result.image});
    ledger.steps.aws_start={status:'ok',at:new Date().toISOString(),result:adopted};await save();
   }else if(ledger.steps.aws_start?.status==='ok'){
-   await remote('status',{handoff});throw Error('AWS_WORKER_STOPPED_AFTER_COMPLETED_START');
+   stage='aws_start_recovery';
+   await remote('status',{handoff});
+   const fresh=await audit();
+   // The server permits retry only for a proven, pre-provider admission rejection.
+   const recovered=await remote('recover_start',{handoff,freshAuditAt:fresh.capturedAt,expectedWorkerImage:ledger.steps.worker_image.result.image});
+   ledger.steps.aws_start_recovery={status:'ok',at:new Date().toISOString(),result:recovered};await save();
   }else{
    await audit();
    stage='journal_import';let imported=await step(ledger,stage,save,()=>remote('import',{handoff}));

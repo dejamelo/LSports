@@ -325,3 +325,29 @@ alterado, reexecução sem sinais repetidos, saída real de processo isolado e p
 de dois bilhetes SQLite. Fixtures de ps macOS não substituem a execução real no Mac.
 Não houve acesso ao Mac/AWS nesta revisão; os feeds só estarão validados depois da
 exportação/importação, cooldown e confirmação real das duas lanes pelo executor.
+
+### Worker AWS saiu com código 2 após a primeira partida
+
+O gerador Python de `notBeforeUTC` usava `isoformat()` com seis casas; a imagem
+implantada exige segundos ou milissegundos no gate de homologação. Isso pode gerar
+`homologation.admission / supplier_cooldown_not_confirmed`, antes de importar o worker
+ou abrir conexões ao fornecedor. O código 2 isolado não prova essa causa (a admissão
+de memória também pode usar código 2).
+
+O mesmo executor agora lê os últimos logs privados do container, incluindo stderr,
+e publica apenas operações/motivos conhecidos, números de capacidade permitidos e
+sinais de erro sanitizados. Não imprime payloads, segredos, headers ou exceções brutas.
+Em `aws_start_recovery`, só permite nova partida se comprovar: container único parado,
+código 2 sem OOM, imagem esperada, gates idênticos ao recibo e rejeição especificamente
+do prazo com seis casas. Revalida ausência de consumidor no Mac, locks e cooldowns.
+
+A correção arredonda o prazo **para cima** ao próximo milissegundo. Faz backup privado
+do recibo, deployment e logs, preserva a tentativa anterior no recibo e acrescenta um
+override somente desse gate. Não altera a imagem pronta, o POSNET, credenciais, volumes,
+memória, journals ou seus prazos; não refaz exportação/importação/cooldown já cumpridos.
+Novos imports já geram o formato compatível. Uma saída com outra causa é diagnosticada
+sem reinício automático; lock existente continua sendo bloqueio, sem remoção.
+
+Os testes reproduzem a rejeição real do launcher sem importações do fornecedor e
+exercitam a recuperação com Docker/SSH simulados. A correção na AWS só se confirma
+pelo relatório da execução real e pelos snapshots de ambas as lanes.

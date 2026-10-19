@@ -44,3 +44,14 @@ test("staging launcher exits before worker/provider imports when cutover is not 
     assert((e as { stderr: string }).stderr.includes("capacity_not_reviewed"));
   }
 });
+
+test("six-digit executor deadline reproduces exit 2 before provider imports; rounded millisecond barrier retains safety", async () => {
+  const env={...process.env,ADL_CAPACITY_APPROVED:'yes',ADL_MAC_WORKER_STOPPED:'yes',ADL_SUPPLIER_NOT_BEFORE_UTC:'2026-01-01T00:00:00.000123Z'};
+  await assert.rejects(promisify(execFile)(process.execPath,['--import','tsx','scripts/homologation-worker.ts'],{env}),error=>{
+    const e=error as {code:number;stderr:string};
+    assert.equal(e.code,2);assert.equal(JSON.parse(e.stderr.trim()).reason,'supplier_cooldown_not_confirmed');return true;
+  });
+  const repaired={...env,ADL_SUPPLIER_NOT_BEFORE_UTC:'2026-01-01T00:00:00.001Z'};
+  assert.equal(homologationAdmission(repaired,Date.parse('2026-01-01T00:00:00.000Z')).reason,'supplier_cooldown_pending');
+  assert.equal(homologationAdmission(repaired,Date.parse('2026-01-01T00:00:00.001Z')).allowed,true);
+});

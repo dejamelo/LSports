@@ -20,6 +20,11 @@ class Cutover(unittest.TestCase):
   merged=NS['merge_schedule'](old,incoming)
   self.assertEqual(merged['nextAt'],400);self.assertEqual(merged['due'],{'4511:snapshot.events':900,'4510:snapshot.events':500});self.assertEqual(merged['failures']['a'],4);self.assertEqual(merged['lastRequest'],{'pid':7})
   self.assertEqual(old['due'],{'4511:snapshot.events':900})
+ def test_barrier_rounds_up_without_changing_timezone_or_shortening_cooldown(self):
+  self.assertEqual(NS['canonical_barrier']('2026-10-19T00:00:00.123456Z'),'2026-10-19T00:00:00.124Z')
+  self.assertEqual(NS['canonical_barrier']('2026-10-19T23:59:59.999999Z'),'2026-10-20T00:00:00.000Z')
+  self.assertEqual(NS['canonical_barrier']('2026-10-19T00:00:00Z'),'2026-10-19T00:00:00.000Z')
+  with self.assertRaisesRegex(RuntimeError,'INVALID_DEADLINE'):NS['canonical_barrier']('2026-10-19T00:00:00')
  def test_invalid_schedule_rejected(self):
   for value in ({}, {'nextAt':float('nan'),'due':{},'failures':{}},{'nextAt':0,'due':{'x':-1},'failures':{}}):
    with self.assertRaisesRegex(RuntimeError,'INVALID_SCHEDULE'):NS['schedule_checked'](value)
@@ -57,11 +62,11 @@ class Cutover(unittest.TestCase):
     if args[:3]==['docker','volume','inspect']:return json.dumps([{'Labels':{'com.docker.compose.project':'adl-homologation'},'Mountpoint':str(vol)}]).encode()
     return b''
    def model(base):
-    result={'services':{'api':{'image':'preserved'},'worker':{'mem_limit':4294967296,'environment':{'ADL_CAPACITY_APPROVED':'no','ADL_MAC_WORKER_STOPPED':'no','ADL_SUPPLIER_NOT_BEFORE_UTC':''}}}}
+    result={'services':{'api':{'image':'preserved'},'worker':{'image':'worker:verified','mem_limit':4294967296,'environment':{'ADL_CAPACITY_APPROVED':'no','ADL_MAC_WORKER_STOPPED':'no','ADL_SUPPLIER_NOT_BEFORE_UTC':''}}}}
     for arg in base:
      if str(arg).startswith(str(secure/'compose.cutover-')):result['services']['worker']['environment'].update(json.loads(Path(arg).read_text())['services']['worker']['environment'])
     return result
-   ns=NS;previous={k:ns.get(k) for k in ['SECURE','RELEASES','BACKUPS','run','model','states','os']}
+   ns=NS;previous={k:ns.get(k) for k in ['SECURE','RELEASES','BACKUPS','run','model','states','os','subprocess']}
    test_os=types.SimpleNamespace(**os.__dict__);test_os.geteuid=lambda:0;test_os.chown=lambda *args:None
    ns.update(os=test_os,SECURE=secure,RELEASES=releases,BACKUPS=backups,run=run,model=model,states=lambda service:[{'id':'api','health':'healthy'}] if service=='api' else [])
    def call(action):
@@ -69,7 +74,8 @@ class Cutover(unittest.TestCase):
     old=ns['sys'].stdin;ns['sys'].stdin=io.TextIOWrapper(io.BytesIO(json.dumps(source).encode()));out=io.StringIO()
     try:
      with contextlib.redirect_stdout(out):code=ns['cutover_main']()
-     return code,json.loads(out.getvalue())
+     self.assertNotIn('MUST_NEVER_PRINT',out.getvalue())
+     return code,json.loads(out.getvalue().strip().splitlines()[-1])
     finally:ns['sys'].stdin=old
    try:
     code,result=call('import');self.assertEqual(code,0,result);self.assertEqual(result['journals'],1)
@@ -82,5 +88,30 @@ class Cutover(unittest.TestCase):
     after=json.loads((secure/'deployment.json').read_text());self.assertEqual(after['composeOverrides'][0],str(override));self.assertEqual(len(after['composeOverrides']),2)
     starts=[c for c in commands if 'up' in c];self.assertEqual(len(starts),1);self.assertEqual(starts[0][-1],'worker');self.assertIn('--no-deps',starts[0]);self.assertIn('--no-build',starts[0]);self.assertIn('never',starts[0]);self.assertIn(str(override),starts[0])
     code,result=call('start');self.assertEqual(code,2);self.assertEqual(result['reason'],'WORKER_START_ALREADY_ATTEMPTED_INSPECT_BEFORE_RETRY')
+    # Reproduce the old Python-generated six-digit barrier rejected by the actual image.
+    receipt=next(secure.glob('cutover-*.json'));saved=json.loads(receipt.read_bytes());saved['notBeforeUTC']='2026-01-01T00:00:00.000123Z';receipt.write_text(json.dumps(saved))
+    worker={'id':'b'*64,'state':'exited','running':False,'exitCode':2,'oomKilled':False}
+    env={'ADL_CAPACITY_APPROVED':'yes','ADL_MAC_WORKER_STOPPED':'yes','ADL_SUPPLIER_NOT_BEFORE_UTC':saved['notBeforeUTC']}
+    oldrun=ns['run']
+    def recovery_run(args,**kw):
+     if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':'sha256:verified'}]).encode()
+     if args[:2]==['docker','inspect'] and args[2]==worker['id']:return json.dumps([{'Image':'sha256:verified','Config':{'Env':[k+'='+v for k,v in env.items()]}}]).encode()
+     return oldrun(args,**kw)
+    log={'operation':'homologation.admission','status':'blocked','reason':'supplier_cooldown_not_confirmed','password':'MUST_NEVER_PRINT'}
+    ns.update(run=recovery_run,states=lambda service:[{'id':'api','health':'healthy'}] if service=='api' else [worker],subprocess=types.SimpleNamespace(run=lambda *a,**kw:types.SimpleNamespace(returncode=0,stdout=b'',stderr=json.dumps(log).encode())))
+    # Lock and cooldown fences still precede recovery; no automatic lock reclamation.
+    (vol/'trade-feed.json.lock').write_text('99')
+    code,result=call('recover_start');self.assertEqual(code,2);self.assertEqual(result['reason'],'AWS_WORKER_LOCK_PRESENT');(vol/'trade-feed.json.lock').unlink()
+    # A memory rejection is diagnosed but is NOT retried by this specific repair.
+    log.update(operation='homologation.preflight',reason='memory_budget_exceeded')
+    code,result=call('recover_start');self.assertEqual(code,2);self.assertEqual(result['reason'],'WORKER_EXIT_CAUSE_NOT_CONFIRMED_NO_RESTART');self.assertEqual(len([c for c in commands if 'up' in c]),1)
+    log.update(operation='homologation.admission',reason='supplier_cooldown_not_confirmed')
+    code,result=call('recover_start');self.assertEqual(code,0,result)
+    repaired=json.loads(receipt.read_bytes());self.assertEqual(repaired['notBeforeUTC'],'2026-01-01T00:00:00.001Z');self.assertEqual(len(repaired['previousStartAttempts']),1)
+    evidence=Path(repaired['previousStartAttempts'][0]['backup']);self.assertEqual(json.loads((evidence/'receipt.before.json').read_bytes())['notBeforeUTC'],saved['notBeforeUTC']);self.assertTrue((evidence/'worker.private.log').is_file())
+    final=json.loads((secure/'deployment.json').read_bytes());self.assertEqual(final['composeOverrides'][:2],after['composeOverrides']);self.assertEqual(len([c for c in commands if 'up' in c]),2)
+    # Re-running this repair on the new canonical barrier cannot start again blindly.
+    env['ADL_SUPPLIER_NOT_BEFORE_UTC']=repaired['notBeforeUTC']
+    code,result=call('recover_start');self.assertEqual(code,2);self.assertEqual(result['reason'],'COOLDOWN_FORMAT_DEFECT_NOT_PROVEN');self.assertEqual(len([c for c in commands if 'up' in c]),2)
    finally:ns.update(previous)
 if __name__=='__main__':unittest.main()
