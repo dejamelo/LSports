@@ -150,3 +150,74 @@ Rollback: parar worker AWS normalmente e confirmar ausência antes de reativar M
 respeitando também os prazos AWS; manter API/dados de homologação e processar seus
 resultados pendentes. Não apagar volumes ou religar dois consumidores. Não
 restaurar bancos Mac ou repetir migrações para corrigir falha de transporte.
+
+## Retomada da etapa 1: falha comprovável no tmpfs
+
+O operador confirmou `dnsConfirmed=true`, A correto e nenhum AAAA, mas a release
+parou em `api_start`. Não repetir DNS, upload, instalação/build ou criação dos
+envs. A imagem passou pelas etapas de construção/configuração; isso não prova
+que um container tenha iniciado. O Mac continua com seu consumidor existente.
+
+Defeito reproduzido localmente: YAML flow sequence sem aspas
+`tmpfs: [/tmp:size=67108864,mode=1777]` resulta em **duas entradas**, com a segunda
+`mode=1777`. O Engine rejeita com `invalid mount path: 'mode=1777' mount path must
+be absolute`. O Compose source foi corrigido na API e no worker para
+`tmpfs: ["/tmp:size=67108864,mode=1777"]`. Compose config --quiet sozinho não
+capturava esse erro semântico: acrescentado teste com parser real e reprodução
+com Engine (somente no workspace, sem AWS).
+
+### Comando de diagnóstico e retomada condicionada, no Mac
+
+```bash
+cd "$HOME/LSports"
+git pull --ff-only origin feat/sportsbook-demo
+node deploy/homologation/resume-adl-api.mjs --apply
+```
+
+Para inspecionar sem qualquer alteração, omitir `--apply`.
+
+A rotina lê `/etc/adl-homologation/deployment.json`, valida release/imagem e lê
+somente a cauda do **deploy.private.log**. Não imprime linhas, credenciais ou
+configuração completa. Mostra sinais predefinidos, API criada/running/exitCode/
+health, sinais sanitizados dos logs API e GET loopback /control. Assim identifica
+se houve início parcial. Não usa a captura como se contivesse o erro real.
+
+Com --apply, exige **ambas** as evidências: o log privado confirma o erro específico
+e o modelo tem as duas entradas inválidas. Outra causa bloqueia a retomada. Exige
+imagem existente e nenhum worker AWS running. Não chama API do fornecedor.
+
+Cria backup root-only em `/var/backups/adl-api-resume-*` e um override protegido
+`/etc/adl-homologation/compose.tmpfs-fix.yaml`, usando `!override` (suportado pelo
+Compose do servidor). Compara o modelo inteiro: somente tmpfs API/worker pode
+mudar. Se aparecer diferença de imagem, env, volumes, rede, limites ou outro
+campo, bloqueia antes de up. Mantém source/release original intacto.
+
+Retoma **apenas API**, com `--no-build --no-deps --pull never`, reutilizando imagem
+já construída e os volumes. Não worker profile, Caddy, POSNET, bootstrap ou Mac.
+Aguarda /control 200. Se outro erro aparecer, registra etapa, estado parcial e
+sinais conhecidos, preservando tudo; não tenta chown, apagar banco ou recriar
+volumes às cegas. Um container API saudável já em execução não é reiniciado.
+
+Resultado esperado: `stage=complete/status=ok/apiStarted=true/controlHttpStatus=200`,
+`workerStarted=false`, `posnetChanged=false`, `imageRebuilt=false`.
+A evidência de conexão/snapshot real na AWS continua pendente.
+
+### Composição persistida e reversão
+
+`deployment.json` passa a registrar `composeOverrides` e `apiResumeFix`. Todos os
+próximos comandos ADL sobre essa release **devem acrescentar**
+`-f /etc/adl-homologation/compose.tmpfs-fix.yaml`, depois dos dois arquivos
+originais; isso inclui o futuro worker. Não usar a composição original inválida
+por esquecimento. Nas próximas releases o source já contém a correção.
+
+O backup preserva metadados/modelo antes/depois em arquivos privados 0600, nunca
+para Git/chat. Não apagar o override para tentar rollback: isso restaura uma
+configuração sabidamente inválida. Se retomar API causar outro problema, manter
+dados/env e interromper somente a API ADL por procedimento dirigido, sem down -v
+ou qualquer mudança POSNET/worker. Avaliar o diagnóstico antes de nova tentativa.
+A rotina não executa rollback de bancos nem reinicia o worker do Mac.
+
+Validação local: sete testes de retomada, incluindo prova pelo parser Compose,
+gates de causa conhecida, diferenças inesperadas bloqueadas e API-only sem build;
+Engine rejeitou a forma antiga e aceitou a corrigida. Não declarar leitura do
+log AWS ou saúde da API real antes da saída do operador.

@@ -123,3 +123,8 @@ Autorização financeira recebida; parada ainda sem horário combinado. Ver
 [MAC-BACKUP-WINDOW.md](MAC-BACKUP-WINDOW.md): `mac-posnet-backups.mjs preflight`
 mede tamanhos/espaço e amostra SSH sem parar nada; `copy-config` antecipa a cópia
 protegida para o Mac. Os comandos explícitos de janela e recuperação estão separados.
+
+Falha da preparação em api_start: há retomada específica sem rebuild em
+`resume-adl-api.mjs --apply`. Ela confirma o erro de tmpfs no log privado, informa
+estado parcial e corrige apenas esse defeito por override persistido. Ver a seção
+final de ADL-EXECUTION.md. Não repetir prepare-adl-aws, DNS, envs ou o corte Mac.
