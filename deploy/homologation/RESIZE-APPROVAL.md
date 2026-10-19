@@ -309,3 +309,9 @@ medição Mac/AWS, transferência protegida e execução/retorno está em
 [MAC-BACKUP-WINDOW.md](MAC-BACKUP-WINDOW.md). Primeiro executar apenas `preflight`
 e `copy-config`; nenhuma dessas ações para serviços. A estimativa numérica final
 depende do relatório real de tamanhos/espaço/transferência, não disponível no workspace.
+
+Preflight e copy-config concluídos pelo operador: espaço suficiente, estimativa
+13–31 min, janela proposta 40 min; 35 arquivos/174.261 bytes copiados ao Mac com
+SHA-256 verificado. Evidência detalhada em MAC-BACKUP-WINDOW.md. Não repetir.
+Autorização financeira mantida; **aguardar confirmação do início** antes de
+encerrar os serviços. Backup offline dos volumes permanece próximo passo da janela.

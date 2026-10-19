@@ -171,3 +171,44 @@ procedimento autorizado de restore; não extraímos archives sobre produção.
 Em caso de sucesso do tipo novo, o mesmo `recover-services --approved` é o retorno
 normal dos 12 após boot, porque eles foram parados manualmente. LSports continua
 sem deploy nem ativação de consumidor nesta janela. Não repetir migrações.
+
+## Evidências recebidas: preparação concluída, início ainda não confirmado
+
+Preflight informado pelo operador: `2026-10-19T00:13:03.116Z`, equivalente a
+**18/10/2026, 21:13:03 de Brasília**. Resultado `status=ok`, sem stop solicitado:
+
+| Volume | Bytes lógicos | Estimativa de arquivo |
+|---|---:|---:|
+| Replay originfix | 11 | 69.643 bytes |
+| Replay anterior | 11 | 69.643 bytes |
+| Dados Caddy | 17.835 | 210.347 bytes |
+| Total | 17.857 | 349.633 bytes |
+
+Espaço informado: Mac **104.053.583.872 bytes** livres; servidor
+**26.817.519.616 bytes** livres. Ambos passaram nas margens previstas. Amostra SSH
+8 MiB: aproximadamente **1,68 MiB/s**. Estimativa total **13–31 minutos**, com
+**janela sugerida de 40 minutos**. São medidas/amostra do preflight, não SLA.
+
+`copy-config` concluído: `stage=complete`, `status=ok`, **35 arquivos**, **174.261
+bytes**, `sha256Verified=true`, `noStopRequested=true`, em subpasta `config-*` de
+`~/Library/Application Support/ADL/Backups/posnet-aws`. Evidência fornecida pelo
+operador; não repetir cópia/preflight. Os dados dos três volumes ainda aguardam
+a etapa offline e sua cópia verificada fora da EC2.
+
+A autorização financeira já está concedida. A janela de 40 minutos foi apresentada,
+mas **a confirmação de início ainda não foi dada**. Nenhum stop/start de serviço ou
+EC2 está autorizado para execução agora. Não criar agenda/horário automaticamente.
+
+Após confirmação explícita de início e término das operações POSNET, primeiro
+comando operacional no Mac:
+
+```bash
+cd "$HOME/LSports" && node deploy/homologation/mac-posnet-backups.mjs stop-services --approved --quiesced
+```
+
+A flag `--quiesced` declara que o operador já concluiu operações e impediu novas
+entradas pelo procedimento atual; o script não faz essa parte automaticamente.
+Sem isso, não executar. O comando encerra os 12 containers preservados, não para
+nem redimensiona EC2. Esperar `stage=complete/status=ok/action=stop/containers=12`
+antes da etapa offline. Falha não é sucesso parcial aceitável: preservar saída e
+seguir o retorno dirigido, sem avançar para EC2.
