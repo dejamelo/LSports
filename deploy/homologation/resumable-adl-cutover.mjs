@@ -69,12 +69,14 @@ export async function run(args){
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
    if(args[4]==='--startup-report'){
     stage='startup_report';
-    const current=await remote('startup_report',{handoff},true);
+    const {createHash}=await import('node:crypto');
+    const expectedSources=Object.fromEntries(await Promise.all(['apps/worker/src/config.ts','apps/worker/src/mq.ts','apps/worker/src/connected.ts'].map(async name=>[name,createHash('sha256').update(await fs.readFile(path.join(root,name))).digest('hex')])));
+    const current=await remote('startup_report',{handoff,expectedSources},true);
     const {writeProtectedReport}=await import('./distribution-validation.mjs');
     const reportFile=path.join(folder,`startup-${pid}-${parent}.json`);
     const report={readOnly:true,providerRequests:0,workerRestarted:false,posnetChanged:false,macWorkerStopped:true,
      capturedAtUTC:new Date().toISOString(),validationSinceUTC:current.validationSinceUTC,
-     workers:current.workers,lanes:current.lanes,startupLogs:current.startupLogs,evidence:current.evidence,
+     workers:current.workers,lanes:current.lanes,amqpComparison:current.amqpComparison,startupLogs:current.startupLogs,evidence:current.evidence,
      evidenceLimit:'No ACK does not prove consumer registration failed. Installed image has no registration telemetry. Startup log window is bounded; absence is not proof of no error.'};
     await writeProtectedReport(reportFile,JSON.stringify(report,null,2));
     ledger.lastStartupReport={at:report.capturedAtUTC,reportFile};await save();

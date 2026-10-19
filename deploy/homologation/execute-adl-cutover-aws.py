@@ -89,7 +89,7 @@ def cutover_main():
         directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'VOLUME_SYMLINK')
         receipt=SECURE/('cutover-'+digest+'.json')
         if action in ('status','startup_report'):
-            saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'),startup=action=='startup_report')
+            saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'),startup=action=='startup_report',expected_sources=request.get('expectedSources'))
         if request.get('expectedWorkerImage'):require(model(base)['services']['worker']['image']==request['expectedWorkerImage'],'WORKER_IMAGE_NOT_EXPECTED_CORRECTION')
         stage='no_consumer_gate'
         running=[c for c in states('worker') if c['running']]
@@ -339,10 +339,70 @@ def startup_log_evidence(consumers):
         reports.append(report)
     return reports
 
-def cutover_status(directory,start_requested,startup=False):
+def amqp_env_view(env):
+    # Values below are connection destinations only. Secrets are compared in memory,
+    # never emitted, hashed or used in a broker request.
+    result={}
+    for lane,pid,vhost in [('prematch',4511,'StmPreMatch'),('inplay',4510,'StmInPlay')]:
+        prefix='LSPORTS_'+lane.upper()
+        host=env.get(prefix+'_HOST') or 'stm-'+lane+'.lsports.eu'
+        virtual=env.get(prefix+'_VHOST') or vhost
+        queue=env.get(prefix+'_QUEUE') or '_'+str(env.get(prefix+'_PACKAGE_ID') or pid)+'_'
+        safe=lambda value: value if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,128}',value) else 'invalid_or_redacted'
+        mq_user=env.get(prefix+'_MQ_USERNAME');mq_pass=env.get(prefix+'_MQ_PASSWORD')
+        override=bool((mq_user or '').strip() or (mq_pass or '').strip())
+        result[lane]={'host':safe(host),'vhost':safe(virtual),'queue':safe(queue),
+            'packageId':int(env.get(prefix+'_PACKAGE_ID') or pid) if str(env.get(prefix+'_PACKAGE_ID') or pid).isdigit() else None,
+            'tls':env.get('LSPORTS_MQ_TLS','false')=='true',
+            'port':int(env.get('LSPORTS_MQ_PORT') or (5671 if env.get('LSPORTS_MQ_TLS')=='true' else 5672)) if str(env.get('LSPORTS_MQ_PORT') or '5672').isdigit() else None,
+            'credentialSource':'mq_override' if override else 'primary',
+            'credentialPairPresent':bool((mq_user or '').strip() and (mq_pass or '').strip()) if override else bool((env.get(prefix+'_USERNAME') or '').strip() and (env.get(prefix+'_PASSWORD') or '').strip())}
+    return result
+
+def amqp_env_comparison(current,previous):
+    result={'current':amqp_env_view(current),'previous':amqp_env_view(previous),'secretValuesPrinted':False,'secretHashesPrinted':False}
+    for lane in ('prematch','inplay'):
+        prefix='LSPORTS_'+lane.upper()
+        keys=[prefix+'_'+k for k in ('USERNAME','PASSWORD','MQ_USERNAME','MQ_PASSWORD')]
+        result[lane]={'credentialsEqualToPrevious':all((current.get(k) or '')==(previous.get(k) or '') for k in keys),
+            'connectionSettingsEqualToPrevious':result['current'][lane]==result['previous'][lane]}
+    return result
+
+def amqp_configuration_evidence(consumers,expected_sources):
+    require(len(consumers)==1,'AMQP_REPORT_SINGLE_WORKER_REQUIRED')
+    c=consumers[0];container=json.loads(run(['docker','inspect',c['id']]))[0]
+    env=dict(x.split('=',1) for x in container['Config'].get('Env',[]) if '=' in x)
+    image=json.loads(run(['docker','image','inspect',container['Image']]))[0]
+    digest=(image.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')
+    if not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest):return {'status':'baseline_receipt_not_identified','current':amqp_env_view(env),'secretValuesPrinted':False}
+    receipt=SECURE/('partitioned-upgrade-'+digest[:24]+'.json')
+    require(receipt.is_file() and not receipt.is_symlink() and receipt.stat().st_size<=1024*1024,'AMQP_REPORT_RECEIPT_UNVERIFIED')
+    progress=json.loads(receipt.read_bytes());require(progress.get('digest')==digest,'AMQP_REPORT_RECEIPT_DIGEST_MISMATCH')
+    backup=Path(progress['backup']);require(backup.parent==BACKUPS and backup.name.startswith('adl-partitioned-upgrade-') and backup.is_dir() and not backup.is_symlink(),'AMQP_REPORT_BACKUP_UNVERIFIED')
+    previous_file=backup/'model.before.private.json';require(previous_file.is_file() and not previous_file.is_symlink() and previous_file.stat().st_size<=2*1024*1024,'AMQP_REPORT_PREVIOUS_MODEL_UNVERIFIED')
+    old=json.loads(previous_file.read_bytes())['services']['worker']
+    previous=old.get('environment') or {};require(isinstance(previous,dict),'AMQP_REPORT_PREVIOUS_ENV_UNVERIFIED')
+    report=amqp_env_comparison(env,previous)
+    meta=json.loads((SECURE/'deployment.json').read_bytes())
+    configured=model(partition_base(meta))['services']['worker'].get('environment') or {}
+    report['containerVsCurrentCompose']=amqp_env_comparison(env,configured)
+    report.update(status='compared',baseline='protected_model_before_current_image_upgrade_not_proof_of_last_success',currentImageId=container['Image'],previousImage=old['image'],
+        imageMatchesUpgradeReceipt=container['Image']==json.loads(run(['docker','image','inspect',progress['image']]))[0]['Id'])
+    names=['apps/worker/src/config.ts','apps/worker/src/mq.ts','apps/worker/src/connected.ts']
+    if not isinstance(expected_sources,dict) or set(expected_sources)!=set(names):report['sourceComparison']='expected_sources_missing';return report
+    require(all(isinstance(v,str) and re.fullmatch('[0-9a-f]{64}',v) for v in expected_sources.values()),'AMQP_REPORT_EXPECTED_SOURCES_INVALID')
+    # Read-only exec of Node's filesystem/hash builtins; no app imports/worker entrypoint.
+    probe="const f=require('node:fs'),h=require('node:crypto');console.log(JSON.stringify(Object.fromEntries("+json.dumps(names)+".map(n=>[n,h.createHash('sha256').update(f.readFileSync('/app/'+n)).digest('hex')]))));"
+    hashes=json.loads(run(['docker','exec',c['id'],'node','-e',probe],timeout=20))
+    report['installedSourceMatchesRepository']={name:hashes.get(name)==expected_sources[name] for name in names}
+    return report
+
+def cutover_status(directory,start_requested,startup=False,expected_sources=None):
     consumers=states('worker');path=directory/'trade-feed.json';result={'operation':'cutover.aws','stage':'status','readOnly':True,'workers':consumers,'posnetChanged':False}
     result['evidence']=feed_evidence(directory,consumers)
-    if startup:result['startupLogs']=startup_log_evidence(consumers)
+    if startup:
+        result['startupLogs']=startup_log_evidence(consumers)
+        result['amqpComparison']=amqp_configuration_evidence(consumers,expected_sources)
     result['validationSinceUTC']=start_requested
     if any(c.get('state')=='exited' for c in consumers):
         result['workerFailure']=inspect_worker_failure(consumers)[0]

@@ -14,6 +14,43 @@ exec((HERE/'resume-adl-api.py').read_text().split("if __name__=='__main__':")[0]
 exec((HERE/'execute-adl-cutover-aws.py').read_text().split("if __name__=='__main__':")[0],NS)
 
 class Cutover(unittest.TestCase):
+ def test_amqp_comparison_reports_secret_drift_without_values_or_hashes(self):
+  before={'LSPORTS_PREMATCH_USERNAME':'SECRET_USER','LSPORTS_PREMATCH_PASSWORD':'SECRET_PASSWORD','LSPORTS_INPLAY_USERNAME':'SECRET_USER_2','LSPORTS_INPLAY_PASSWORD':'SECRET_PASS_2'}
+  current=dict(before);current['LSPORTS_PREMATCH_PASSWORD']='NEW_SECRET'
+  result=NS['amqp_env_comparison'](current,before)
+  self.assertFalse(result['prematch']['credentialsEqualToPrevious']);self.assertTrue(result['inplay']['credentialsEqualToPrevious'])
+  self.assertEqual(result['current']['prematch']['host'],'stm-prematch.lsports.eu');self.assertEqual(result['current']['prematch']['vhost'],'StmPreMatch')
+  self.assertEqual(result['current']['prematch']['credentialSource'],'primary');self.assertNotIn('SECRET',json.dumps(result))
+ def test_amqp_comparison_detects_mq_override_and_destination_changes(self):
+  before={};current={'LSPORTS_PREMATCH_MQ_USERNAME':'SECRET','LSPORTS_PREMATCH_MQ_PASSWORD':'SECRET','LSPORTS_PREMATCH_HOST':'other.example','LSPORTS_PREMATCH_VHOST':'other'}
+  result=NS['amqp_env_comparison'](current,before)
+  self.assertEqual(result['current']['prematch']['credentialSource'],'mq_override');self.assertTrue(result['current']['prematch']['credentialPairPresent'])
+  self.assertFalse(result['prematch']['connectionSettingsEqualToPrevious']);self.assertNotIn('SECRET',json.dumps(result))
+  current['LSPORTS_PREMATCH_HOST']='amqp://SECRET@host';self.assertEqual(NS['amqp_env_view'](current)['prematch']['host'],'invalid_or_redacted')
+
+ def test_amqp_installed_image_comparison_uses_matching_protected_receipt_and_no_app_entrypoint(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   directory=Path(tmp);secure=directory/'secure';secure.mkdir();backups=directory/'backups';backups.mkdir();backup=backups/'adl-partitioned-upgrade-test';backup.mkdir()
+   digest='a'*64;image='sha256:'+'b'*64;env={'LSPORTS_PREMATCH_USERNAME':'SECRET','LSPORTS_PREMATCH_PASSWORD':'SECRET'}
+   old={'services':{'worker':{'environment':env,'image':'adl-worker:previous'}}}
+   (backup/'model.before.private.json').write_text(json.dumps(old))
+   (secure/('partitioned-upgrade-'+digest[:24]+'.json')).write_text(json.dumps({'digest':digest,'backup':str(backup),'image':'adl-worker:current'}))
+   (secure/'deployment.json').write_text('{}')
+   names=['apps/worker/src/config.ts','apps/worker/src/mq.ts','apps/worker/src/connected.ts'];expected={n:'c'*64 for n in names}
+   commands=[]
+   def fake_run(args,**kw):
+    commands.append(args)
+    if args[:2]==['docker','inspect']:return json.dumps([{'Image':image,'Config':{'Env':[k+'='+v for k,v in env.items()]}}]).encode()
+    if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':image,'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}}]).encode()
+    if args[:2]==['docker','exec']:return json.dumps(expected).encode()
+    self.fail('Unexpected command')
+   previous={k:NS.get(k) for k in ['SECURE','BACKUPS','run','model','partition_base']}
+   NS.update(SECURE=secure,BACKUPS=backups,run=fake_run,model=lambda _:old,partition_base=lambda _:[])
+   try:result=NS['amqp_configuration_evidence']([{'id':'d'*64}],expected)
+   finally:NS.update(previous)
+   self.assertEqual(result['status'],'compared');self.assertTrue(result['prematch']['credentialsEqualToPrevious']);self.assertTrue(all(result['installedSourceMatchesRepository'].values()))
+   self.assertNotIn('SECRET',json.dumps(result));self.assertFalse(any('run' in cmd or 'restart' in cmd or 'kill' in cmd for cmd in commands))
+
  def test_startup_diagnostic_keeps_prefetch_and_safe_network_codes_only(self):
   safe=NS['safe_feed_diagnostic']({'operation':'amqp.prefetch','category':'network','networkCode':'ECONNRESET','errorType':'type','clientCode':'ERR_BAD_RESPONSE','message':'SECRET','password':'SECRET'})
   self.assertEqual(safe['operation'],'amqp.prefetch');self.assertEqual(safe['networkCode'],'ECONNRESET');self.assertNotIn('SECRET',json.dumps(safe))

@@ -699,3 +699,50 @@ the existing strict owner/parent validator. CLI subprocess tests cover the full
 invocation at a mocked executor boundary, every supported resumable mode, and
 invalid/missing identities through the real entrypoint. These tests make no SSH
 or supplier requests and do not validate live feed recovery.
+
+### AMQP 403 after full recovery upgrade: compare before changing runtime
+
+Reported evidence: both lanes rejected with AMQP 403 from initialization at
+2026-10-19 18:18:45 UTC through 19:35 UTC. This does not prove a bad password.
+The exact operation distinguishes connection authentication/vhost access from
+channel/queue permissions. Do not reset credentials or restart on that code.
+
+Repository comparison `89f2882..3425f72` confirms **no change** in `config.ts` or
+`mq.ts`: explicit MQ override pair if configured, otherwise primary credentials;
+object connection options, original host/vhost/TLS/port, heartbeat 30s and connect
+timeout 15s. There is a real startup-order change in `connected.ts`: formerly
+Distribution/Start then AMQP connect; now AMQP connect + consume then Start.
+If the broker denies access while distribution is off, that order would prevent
+activation. That supplier dependency is not established by a 403 alone. Keep the
+continuous consumer design and do not blindly undo it or retry activation.
+
+The same `--startup-report` command now also compares the running container's
+connection settings and secret equality (booleans only; no secret values/hashes)
+with the protected Compose model saved immediately before its image upgrade and
+with current Compose. The previous model is explicitly **not claimed** to be a
+proven last-success configuration. The image label must match the protected
+upgrade receipt. A read-only `docker exec node -e` uses filesystem/hash builtins
+only to compare installed config/mq/connected files with repository hashes; it
+never imports the application, opens broker sockets or starts a consumer.
+Public destination settings and credential source/presence are included, with
+unsafe strings redacted. Existing journals, overrides and migration remain intact.
+
+Support follow-up if configuration equality/source integrity are confirmed:
+
+> Ticket #217525 — packages PreMatch 4511 and InPlay 4510, Test environment,
+> existing AWS consumer only, Mac consumer stopped. Both lanes report AMQP 403
+> from 2026-10-19 18:18:45 UTC through 19:35 UTC. Please correlate broker logs
+> for the exact connection/queue operation and confirm whether the refusal is
+> authentication, vhost permission, queue permission or distribution-off gating.
+> Expected endpoints: stm-prematch.lsports.eu / StmPreMatch / _4511_ and
+> stm-inplay.lsports.eu / StmInPlay / _4510_, AMQP 5672 (confirm effective report).
+> Our latest version registers the consumer before Distribution/Start to avoid
+> unread queue growth; the prior version activated before connecting. Can a
+> client authenticate and register its consumer while distribution is off? If
+> not, please confirm the required ordering and provisioning delay. No queue
+> purge, new subscription or credential reset is requested. We will attach only
+> sanitized per-lane operation/code/times and configuration comparison booleans.
+
+The template's configuration equality and exact operation must be filled from
+the new report, not inferred from the screenshot. No live AWS verification was
+possible in the cloud checkout without the Mac's SSH key.
