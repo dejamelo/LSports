@@ -129,7 +129,7 @@ export async function startSyntheticDemo(
         name: "PRUEBA SINTÉTICA · NO LSPORTS",
         adminEmail: "cliente@synthetic.local",
         adminPassword: "Cliente-solo-pruebas-2026",
-        domains: [parentOrigin],
+        domains: [parentOrigin, apiOrigin],
       });
       platform.updateLimitPolicy(actor, client.id, "ARS", {
         ...syntheticLimits,
@@ -177,6 +177,23 @@ export async function startSyntheticDemo(
         "synthetic-runner",
       )
     ).admin;
+    // Only this marked development fixture: both exact local parent origins are
+    // necessary (casino demo and control-panel iframe). Repair old manifests
+    // without recreating credentials, operations, events, tickets or audit data.
+    const syntheticClient = platform.client(manifest.clientId);
+    if (
+      !syntheticClient ||
+      platform.operation(manifest.operationId)?.clientId !== manifest.clientId
+    )
+      throw new Error("SYNTHETIC_MANIFEST_INVALID");
+    const localOrigins = [parentOrigin, apiOrigin];
+    if (
+      syntheticClient.domains.length !== localOrigins.length ||
+      localOrigins.some((origin) => !syntheticClient.domains.includes(origin))
+    )
+      platform.updateClient(actor, manifest.clientId, {
+        domains: localOrigins,
+      });
     tickets = new TenantTickets(platform);
     const getEvents = () => {
       const state = new TradeState();

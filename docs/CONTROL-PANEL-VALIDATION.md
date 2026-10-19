@@ -8,7 +8,7 @@ No Mac, dentro do checkout existente:
 cd "$HOME/LSports" &&
 git pull --ff-only origin feat/sportsbook-demo &&
 npm run build &&
-npm run demo:synthetic
+node scripts/restart-synthetic-demo.mjs
 ```
 
 Painel: `http://localhost:3101/control`.
@@ -19,10 +19,11 @@ Não é uma conta da AWS ou do Argentina Demo.
 
 O runner usa somente `.local-synthetic-demo`, identificado por manifesto. Não
 carrega `.env`, não inicia worker, não consulta LSports e rejeita produção. Dados
-anteriores da demonstração são preservados, inclusive bilhetes e auditoria. Para
-ver o iframe **dentro do painel**, adicione explicitamente
-`http://localhost:3101` aos domínios desse cliente sintético, mantendo o domínio
-`http://localhost:5174` já autorizado. O painel não contorna a política de domínios.
+anteriores da demonstração são preservados, inclusive bilhetes e auditoria. O runner autoriza somente as duas origens locais exatas do cliente sintético:
+`http://localhost:5174` (página do cassino) e `http://localhost:3101` (painel).
+Ajusta também demos marcados já existentes no reinício, com auditoria, sem
+recriar clientes, operações, credenciais ou bilhetes. Não usa wildcard nem
+altera as configurações de outros clientes ou da AWS.
 A abertura exige credencial ativa; usa somente seu ID no backend, não o segredo.
 
 ## Entregue
@@ -94,3 +95,25 @@ nesta etapa. O AMQP 403 segue no ticket #217525. Estes testes não o resolvem.
 Prévia do ambiente **isolado com dados sintéticos**, sem conexão à LSports:
 
 ![Painel com iframe e retorno ao resumo — prova isolada](previews/control-panel-isolated.png)
+
+## Correção de origem e reinício exclusivo do demo
+
+O erro `DOMAIN_NOT_ALLOWED` era reproduzível porque o manifesto antigo permitia
+somente o pai da porta 5174; o backend cria a sessão do painel com `parentOrigin`
+igual à origem pública da API/painel, porta 3101. A verificação Origin/CSRF da API
+continua exigindo a origem exata do painel; a criação e a troca do código do
+iframe continuam exigindo o domínio autorizado. Origens externas seguem negadas.
+
+`restart-synthetic-demo.mjs` identifica os donos das portas 3101 e 5174 e só
+encerra normalmente se ambos forem o mesmo processo, pertencente ao usuário,
+com diretório deste checkout e comando exato do runner sintético. Revalida a
+identidade antes de um único SIGTERM, espera a saída e a liberação das portas e
+inicia somente o demo. Não usa kill -9, nomes genéricos de processos ou comando
+`npm run dev`. Se as evidências divergirem, bloqueia sem sinalizar outro serviço.
+O novo demo fica no terminal; Ctrl+C o encerra normalmente.
+
+Testes específicos: correção idempotente de origens em armazenamento antigo,
+negativa de origem externa, manifesto/credenciais preservados, navegador pelos
+três canais (Web/Móvil/POS), guardas de identidade/reutilização de PID e reinício
+real de um runner com diretório temporário exclusivo. Nenhum acesso à LSports,
+POSNET, worker ou ambiente AWS ocorreu nesses testes.

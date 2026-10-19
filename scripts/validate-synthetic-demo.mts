@@ -48,6 +48,75 @@ try {
       syntheticLogin.password,
   );
   await admin.getByRole("button", { name: "Ingresar", exact: true }).click();
+  await admin.getByRole("button", { name: "Terminales", exact: true }).click();
+  await admin
+    .getByLabel("ID de terminal", { exact: true })
+    .fill("SYNTHETIC-POS-01");
+  await admin
+    .getByLabel("Nombre del terminal", { exact: true })
+    .fill("POS SINTÉTICO AISLADO");
+  await admin
+    .getByRole("button", { name: "Guardar terminal", exact: true })
+    .click();
+  await admin.getByText("Terminal guardado.", { exact: true }).waitFor();
+  for (const channel of ["web", "mobile", "pos"]) {
+    await admin
+      .getByRole("button", { name: "Sportsbook", exact: true })
+      .click();
+    await admin.getByLabel("Canal de la vista previa").selectOption(channel);
+    if (channel === "pos")
+      await admin
+        .getByLabel("ID de terminal", { exact: true })
+        .fill("SYNTHETIC-POS-01");
+    const creation = admin
+      .waitForResponse(
+        (response) =>
+          response.url().endsWith("/preview") &&
+          response.request().method() === "POST",
+      )
+      .catch((error) => error);
+    const exchange = admin
+      .waitForResponse(
+        (response) =>
+          response.url().endsWith("/api/integration/v1/embed-exchange") &&
+          response.request().method() === "POST",
+      )
+      .catch((error) => error);
+    await admin
+      .getByRole("button", {
+        name: "Abrir sportsbook de simulación",
+        exact: true,
+      })
+      .click();
+    const created = await creation;
+    if (created instanceof Error) throw created;
+    assert.equal(created.status(), 201);
+    assert.equal(
+      new URL((await created.request().allHeaders()).origin).origin,
+      demo.apiOrigin,
+    );
+    const exchanged = await exchange;
+    if (exchanged instanceof Error) throw exchanged;
+    assert.equal(exchanged.status(), 200);
+    const session = await exchanged.json();
+    assert.equal(session.channel, channel);
+    assert.equal(session.scope.operationId, demo.manifest.operationId);
+    assert.equal(session.scope.currency, "ARS");
+    if (channel === "pos") assert.equal(session.terminalId, "SYNTHETIC-POS-01");
+    await admin
+      .frameLocator('iframe[title="Sportsbook de simulación"]')
+      .getByRole("heading", {
+        name: "Historial de billetes de prueba",
+        exact: true,
+      })
+      .waitFor();
+    await admin
+      .getByRole("button", {
+        name: "Cerrar iframe y volver al resumen",
+        exact: true,
+      })
+      .click();
+  }
   await admin.getByRole("button", { name: "Operaciones", exact: true }).click();
   const operation = admin.locator("form").filter({
     has: admin.getByRole("heading", {
@@ -405,6 +474,7 @@ try {
       status: "ok",
       validated: [
         "isolated_storage",
+        "panel_preview_web_mobile_pos_exact_origins",
         "iframe_selection",
         "simulated_admission",
         "idempotent_request",
