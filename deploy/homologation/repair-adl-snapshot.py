@@ -5,13 +5,36 @@ def snapshot_file_hash(path):
         for block in iter(lambda:source.read(1024*1024),b''):digest.update(block)
     return digest.hexdigest()
 
+def snapshot_volume_failures(failures):
+    proven={lane:[] for lane in ('prematch','inplay')}
+    for lane in proven:
+        for d in failures.get(lane,[]):
+            nested=(d.get('coordinator') or {}).get('failure') or {}
+            for candidate in (d,nested):
+                if candidate.get('operation') in (None,'snapshot.events') and candidate.get('reason')=='response_size_limit' and candidate.get('responseLimitBytes')==128*1024*1024 and candidate.get('httpStatus')==200:
+                    proven[lane].append({'httpStatus':200,'responseLimitBytes':128*1024*1024,'reason':'response_size_limit'})
+    return proven
+
 def snapshot_plan(capacities, failures):
-    wanted={};budget=256*1024*1024*8+64*1024*1024
-    for lane in ('prematch','inplay'):
-        cap=capacities[lane]
-        if any(d.get('reason')=='response_size_limit' and d.get('responseLimitBytes')==128*1024*1024 and d.get('httpStatus')==200 for d in failures.get(lane,[])):
-            if cap['limitBytes']==128*1024*1024:wanted[lane]=256
-    return wanted,budget
+    proven=snapshot_volume_failures(failures)
+    wanted={lane:256 for lane in proven if proven[lane] and capacities[lane]['limitBytes']==128*1024*1024}
+    return wanted,256*1024*1024*8+64*1024*1024
+
+def snapshot_host_memory():
+    return int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))*1024
+
+def snapshot_sizing(model_limit,container_limit,cgroup,host_available,wanted,capacities):
+    GiB=1024**3;target=4*GiB;reserve=2*GiB;budget=2112*1024**2
+    require(model_limit in (2*GiB,4*GiB) and container_limit in (2*GiB,4*GiB),'WORKER_MEMORY_LIMIT_OUTSIDE_APPROVED_PLAN')
+    require(str(cgroup.get('max')).isdigit() and int(cgroup['max'])==container_limit and str(cgroup.get('current')).isdigit(),'CGROUP_LIMIT_UNVERIFIED')
+    needs_large=any(v.get('limitBytes')==256*1024**2 for v in capacities.values()) or bool(wanted)
+    resize=needs_large and (model_limit!=target or container_limit!=target)
+    changing=bool(wanted) or resize
+    if changing:
+        required=target+reserve
+        require(host_available>=required,'SNAPSHOT_REPAIR_HOST_HEADROOM_INSUFFICIENT')
+        if container_limit==target:require(container_limit-int(cgroup['current'])>=budget,'SNAPSHOT_REPAIR_CGROUP_HEADROOM_INSUFFICIENT')
+    return {'changed':changing,'resize':resize,'targetMemoryBytes':target if resize else model_limit,'hostAvailableBytes':host_available,'hostReserveBytes':reserve,'conversionBudgetBytes':budget,'targetHeapMB':3072}
 
 def repair_snapshot(request):
     stage='snapshot_repair.inspect';backup=None;stopped=False
@@ -27,21 +50,35 @@ def repair_snapshot(request):
         workers=states('worker');require(len(workers)==1 and workers[0]['running'],'REPAIR_REQUIRES_ONE_RUNNING_WORKER')
         require(control_status()==200,'API_NOT_HEALTHY')
         worker=json.loads(run(['docker','inspect',workers[0]['id']]))[0];before=model(base)
-        require(before['services']['worker']['mem_limit']==4294967296 and worker['HostConfig']['Memory']==4294967296,'WORKER_MEMORY_LIMIT_UNEXPECTED')
+        model_limit=before['services']['worker']['mem_limit'];container_limit=worker['HostConfig']['Memory']
+        require(type(model_limit) is int and type(container_limit) is int,'WORKER_MEMORY_LIMIT_UNVERIFIED')
+        layers=[];initial=base[:base.index('-f')+4]
+        # Report only numeric worker limits, never Compose output or env-file contents.
+        for count in range(len(initial),len(base)+1,2):
+            layers.append({'layer':len(layers),'memoryLimitBytes':model(base[:count])['services']['worker']['mem_limit']})
+        deploy_values=dict(line.split('=',1) for line in (SECURE/'deploy.env').read_text().splitlines() if line and not line.startswith('#') and '=' in line)
+        memory_var=deploy_values.get('ADL_WORKER_MEMORY_LIMIT')
+        var_bytes={'2g':2147483648,'4g':4294967296,'2147483648':2147483648,'4294967296':4294967296}.get((memory_var or '').lower())
+        origin={'deploymentVariablePresent':memory_var is not None,'deploymentVariableBytes':var_bytes,'savedOverrideLayers':len(meta.get('composeOverrides',[]))}
+        emit(operation='cutover.aws',stage='snapshot_repair.memory_origin',status='inspected',composeMemoryBytes=model_limit,containerMemoryBytes=container_limit,layers=layers,origin=origin,workerStopped=False,posnetChanged=False)
         image=json.loads(run(['docker','image','inspect',before['services']['worker']['image']]))[0]['Id'];require(worker['Image']==image,'RUNNING_IMAGE_MISMATCH')
         mount=[m for m in worker['Mounts'] if m['Destination']=='/app/.runtime/feed'];require(len(mount)==1 and mount[0]['Type']=='volume' and mount[0]['RW'],'FEED_MOUNT_UNVERIFIED')
         volume=json.loads(run(['docker','volume','inspect',mount[0]['Name']]))[0];require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','VOLUME_PROJECT_UNVERIFIED')
         directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'VOLUME_SYMLINK')
         probe="""import fs from 'node:fs';import{createHash}from'node:crypto';import{snapshotCapacity}from'/app/apps/worker/src/snapshot-capacity.ts';const read=p=>{try{return fs.readFileSync(p,'utf8').trim()}catch{return null}};const hashes={};for(const p of ['provider.ts','diagnostics.ts','snapshot-capacity.ts'])hashes[p]=createHash('sha256').update(fs.readFileSync('/app/apps/worker/src/'+p)).digest('hex');console.log(JSON.stringify({capacities:{prematch:snapshotCapacity(process.env,undefined,'prematch'),inplay:snapshotCapacity(process.env,undefined,'inplay')},proposed:snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'256'},undefined,'prematch'),cgroup:{max:read('/sys/fs/cgroup/memory.max'),current:read('/sys/fs/cgroup/memory.current')},sourceHashes:hashes}));"""
         observed=json.loads(run(['docker','exec',workers[0]['id'],'node','--import','tsx','--input-type=module','-e',probe],timeout=25))
-        require(observed['sourceHashes']==request['sourceHashes'],'SNAPSHOT_RUNTIME_SOURCE_DIFFERS_NO_BLIND_PATCH')
         failures={lane:[] for lane in ('prematch','inplay')};evidence=feed_evidence(directory,workers)
         for d in evidence['recentErrors']:
             if d.get('lane') in failures:failures[d['lane']].append(d)
+        for scheduler in evidence.get('schedulers',[]):
+            for entry in scheduler.get('operations',[]):
+                if entry.get('operation')=='snapshot.events' and entry.get('packageId') in (4510,4511):
+                    lane='prematch' if entry['packageId']==4511 else 'inplay'
+                    failures[lane].append({'operation':'snapshot.events','coordinator':entry.get('coordinator',{})})
         checkpoint=directory/'trade-feed.json'
         if checkpoint.is_file():
             require(not checkpoint.is_symlink() and checkpoint.stat().st_size<=256*1024*1024,'CHECKPOINT_SIZE_LIMIT')
-            available=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))*1024
+            available=snapshot_host_memory()
             require(available>checkpoint.stat().st_size*8+64*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
             feed=json.loads(checkpoint.read_bytes())
             for lane in failures:
@@ -49,14 +86,18 @@ def repair_snapshot(request):
                 failures[lane].append(safe_feed_diagnostic(connection.get('lastSnapshotDiagnostic')))
                 failures[lane].append(safe_feed_diagnostic(connection.get('diagnostic')))
         wanted,budget=snapshot_plan(observed['capacities'],failures)
-        emit(operation='cutover.aws',stage=stage,status='inspected',effective=observed,failures=failures,plannedLaneLimitsMB=wanted,evidence=evidence,workerStarted=False,posnetChanged=False)
-        if not wanted:
+        emit(operation='cutover.aws',stage=stage,status='inspected',effective=observed,failures=failures,plannedLaneLimitsMB=wanted,responseLimitFailuresByLane=snapshot_volume_failures(failures),evidence=evidence,workerStarted=False,posnetChanged=False)
+        require(observed['sourceHashes']==request['sourceHashes'],'SNAPSHOT_RUNTIME_SOURCE_DIFFERS_NO_BLIND_PATCH')
+        sizing=snapshot_sizing(model_limit,container_limit,observed['cgroup'],snapshot_host_memory(),wanted,observed['capacities'])
+        emit(operation='cutover.aws',stage='snapshot_repair.sizing',status='inspected',sizing=sizing,plannedLaneLimitsMB=wanted,workerStopped=False,posnetChanged=False)
+        if not sizing['changed']:
             emit(operation='cutover.aws',stage=stage,status='ok',changed=False,reason='NO_CURRENT_128_MIB_LANE_REQUIRES_CHANGE',workerRunning=True,posnetChanged=False);return 0
-        require(observed['proposed']['allowed'],'SNAPSHOT_REPAIR_MEMORY_ADMISSION_REFUSED')
-        cg=observed['cgroup'];require(str(cg['max']).isdigit() and str(cg['current']).isdigit() and int(cg['max'])-int(cg['current'])>=budget,'SNAPSHOT_REPAIR_CGROUP_HEADROOM_INSUFFICIENT')
         require(shutil.disk_usage('/opt').free>checkpoint.stat().st_size*2+128*1024*1024 if checkpoint.exists() else shutil.disk_usage('/opt').free>128*1024*1024,'BACKUP_DISK_HEADROOM_INSUFFICIENT')
+        handoff=request['handoff'];digest=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt=SECURE/('cutover-'+digest+'.json')
+        require(receipt.is_file() and not receipt.is_symlink(),'CUTOVER_RECEIPT_UNVERIFIED')
+        saved=json.loads(receipt.read_bytes());require(isinstance(saved.get('startRequestedAtUTC'),str),'CUTOVER_START_RECEIPT_UNVERIFIED')
         backup=Path(tempfile.mkdtemp(prefix='adl-snapshot-capacity-',dir=BACKUPS));os.chmod(backup,0o700)
-        private(backup/'deployment.before.json',(SECURE/'deployment.json').read_bytes());private(backup/'inspection.json',json.dumps(observed).encode())
+        private(backup/'deployment.before.json',(SECURE/'deployment.json').read_bytes());private(backup/'receipt.before.json',receipt.read_bytes());private(backup/'inspection.json',json.dumps({'observed':observed,'sizing':sizing,'memoryLayers':layers}).encode())
         # SIGTERM only. No Docker stop timeout escalation/SIGKILL and no lock removal.
         stage='snapshot_repair.graceful_stop'
         run(['docker','kill','--signal','SIGTERM',workers[0]['id']])
@@ -74,22 +115,32 @@ def repair_snapshot(request):
             with target.open('rb') as copied:os.fsync(copied.fileno())
             require(snapshot_file_hash(f)==snapshot_file_hash(target),'SNAPSHOT_BACKUP_MISMATCH')
         # An append-only worker environment override; every other Compose field stays exact.
+        require(snapshot_host_memory()>=sizing['targetMemoryBytes']+sizing['hostReserveBytes'],'HOST_HEADROOM_CHANGED_AFTER_GRACEFUL_STOP')
         stage='snapshot_repair.overlay'
         env={'LSPORTS_'+lane.upper()+'_SNAPSHOT_MAX_RESPONSE_MB':str(limit) for lane,limit in wanted.items()}
-        overlay=SECURE/('compose.snapshot-'+backup.name+'.json');private(overlay,json.dumps({'services':{'worker':{'environment':env}}}).encode())
-        after=model(base+['-f',str(overlay)]);expected=copy.deepcopy(before);expected['services']['worker']['environment'].update(env);require(after==expected,'UNEXPECTED_COMPOSE_MODEL_CHANGE')
+        # Three GiB heap inside the approved four GiB physical cap, retaining other Node options.
+        options=before['services']['worker'].get('environment',{}).get('NODE_OPTIONS','')
+        require(isinstance(options,str),'NODE_OPTIONS_UNVERIFIED')
+        heap_option=re.compile(r'--max[-_]old[-_]space[-_]size(?:=|\s+)\d+')
+        require(len(heap_option.findall(options))<=1,'AMBIGUOUS_NODE_HEAP_OPTIONS')
+        proposed_options=heap_option.sub('--max-old-space-size=3072',options) if heap_option.search(options) else (options+' --max-old-space-size=3072').strip()
+        if proposed_options!=options:env['NODE_OPTIONS']=proposed_options
+        change={'mem_limit':sizing['targetMemoryBytes'],'environment':env}
+        overlay=SECURE/('compose.snapshot-'+backup.name+'.json');private(overlay,json.dumps({'services':{'worker':change}}).encode())
+        after=model(base+['-f',str(overlay)]);expected=copy.deepcopy(before);expected['services']['worker']['environment'].update(env);expected['services']['worker']['mem_limit']=sizing['targetMemoryBytes'];require(after==expected,'UNEXPECTED_COMPOSE_MODEL_CHANGE')
         meta['composeOverrides']=[*meta.get('composeOverrides',[]),str(overlay)]
         tmp=SECURE/(backup.name+'.deployment.tmp');private(tmp,json.dumps(meta).encode());durable_replace(tmp,SECURE/'deployment.json')
         # Refresh only validation-session time; preserve receipts and the historical migration.
-        handoff=request['handoff'];digest=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt=SECURE/('cutover-'+digest+'.json')
-        saved=json.loads(receipt.read_bytes());private(backup/'receipt.before.json',receipt.read_bytes())
-        saved.setdefault('capacityRestarts',[]).append({'previousStartRequestedAtUTC':saved['startRequestedAtUTC'],'backup':str(backup),'limitsMB':wanted})
+        saved.setdefault('capacityRestarts',[]).append({'previousStartRequestedAtUTC':saved['startRequestedAtUTC'],'backup':str(backup),'limitsMB':wanted,'sizing':sizing})
         saved['startRequestedAtUTC']=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')
         tmp=SECURE/(backup.name+'.receipt.tmp');private(tmp,json.dumps(saved).encode());durable_replace(tmp,receipt)
         stage='snapshot_repair.start'
         require(not any(c['running'] for c in states('worker')),'CONSUMER_PRESENT_BEFORE_RESTART')
         run(base+['-f',str(overlay),'--profile','feed-consumer','up','-d','--force-recreate','--no-deps','--no-build','--pull','never','worker'],timeout=90,log=backup/'start.private.log')
-        emit(operation='cutover.aws',stage=stage,status='ok',changed=True,laneLimitsMB=wanted,workerStarted=True,backup=str(backup),journalsModified=False,composeOverridesPreserved=True,posnetChanged=False)
+        require(len(states('worker'))==1,'RESTART_CONTAINER_COUNT_UNEXPECTED')
+        actual=json.loads(run(['docker','inspect',states('worker')[0]['id']]))[0]
+        require(actual['HostConfig']['Memory']==sizing['targetMemoryBytes'] and actual['Image']==image,'RESTART_LIMIT_OR_IMAGE_MISMATCH')
+        emit(operation='cutover.aws',stage=stage,status='ok',changed=True,actualMemoryBytes=actual['HostConfig']['Memory'],laneLimitsMB=wanted,workerStarted=True,backup=str(backup),journalsModified=False,composeOverridesPreserved=True,posnetChanged=False)
         return 0
     except Exception as error:
         reason=str(error) if re.fullmatch('[A-Z][A-Z_]+',str(error)) else 'PRIVATE_SNAPSHOT_REPAIR_FAILED'

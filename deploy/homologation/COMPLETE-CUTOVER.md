@@ -423,3 +423,29 @@ falha de volume é o adiamento preservado pelo scheduler, não prova HTTP 429.
 O monitor não chama startDistribution nem diagnose:trade; o worker existente usa
 sua rotina normal. Persistindo OFF/320, encaminhar a cronologia UTC ao ticket
 217525 para confirmar o motivo do broker e o estado dos pacotes Test.
+
+### Reconciliação do container encontrado com 2 GiB
+
+O reparo anterior recusava qualquer limite diferente de 4 GiB antes da inspeção;
+isso impedia reconciliar um deployment real de 2 GiB. A retomada aceita 2/4 GiB
+somente neste modo de reparo e relata separadamente Compose, HostConfig.Memory,
+cgroup e as camadas de overrides. Lê somente a variável de memória permitida do
+deploy.env para indicar sua origem, sem imprimir outras configurações/segredos.
+Não presume que o valor do preflight seja igual ao limite do container em execução.
+
+A configuração PreMatch 256 MiB exige orçamento de conversão de 2112 MiB e,
+portanto, não cabe integralmente no container de 2 GiB. O reparo reconcilia o worker
+para 4 GiB com heap 3072 MiB mesmo se o erro de volume estiver temporariamente
+encoberto por cooldown; não exige que a admissão no container antigo de 2 GiB passe.
+Exige 6 GiB livres no host antes da parada (4 GiB para worker + reserva conservadora
+de 2 GiB para serviços existentes), revalida antes do override e mantém a admissão
+real por operação no novo container. Sem margem, bloqueia antes do SIGTERM.
+Não cria instância, não aumenta recursos cobrados nem mexe no POSNET.
+
+A lane que excedeu 128 MiB é identificada por responseLimitFailuresByLane,
+inclusive coordinator.failure preservado pelo cooldown e journal packageId 4510/4511.
+Somente essa evidência permite elevar uma lane de 128 para 256 MiB. PreMatch já em
+256 permanece em 256; InPlay permanece em 128 se não houver falha comprovada nele.
+Dados insuficientes não são convertidos em afirmação de qual feed falhou. O limite
+novo é confirmado em Docker após a recriação, com mesma imagem e overrides anteriores
+preservados. O mesmo comando --repair-snapshot continua a validação, sem migrar de novo.
