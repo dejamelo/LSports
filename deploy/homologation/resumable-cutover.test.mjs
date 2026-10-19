@@ -22,3 +22,18 @@ test('validation preserves failure evidence without restarting an exited worker'
  await assert.rejects(validateFeeds(async(action)=>{calls.push(action);return {status:'recovering',workers:[{state:'exited'}],evidence:{readOnly:true}};},{},ledger,async()=>{},'/protected/progress'),/AWS_WORKER_EXITED/);
  assert.deepEqual(calls,['status']);assert.equal(ledger.lastValidation.evidence.readOnly,true);assert.equal(ledger.steps.aws_start.status,'ok');
 });
+
+test('inventory repair saves exact fresh rejection and returns without another polling wait or provider request',async()=>{
+ const code=process.exitCode;const ledger={steps:{local_exit:{status:'ok'},journal_import:{status:'ok'},aws_start:{status:'ok'}}};const before=JSON.stringify(ledger.steps);const calls=[];
+ const diagnostic={reason:'invalid_snapshot',snapshotValidation:{phase:'inventory',code:'inventory_invalid_ids',attribution:'provider_contract',rawCount:3,invalidCount:1,itemTypes:{number:2,string:1}}};
+ try{await validateFeeds(async action=>{calls.push(action);return{status:'recovering',workers:[{state:'running'}],lanes:{prematch:{phase:'recovering',session:{startedAt:'2026-10-19T12:00:00Z'},lastSnapshotErrorAt:'2026-10-19T12:00:01Z',lastSnapshotDiagnostic:diagnostic}}};},{},ledger,async()=>{},'/protected/progress',1000,true);
+ assert.deepEqual(calls,['status']);assert.equal(ledger.currentStage,'feed_validation_blocked');assert.deepEqual(ledger.inventoryRejection,diagnostic);assert.equal(JSON.stringify(ledger.steps),before);
+ }finally{process.exitCode=code;}
+});
+
+test('inventory repair separates repeated current-container distribution errors without restarting worker',async()=>{
+ const code=process.exitCode;const calls=[],ledger={steps:{}};
+ try{await validateFeeds(async action=>{calls.push(action);return{status:'recovering',workers:[{state:'running'}],lanes:{prematch:{phase:'error'}},evidence:{recentErrors:[{lane:'prematch',reason:'distribution_still_off',loggedAt:'2026-10-19T12:00:01Z'},{lane:'prematch',reason:'distribution_still_off',loggedAt:'2026-10-19T12:01:01Z'}]}};},{},ledger,async()=>{},'/protected/progress',1000,true);
+ assert.deepEqual(calls,['status']);assert.equal(ledger.inventoryTransportBlock.reason,'SUPPLIER_DISTRIBUTION_REMAINS_OFF');
+ }finally{process.exitCode=code;}
+});

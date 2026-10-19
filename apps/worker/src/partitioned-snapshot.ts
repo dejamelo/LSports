@@ -2,11 +2,27 @@ import {randomUUID,createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {OperationError} from './diagnostics.js';
 import type {TradeEvent} from './state.js';
-export interface PartitionProgress {recoveryId:string;stage:'inventory'|'batches'|'verify'|'complete'|'waiting';inventory:number;completedFixtures:number;batches:number;maxResponseBytes:number;retryAt?:string;inventoryDigest?:string;lastBatch?:{requested:number;received:number;missing:number;unexpected:number;exampleMissingFixtures:number[]}}
+export interface PartitionProgress {recoveryId:string;stage:'inventory'|'batches'|'verify'|'complete'|'waiting'|'failed';waitingFor?:'inventory'|'batches'|'verify';failure?:import('@lsports/contracts').SnapshotValidationInspection;inventory:number;completedFixtures:number;batches:number;maxResponseBytes:number;retryAt?:string;inventoryDigest?:string;lastBatch?:{requested:number;received:number;missing:number;unexpected:number;exampleMissingFixtures:number[]}}
 export interface PartitionSink {assertOpen():void;begin(ids:number[]):Promise<void>;batch(rows:TradeEvent[],at:number):Promise<void>;progress(value:PartitionProgress):Promise<void>}
-const invalid=(text:string):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',message:text});};
+const invalid=(text:string,snapshotValidation?:import('@lsports/contracts').SnapshotValidationInspection):never=>{throw new OperationError({operation:snapshotValidation?.phase==='inventory'?'subscriptions.list':'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',stage:'validation',snapshotValidation,message:text});};
+export function inventoryTypes(value:unknown){const counts:NonNullable<import('@lsports/contracts').SnapshotValidationInspection['itemTypes']>={};if(Array.isArray(value))for(const item of value){const kind=item===null?'null':Array.isArray(item)?'array':['number','string','object','boolean'].includes(typeof item)?typeof item as 'number'|'string'|'object'|'boolean':'other';counts[kind]=(counts[kind]||0)+1;}return counts;}
+/** Validate inside the tagged HTTP operation, so a rejected inventory is not journaled as success. */
+export function subscriptionInventory(sdk:unknown,raw:unknown):number[]{
+ const converted=(sdk as {fixtures?:unknown}|null)?.fixtures;
+ const body=(raw as {Body?:{Fixtures?:unknown}}|null)?.Body;
+ const fixtures=body?.Fixtures;
+ const inspection={phase:'inventory' as const,rawCount:Array.isArray(fixtures)?fixtures.length:undefined,sdkCount:Array.isArray(converted)?converted.length:undefined,itemTypes:inventoryTypes(fixtures)};
+ if(!Array.isArray(fixtures))return invalid('Inventario: Body.Fixtures debe ser un array según el SDK; no se interpreta como vacío.',{...inspection,code:'inventory_envelope',attribution:'provider_contract'});
+ const ids=completeInventory(fixtures);
+ if(!Array.isArray(converted)||fixtures.length!==converted.length||fixtures.some((v,i)=>v!==converted[i]))return invalid('Inventario: el SDK y Body.Fixtures difieren; no se aplican IDs parciales.',{...inspection,code:'inventory_sdk_mismatch',attribution:'sdk_or_adapter'});
+ return ids;
+}
 export function completeInventory(value:unknown):number[]{
- if(!Array.isArray(value)||value.length>50000||value.some(id=>!Number.isSafeInteger(id)||id<=0))return invalid('Inventario de suscripciones inválido o superior al límite local; no se usa la proyección como inventario.');
+ const rawCount=Array.isArray(value)?value.length:undefined,itemTypes=inventoryTypes(value);
+ if(!Array.isArray(value))return invalid('Inventario no es array; baseline pendiente.',{phase:'inventory',code:'inventory_not_array',attribution:'provider_contract'});
+ if(value.length>50000)return invalid('Inventario supera 50000 entradas; límite local preservado.',{phase:'inventory',code:'inventory_limit',attribution:'local_bound',rawCount,itemTypes});
+ const invalidCount=value.filter(id=>!Number.isSafeInteger(id)||id<=0).length;
+ if(invalidCount)return invalid('Inventario contiene IDs fuera del contrato number[]; no se convierten ni omiten automáticamente.',{phase:'inventory',code:'inventory_invalid_ids',attribution:'provider_contract',rawCount,invalidCount,itemTypes});
  return [...new Set(value)].sort((a,b)=>a-b);
 }
 /** Holds only one decoded batch, never a concatenated full snapshot. Rechecks inventory at end. */
@@ -17,10 +33,11 @@ export async function partitionedSnapshot(io:{inventory:(id:string,part:number)=
  const progress:PartitionProgress={recoveryId,stage:'inventory',inventory:0,completedFixtures:0,batches:0,maxResponseBytes:cap*1024*1024};
  const report=async()=>{await sink.progress({...progress});};
  const attempt=async<T>(action:()=>Promise<T>):Promise<T>=>{
-  for(;;){sink.assertOpen();try{return await action();}catch(error){
-   if(!(error instanceof OperationError)||!(error.diagnostic.category==='rate_limited'||error.diagnostic.reason==='memory_budget_exceeded'))throw error;
+  const phase=progress.stage==='verify'?'verify':progress.stage==='batches'?'batches':'inventory';
+  for(;;){sink.assertOpen();try{const value=await action();progress.stage=phase;delete progress.retryAt;delete progress.waitingFor;await report();return value;}catch(error){
+   if(!(error instanceof OperationError)||!(error.diagnostic.category==='rate_limited'||error.diagnostic.reason==='memory_budget_exceeded')){if(error instanceof OperationError&&error.diagnostic.snapshotValidation){progress.stage='failed';progress.failure=error.diagnostic.snapshotValidation;delete progress.retryAt;delete progress.waitingFor;await report();}throw error;}
    const until=Date.parse(error.diagnostic.retryAt||'')||now()+(error.diagnostic.retryAfterMs??60000);
-   progress.stage='waiting';progress.retryAt=new Date(Math.max(until,now()+1000)).toISOString();await report();
+   progress.stage='waiting';progress.waitingFor=phase;progress.retryAt=new Date(Math.max(until,now()+1000)).toISOString();await report();
    while(now()<Date.parse(progress.retryAt)){sink.assertOpen();await wait(Math.min(1000,Date.parse(progress.retryAt)-now()));}
   }}
  };
@@ -43,10 +60,10 @@ export async function partitionedSnapshot(io:{inventory:(id:string,part:number)=
    throw error;
   }
   const got=rows.map(row=>row.fixtureId);progress.lastBatch={requested:selected.length,received:got.length,missing:selected.filter(id=>!got.includes(id)).length,unexpected:got.filter(id=>!selected.includes(id)).length,exampleMissingFixtures:selected.filter(id=>!got.includes(id)).slice(0,5)};await report();
-  if(got.length!==selected.length||new Set(got).size!==got.length||got.some(id=>!selected.includes(id)))return invalid('El lote no contiene exactamente los fixtures solicitados; baseline incompleto, cuotas bloqueadas.');
+  if(got.length!==selected.length||new Set(got).size!==got.length||got.some(id=>!selected.includes(id)))return invalid('El lote no contiene exactamente los fixtures solicitados; baseline incompleto, cuotas bloqueadas.',{phase:'batch',code:'batch_id_mismatch',attribution:'provider_contract',requested:selected.length,received:got.length,missing:progress.lastBatch.missing,unexpected:progress.lastBatch.unexpected});
   sink.assertOpen();await sink.batch(rows,at);index+=selected.length;part++;progress.completedFixtures=index;progress.batches++;await report();
  }
  progress.stage='verify';await report();const verified=completeInventory(await attempt(()=>io.inventory(recoveryId,1)));
- if(ids.length!==verified.length||ids.some((id,i)=>id!==verified[i]))return invalid('El inventario cambió durante la recuperación; se requiere otro baseline completo.');
+ if(ids.length!==verified.length||ids.some((id,i)=>id!==verified[i]))return invalid('El inventario cambió durante la recuperación; se requiere otro baseline completo.',{phase:'verify',code:'inventory_changed',attribution:'inventory_changed',requested:ids.length,received:verified.length});
  sink.assertOpen();progress.stage='complete';delete progress.retryAt;await report();return {...progress};
 }

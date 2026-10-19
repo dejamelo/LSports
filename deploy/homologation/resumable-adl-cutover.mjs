@@ -34,7 +34,7 @@ async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFi
 export async function run(args){
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--partitioned-recovery'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--partitioned-recovery','--inventory-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
@@ -57,10 +57,10 @@ export async function run(args){
   stage='remote_consumer_gate';const pre=await remote('preflight');
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!(args[4]==='--repair-snapshot'?['2147483648','4294967296']:['4294967296']).includes(String(pre.workerModel?.memoryLimitBytes))||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
-  if(['--validate-only','--repair-snapshot','--snapshot-report','--partitioned-recovery'].includes(args[4])){
+  if(['--validate-only','--repair-snapshot','--snapshot-report','--partitioned-recovery','--inventory-repair'].includes(args[4])){
    stage='validation_resume_gate';
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
-   if(args[4]!=='--partitioned-recovery'&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
+   if(!['--partitioned-recovery','--inventory-repair'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
    const mac=rows.find(r=>r.operation==='cutover.audit');if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
@@ -77,13 +77,19 @@ export async function run(args){
     }
     ledger.steps.snapshot_capacity_repair={status:'ok',at:new Date().toISOString(),result};await save();
    }
-   if(args[4]==='--partitioned-recovery'){
+   if(['--partitioned-recovery','--inventory-repair'].includes(args[4])){
     stage='partitioned_upgrade';
     const report=await protectedJson(path.join(folder,`snapshot-volume-${pid}-${parent}.json`));
     if(report.report?.decisions?.prematch!=='bounded_partitioned_recovery_required_no_cap_increase'||!report.report.rows?.some(row=>row.lane==='prematch'&&row.classification==='current_limit_exceeded'&&row.httpStatus===200&&row.attemptLimitBytes===268435456))throw Error('SAVED_VOLUME_DIAGNOSIS_NOT_CONFIRMED');
+    if(args[4]==='--inventory-repair'){
+     if(ledger.steps.partitioned_upgrade?.status!=='ok')throw Error('INVENTORY_REPAIR_REQUIRES_COMPLETED_PARTITIONED_UPGRADE');
+     const previous=ledger.lastValidation,current=await remote('status',{handoff});
+     const evidence={capturedAt:new Date().toISOString(),previous,current,readOnly:true,providerRequests:0};ledger.inventoryRepairEvidence??=evidence;ledger.inventoryRepairLatestEvidence=evidence;await save();
+     emit({stage:'inventory_evidence',status:'saved',providerRequests:0,progressFile:progress,workerRestarted:false});
+    }
     const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts'].map(name=>'apps/worker/src/'+name);names.push('packages/contracts/src/index.ts');
     const {createHash}=await import('node:crypto'),files={},baseHashes={};
-    const baseRef='a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
+    const baseRef=args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
     for(const name of names){files[name]=await command('git',['show','HEAD:'+name],undefined,10000,true);baseHashes[name]=existing.includes(name)?createHash('sha256').update(await command('git',['show',baseRef+':'+name],undefined,10000,true)).digest('hex'):null;}
     const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes});
     ledger.steps.partitioned_image={status:'ok',at:new Date().toISOString(),result:prepared};await save();
@@ -91,7 +97,7 @@ export async function run(args){
     if(fresh?.status!=='ok'||fresh.matchingWorkerProcesses!==0||fresh.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt});
     ledger.steps.partitioned_upgrade={status:'ok',at:new Date().toISOString(),result:activated};await save();
-    stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress,45*60000);return;
+    stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress,45*60000,args[4]==='--inventory-repair');return;
    }
    stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress);return;
   }
@@ -149,13 +155,28 @@ export async function run(args){
 finally{if(lease)await new Promise(resolve=>lease.close(resolve));}
 }
 
-export async function validateFeeds(remote,handoff,ledger,save,progress,durationMs=15*60000){
+export async function validateFeeds(remote,handoff,ledger,save,progress,durationMs=15*60000,stopOnInvalidBaseline=false){
  const until=Date.now()+durationMs;let status;
   while(Date.now()<until){
    status=await remote('status',{handoff});
    ledger.lastValidation=status;ledger.currentStage='feed_validation';await save();
    if(status.status==='snapshots_ready')break;
    if(status.workers?.some(w=>w.state==='exited'||w.oomKilled))throw Error('AWS_WORKER_EXITED_INSPECT_STATUS');
+   const rejected=status.lanes?.prematch?.lastSnapshotDiagnostic;
+   if(stopOnInvalidBaseline&&(rejected?.snapshotValidation||(['subscriptions.list','snapshot.events'].includes(rejected?.operation)&&['invalid_response','sdk_error','response_limit'].includes(rejected?.category)&&rejected?.reason!=='memory_budget_exceeded'))&&Date.parse(status.lanes.prematch.lastSnapshotErrorAt)>=Date.parse(status.lanes.prematch.session?.startedAt)){
+    ledger.currentStage='feed_validation_blocked';ledger.inventoryRejection=rejected;await save();
+    emit({stage:'feed_validation_blocked',status:'blocked',reason:'INVENTORY_OR_BATCH_CONTRACT_REJECTED',diagnostic:rejected,progressFile:progress,macWorkerStopped:true,awsWorkerRunning:status.workers?.length===1&&status.workers[0].running===true,posnetChanged:false,note:'No blind wait: fixed code, phase and counts identify the rejected contract; provider_contract requires checking the actual supplier schema, sdk_or_adapter requires parser review. No IDs converted, omitted or released.'});process.exitCode=2;return;
+   }
+   if(stopOnInvalidBaseline){
+    const errors=(status.evidence?.recentErrors||[]).filter(e=>e.lane==='prematch');
+    const off=new Set(errors.filter(e=>e.reason==='distribution_still_off').map(e=>e.loggedAt)).size;
+    const forced=new Set(errors.filter(e=>e.amqpCode===320).map(e=>e.loggedAt)).size;
+    if(status.lanes?.prematch?.phase==='error'&&(off>=2||forced>=2)){
+     const reason=off>=2?'SUPPLIER_DISTRIBUTION_REMAINS_OFF':'AMQP_FORCED_CLOSURES_PREVENT_BASELINE';
+     ledger.currentStage='feed_validation_blocked';ledger.inventoryTransportBlock={reason,errors};await save();
+     emit({stage:'feed_validation_blocked',status:'blocked',reason,progressFile:progress,macWorkerStopped:true,awsWorkerRunning:status.workers?.length===1&&status.workers[0].running===true,posnetChanged:false,note:'Repeated current-container provider/transport errors; no baseline confirmed. No forced requests, no local consumer or distribution reset.'});process.exitCode=2;return;
+    }
+   }
    if(status.lanes&&Object.values(status.lanes).some(l=>l.phase==='error'&&l.diagnostic?.reason==='unsupported_message_type'))throw Error('AWS_UNSUPPORTED_MESSAGE_RETAINED');
    if(status.lanes&&Object.values(status.lanes).some(l=>l.phase==='error'&&l.diagnostic?.retryPolicy==='restart_required'))throw Error('AWS_MESSAGE_REQUEUED_REQUIRES_HANDLER_REVIEW');
    await delay(30000);

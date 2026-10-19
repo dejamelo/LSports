@@ -1,5 +1,5 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
-import {partitionedSnapshot,completeInventory,type PartitionSink} from './partitioned-snapshot.js';
+import {partitionedSnapshot,completeInventory,subscriptionInventory,type PartitionSink} from './partitioned-snapshot.js';
 import {OperationError} from './diagnostics.js';import {TradeState} from './state.js';
 const row=(fixtureId:number)=>({fixtureId,fixture:{status:1,sport:{name:'Football'}}});
 function sink(){const applied:number[]=[];const progress:unknown[]=[];const io:PartitionSink={assertOpen(){},async begin(){},async batch(rows){applied.push(...rows.map(r=>r.fixtureId));},async progress(p){progress.push(p);}};return {io,applied,progress};}
@@ -77,4 +77,28 @@ test('snapshot fallback version uses actual HTTP start after cooldown, not the o
  let now=1000,calls=0,appliedAt=0;const f=sink();f.io.batch=async(_rows,at)=>{appliedAt=at;};
  await partitionedSnapshot({async inventory(){return [1];},async events(ids,_id,_part,_cap,markStarted){if(++calls===1)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'rate_limited',retryAt:new Date(5000).toISOString(),message:'isolated cooldown'});markStarted();return ids.map(row);}},f.io,{now:()=>now,wait:async ms=>{now+=ms;}});
  assert.ok(appliedAt>=5000);
+});
+
+
+test('subscription inventory reports exact contract rejection without leaking IDs, payloads or SDK defaults',()=>{
+ assert.deepEqual(subscriptionInventory({fixtures:[3,1,3]},{Body:{Fixtures:[3,1,3]}}),[1,3]);
+ for(const [raw,sdk,code] of [[{Body:null},{fixtures:[]},'inventory_envelope'],[{Body:{Fixtures:[1]}},{fixtures:[]},'inventory_sdk_mismatch'],[{Body:{Fixtures:[1,'PRIVATE_STRING',{Id:'PRIVATE_ID'},null]}},{fixtures:[1,'PRIVATE_STRING',{Id:'PRIVATE_ID'},null]},'inventory_invalid_ids']] as const){
+  assert.throws(()=>subscriptionInventory(sdk,raw),(e:unknown)=>{assert.ok(e instanceof OperationError);assert.equal(e.diagnostic.snapshotValidation?.code,code);assert.ok(!JSON.stringify(e.diagnostic).includes('PRIVATE'));return true;});
+ }
+ const items=[1,'PRIVATE_STRING',null];assert.throws(()=>subscriptionInventory({fixtures:items},{Body:{Fixtures:items}}),(e:unknown)=>{assert.ok(e instanceof OperationError);assert.deepEqual(e.diagnostic.snapshotValidation?.itemTypes,{number:1,string:1,null:1});assert.equal(e.diagnostic.snapshotValidation?.invalidCount,2);assert.equal(e.diagnostic.snapshotValidation?.code,'inventory_invalid_ids');assert.ok(!JSON.stringify(e.diagnostic).includes('PRIVATE'));return true;});
+ assert.throws(()=>completeInventory(Array(50001).fill(1)),(e:unknown)=>e instanceof OperationError&&e.diagnostic.snapshotValidation?.attribution==='local_bound');
+});
+
+test('official SDK invalid inventory is failed inside HTTP reservation, not successful; next attempt preserves cooldown',{timeout:10000},async()=>{
+ const {createServer}=await import('node:http');const {mkdtemp,rm,readFile,readdir}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {SnapshotScheduler}=await import('./snapshot-scheduler.js');const {clients}=await import('./provider.js');
+ const dir=await mkdtemp(join(tmpdir(),'adl-inventory-invalid-')),old=process.env.LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT;process.env.LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT='true';let calls=0,inventoryRequests=0,now=1000;
+ const server=createServer(async(req,res)=>{for await(const _ of req){}calls++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:{Fixtures:++inventoryRequests===1?['PRIVATE_NOT_NUMERIC_ID']:[12]}}));});await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const url='http://127.0.0.1:'+(server.address() as {port:number}).port;
+ try{
+  const pkg={lane:'prematch' as const,packageId:4511,username:'isolated',password:'isolated',hostname:'unused',vhost:'StmPreMatch',queue:'_4511_',port:5672,tls:false},options={root:join(dir,'feed'),spacingMs:0,refreshMs:300000,now:()=>now};
+  const coordinator=new SnapshotScheduler(url,4511,options),api=clients(pkg,{snapshotUrl:url,customersUrl:url},coordinator,coordinator),f=sink();
+  await assert.rejects(api.snapshotPartitioned!(f.io),(e:unknown)=>{assert.ok(e instanceof OperationError);assert.equal(e.diagnostic.httpStatus,200);assert.equal(e.diagnostic.operation,'subscriptions.list');assert.equal(e.diagnostic.snapshotValidation?.phase,'inventory');assert.equal(e.diagnostic.snapshotValidation?.code,'inventory_invalid_ids');return true;});
+  assert.equal(calls,1);assert.equal((f.progress.at(-1) as {stage:string}).stage,'failed');assert.deepEqual(f.applied,[]);
+  const journal=JSON.parse(await readFile(join(dir,(await readdir(dir)).find(p=>p.endsWith('.json'))!),'utf8'));assert.equal(journal.requests['4511:subscriptions.list'].outcome,'failed');assert.equal(journal.requests['4511:subscriptions.list'].failure.reason,'invalid_snapshot');assert.equal(journal.requests['4511:subscriptions.list'].failure.snapshotValidation.code,'inventory_invalid_ids');
+  await assert.rejects(coordinator.run('subscriptions.list',async()=>{assert.fail('Must retain failed request cooldown');}),(e:unknown)=>e instanceof OperationError&&e.diagnostic.rateLimitSource==='local_operation_cooldown');assert.equal(calls,1);
+ }finally{if(old===undefined)delete process.env.LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT;else process.env.LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=old;server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
 });

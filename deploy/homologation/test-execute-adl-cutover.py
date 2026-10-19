@@ -14,6 +14,10 @@ exec((HERE/'resume-adl-api.py').read_text().split("if __name__=='__main__':")[0]
 exec((HERE/'execute-adl-cutover-aws.py').read_text().split("if __name__=='__main__':")[0],NS)
 
 class Cutover(unittest.TestCase):
+ def test_snapshot_validation_is_fixed_counts_only_and_legacy_classification_reuses_saved_message(self):
+  raw={'operation':'snapshot.events','reason':'invalid_snapshot','message':'Inventario de suscripciones inválido o superior al límite local; no se usa la proyección como inventario.','snapshotValidation':{'phase':'inventory','code':'inventory_invalid_ids','attribution':'provider_contract','rawCount':3,'invalidCount':1,'itemTypes':{'number':2,'string':1,'MUST_NEVER_PRINT':1},'password':'MUST_NEVER_PRINT'}}
+  result=NS['safe_feed_diagnostic'](raw);self.assertEqual(result['legacyValidationCause'],'inventory_validation_after_http_success');self.assertNotIn('MUST_NEVER_PRINT',json.dumps(result));self.assertEqual(result['snapshotValidation']['rawCount'],3)
+  self.assertEqual(NS['safe_feed_diagnostic']({'message':'MUST_NEVER_PRINT'}),{})
  def test_merge_never_shortens_and_preserves_remote_evidence(self):
   old={'nextAt':400,'due':{'4511:snapshot.events':900},'failures':{'a':4},'lastRequest':{'pid':7}}
   incoming={'nextAt':200,'due':{'4511:snapshot.events':300,'4510:snapshot.events':500},'failures':{'a':1}}

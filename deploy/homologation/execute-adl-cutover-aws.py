@@ -222,6 +222,19 @@ def safe_feed_diagnostic(value):
     if type(value.get('deferred')) is bool:out['deferred']=value['deferred']
     if isinstance(value.get('amqpCloseSignals'),list):out['amqpCloseSignals']=[v for v in value['amqpCloseSignals'] if isinstance(v,str) and v in {'connection_forced','heartbeat_timeout','ack_timeout','administrative_close','server_shutdown'}]
     if isinstance(value.get('distributionInspection'),dict):out['distributionInspection']={k:v for k,v in value['distributionInspection'].items() if k in ('before','startRequested','after') and type(v) is bool}
+    validation=value.get('snapshotValidation')
+    if isinstance(validation,dict):
+        allowed={'phase':{'inventory','batch','verify'},'code':{'inventory_not_array','inventory_limit','inventory_invalid_ids','inventory_envelope','inventory_sdk_mismatch','batch_invalid_fixture','batch_id_mismatch','inventory_changed'},'attribution':{'local_bound','provider_contract','sdk_or_adapter','inventory_changed','not_proven'}}
+        v={k:x for k,x in validation.items() if k in allowed and isinstance(x,str) and x in allowed[k]}
+        for k in ('rawCount','sdkCount','invalidCount','requested','received','missing','unexpected'):
+            if type(validation.get(k)) is int and 0<=validation[k]<=1000000:v[k]=validation[k]
+        if isinstance(validation.get('itemTypes'),dict):v['itemTypes']={k:x for k,x in validation['itemTypes'].items() if k in {'number','string','object','null','array','boolean','other'} and type(x) is int and 0<=x<=1000000}
+        out['snapshotValidation']=v
+    # Match only our exact historical constants, never echo arbitrary message text.
+    legacy={'Inventario de suscripciones inválido o superior al límite local; no se usa la proyección como inventario.':'inventory_validation_after_http_success',
+      'El lote no contiene exactamente los fixtures solicitados; baseline incompleto, cuotas bloqueadas.':'batch_id_mismatch',
+      'El inventario cambió durante la recuperación; se requiere otro baseline completo.':'inventory_changed'}
+    if isinstance(value.get('message'),str) and value['message'] in legacy:out['legacyValidationCause']=legacy[value['message']]
     metadata=value.get('messageMetadata')
     if isinstance(metadata,dict):
         kind=metadata.get('messageType')

@@ -69,7 +69,7 @@ function observe(
   if (typeof data === "string" && data.trim())
     observation.reason = "non_json_response";
   observation.responseInspection = inspectResponse(data, response.headers?.["content-type"]);
-  if (!observation.reason && observation.operation?.startsWith("snapshot.")) {
+  if (!observation.reason && (observation.operation?.startsWith("snapshot.") || observation.operation==="subscriptions.list")) {
     const inspection = observation.responseInspection;
     if (inspection.applicationErrorFields) observation.reason = "application_error";
     else if (inspection.header === "missing" || inspection.header === "null") observation.reason = "missing_response_header";

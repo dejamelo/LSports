@@ -1,4 +1,4 @@
-import {partitionedSnapshot,type PartitionSink} from './partitioned-snapshot.js';
+import {partitionedSnapshot,subscriptionInventory,type PartitionSink} from './partitioned-snapshot.js';
 import {snapshotEvidence} from "./snapshot-evidence.js";
 import {normalizeSdkTimestamps,attachTimestampPrecision} from './timestamp-contract.js';
 import { inspectSettlements } from "./settlement-evidence.js";
@@ -233,13 +233,12 @@ export function clients(
           inventory:async(recoveryId,part)=>customersScheduler.run('subscriptions.list',()=>operation('subscriptions.list','http',async()=>{
             const response=await subscription.getSubscriptions(new GetSubscriptionsRequestDto({}));
             let raw=snapshotResponsePayload();if(typeof raw==='string')raw=IdSafeJsonParser.parse(raw);
-            const rawFixtures=(raw as {Body?:{Fixtures?:unknown[]}}|undefined)?.Body?.Fixtures;
-            if(!response||!Array.isArray(response.fixtures)||responseEvidence().fixturesCount!==response.fixtures.length||!Array.isArray(rawFixtures)||rawFixtures.some((v,i)=>v!==response.fixtures[i])||snapshotResponseInspection()?.applicationErrorFields)throw new Error('Incomplete subscription inventory response');
-            return response.fixtures;
+            return subscriptionInventory(response,raw);
           },{lane:config.lane,responseLimitMiB:2}),{recoveryId,part}),
           events:async(ids,recoveryId,part,responseMiB,markStarted)=>scheduler.run('snapshot.events',()=>operation('snapshot.events','http',async()=>{
-            markStarted();const rows=decodeRegular(await snapshot.getEvents(new GetEventRequestDto({fixtures:ids})));
-            return rows;
+            markStarted();const sdk=await snapshot.getEvents(new GetEventRequestDto({fixtures:ids}));
+            try{return decodeRegular(sdk);}catch(error){if(error instanceof OperationError)throw error;
+             throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',stage:'validation',snapshotValidation:{phase:'batch',code:'batch_invalid_fixture',attribution:'not_proven',requested:ids.length,rawCount:responseEvidence().providerRows,sdkCount:Array.isArray(sdk)?sdk.length:sdk==null?0:1},message:'Snapshot particionado: fixture o conteo inválido en el lote; cuotas bloqueadas.'});}
           },{lane:config.lane,responseLimitMiB:responseMiB}),{recoveryId,part}),
         },sink);
         audit={bodyShape:'array',providerRows:result.completedFixtures,sdkRows:result.completedFixtures,acceptedRows:result.completedFixtures,filters:'fixtures',partition:{inventory:result.inventory,completedFixtures:result.completedFixtures,batches:result.batches,maxResponseBytes:result.maxResponseBytes,complete:true}};

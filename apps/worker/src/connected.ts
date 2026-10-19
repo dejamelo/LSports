@@ -379,16 +379,14 @@ export async function session(
           if(lane==='prematch'&&api.snapshotPartitioned){
             regularSnapshotReady=false;state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,regularSnapshotReady:false}});
             let inventory=new Set<number>();
+            // Inventory itself can wait through a cooldown. Do not retain 100 unacked
+            // deliveries until begin(ids): that callback only runs AFTER inventory HTTP.
+            state.beginPartitionedSnapshot(lane);await save();
+            const prefix=buffered;buffered=[];
+            const handoff=processing.then(async()=>{for(const msg of prefix){await processMessage(msg);if(closed)break;}});
+            processing=handoff;bufferingForSnapshot=false;await handoff;requireOpen();
             const result=await api.snapshotPartitioned({assertOpen:requireOpen,
-              begin:async ids=>{
-                requireOpen();inventory=new Set(ids);state.beginPartitionedSnapshot(lane);await save();
-                // Long partition runs must not hold 100 deliveries unacknowledged through cooldowns.
-                // Merge live AMQP and snapshot batches on the SAME serial persist-before-ACK chain.
-                // Provider versions still arbitrate values; phase remains recovering until all batches verify.
-                const prefix=buffered;buffered=[];
-                const handoff=processing.then(async()=>{for(const msg of prefix){await processMessage(msg);if(closed)break;}});
-                processing=handoff;bufferingForSnapshot=false;await handoff;requireOpen();
-              },
+              begin:async ids=>{requireOpen();inventory=new Set(ids);await processing;requireOpen();},
               batch:async(batch,at)=>{
                 requireOpen();const capacity=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'64'},undefined,lane);
                 if(!capacity.allowed)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,message:'Memoria insuficiente para aplicar/persistir el lote; baseline incompleto.'});
@@ -410,8 +408,11 @@ export async function session(
           state.set(lane,{lastSnapshotErrorAt:new Date().toISOString()});
           const diagnostic = describeFailure(error, "snapshot.events", "http");
           state.set(lane, { diagnostic, lastSnapshotDiagnostic: diagnostic });
-          if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded") throw error;
-          nextDue["snapshot.events"] = retryTime(diagnostic);
+          const rejectedPartition=lane==='prematch'&&!!api.snapshotPartitioned&&(['invalid_response','sdk_error'].includes(diagnostic.category)||diagnostic.reason==='response_size_limit');
+          if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded" && !rejectedPartition) throw error;
+          // Invalid partition HTTP is not AMQP failure. Keep persist-before-ACK and
+          // baseline false, without changing the independent InPlay recovery policy.
+          nextDue["snapshot.events"] = rejectedPartition?Math.max(retryTime(diagnostic),Date.now()+Math.max(300000,config.recoveryMs)):retryTime(diagnostic);
           console.warn(JSON.stringify({ lane, status: "deferred", ...diagnostic }));
         }
       }

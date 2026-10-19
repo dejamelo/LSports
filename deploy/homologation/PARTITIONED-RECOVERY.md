@@ -139,3 +139,7 @@ simulada por esse monitor e ainda exige sessão própria de homologação.
 `distribution_still_off` e AMQP 320 são bloqueios independentes. Não são declarados
 resolvidos por esse patch; a validação continua mostrando suas causas/horários para
 o ticket 217525, sem cancelar assinaturas ou forçar consultas fora dos cooldowns.
+
+Se ficar em inventário com `invalid_snapshot`, usar a
+[correção e análise específica do inventário](INVENTORY-RECOVERY.md), que reaproveita
+a implantação 5069beb e retorna a rejeição exata, em vez de repetir o monitoramento.

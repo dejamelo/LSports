@@ -131,3 +131,6 @@ final de ADL-EXECUTION.md. Não repetir prepare-adl-aws, DNS, envs ou o corte Ma
 
 - [PreMatch particionado e mensagem 38](PARTITIONED-RECOVERY.md): atualização retomável
   do worker já migrado, preservando InPlay, memória, journals e POSNET.
+
+Inventário sem avanço após 5069beb: [INVENTORY-RECOVERY.md](INVENTORY-RECOVERY.md)
+(`--inventory-repair`, sem repetir migração ou aumentar limites).

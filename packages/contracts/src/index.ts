@@ -202,7 +202,15 @@ export interface SnapshotRequestInspection {
   competitionIdSent: false;
   credentialField: "userName";
 }
+export interface SnapshotValidationInspection {
+  phase: 'inventory'|'batch'|'verify';
+  code: 'inventory_not_array'|'inventory_limit'|'inventory_invalid_ids'|'inventory_envelope'|'inventory_sdk_mismatch'|'batch_invalid_fixture'|'batch_id_mismatch'|'inventory_changed';
+  attribution: 'local_bound'|'provider_contract'|'sdk_or_adapter'|'inventory_changed'|'not_proven';
+  rawCount?:number;sdkCount?:number;invalidCount?:number;requested?:number;received?:number;missing?:number;unexpected?:number;
+  itemTypes?:Partial<Record<'number'|'string'|'object'|'null'|'array'|'boolean'|'other',number>>;
+}
 export interface IntegrationDiagnostic {
+  snapshotValidation?:SnapshotValidationInspection;
   requestInspection?: SnapshotRequestInspection;
   amqpCloseSignals?: ("connection_forced"|"heartbeat_timeout"|"ack_timeout"|"administrative_close"|"server_shutdown")[];
   distributionInspection?: {before:boolean;startRequested:boolean;after?:boolean};
@@ -309,7 +317,7 @@ export interface IntegrationDiagnostic {
   deferred?: boolean;
   rateLimitSource?: "supplier_http" | "local_in_flight" | "local_host_cooldown" | "local_operation_cooldown";
   requesterPid?: number;
-  coordinator?: { recoveryId?:string;partitionPart?:number;packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage" | "responseLimitBytes" | "timeoutMs" | "memoryBudgetBytes" | "memoryHeadroomBytes" | "snapshotMemory"> };
+  coordinator?: { recoveryId?:string;partitionPart?:number;packageId: number; operation: string; pid: number; at: string; completedAt?: string; outcome: "reserved" | "success" | "rate_limited" | "failed"; failure?: Pick<IntegrationDiagnostic, "category" | "reason" | "httpStatus" | "errorType" | "clientCode" | "networkCode" | "stage" | "responseLimitBytes" | "timeoutMs" | "memoryBudgetBytes" | "memoryHeadroomBytes" | "snapshotMemory" | "snapshotValidation"> };
   timeoutMs?: number;
   responseLimitBytes?: number;
   memoryBudgetBytes?: number;
@@ -363,7 +371,7 @@ export interface ConnectionState {
   session?: {id:string;startedAt:string};
   sessionEnds?: {id:string;startedAt:string;endedAt:string;diagnostic:IntegrationDiagnostic}[];
   lastSnapshotDiagnostic?: IntegrationDiagnostic;
-  partitionRecovery?:{recoveryId:string;stage:"inventory"|"batches"|"verify"|"complete"|"waiting";inventory:number;completedFixtures:number;batches:number;maxResponseBytes:number;retryAt?:string;inventoryDigest?:string;lastBatch?:{requested:number;received:number;missing:number;unexpected:number;exampleMissingFixtures:number[]}};
+  partitionRecovery?:{recoveryId:string;stage:"inventory"|"batches"|"verify"|"complete"|"waiting"|"failed";waitingFor?:"inventory"|"batches"|"verify";failure?:SnapshotValidationInspection;inventory:number;completedFixtures:number;batches:number;maxResponseBytes:number;retryAt?:string;inventoryDigest?:string;lastBatch?:{requested:number;received:number;missing:number;unexpected:number;exampleMissingFixtures:number[]}};
   recoveryProgress?:{stage:"snapshot"|"handoff"|"waiting_retry"|"idle";startedAt:string;completedAt?:string;queuedAtHandoff?:number;processedAtHandoff?:number;lastProgressAt?:string;regularSnapshotReady:boolean;nextRegularAttemptAt?:string};
   diagnostic?: IntegrationDiagnostic;
   phase: "starting" | "recovering" | "connected" | "error" | "stopped";
