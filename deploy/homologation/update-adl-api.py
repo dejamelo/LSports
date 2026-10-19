@@ -21,6 +21,15 @@ def atomic(path,data):
     private(temporary,data);os.replace(temporary,path)
 def schema(db):
     return list(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
+def compatible_schema(before,after):
+    old={(r[0],r[1]):r for r in before};new={(r[0],r[1]):r for r in after}
+    require(all(new.get(k)==v for k,v in old.items()),'EXISTING_SCHEMA_CHANGED')
+    additions=[v for k,v in new.items() if k not in old]
+    expected='CREATE TABLE operation_terminals(operation_id TEXT NOT NULL REFERENCES operations(id),terminal_id TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(operation_id,terminal_id))'
+    normalize=lambda s:re.sub(r'\s+','',s or '').lower()
+    for item in additions:
+        require(item[:3]==('table','operation_terminals','operation_terminals') and normalize(item[3])==normalize(expected),'UNREVIEWED_SCHEMA_ADDITION')
+    return [r[1] for r in additions]
 def backup_db(source,destination):
     require(not source.is_symlink(),'SYMLINK_DATABASE_REJECTED')
     with sqlite3.connect(source.as_uri()+'?mode=ro',uri=True,timeout=10) as src, sqlite3.connect(destination) as dst:
@@ -80,6 +89,13 @@ def main():
         sha=sys.argv[1];require(re.fullmatch('[a-f0-9]{40}',sha),'COMMIT_INVALID')
         backup=Path(tempfile.mkdtemp(prefix='adl-api-update-',dir=BACKUPS));log=backup/'update.private.log'
         private(backup/'deployment.before.private.json',oldmeta);private(backup/'model.before.private.json',json.dumps(before).encode())
+        # Compose reparses interpolation on manual rollback: escape literal dollars.
+        def literal(v):
+            if isinstance(v,str):return v.replace('$','$$')
+            if isinstance(v,list):return [literal(x) for x in v]
+            if isinstance(v,dict):return {k:literal(x) for k,x in v.items()}
+            return v
+        private(backup/'rollback.compose.private.json',json.dumps(literal(before)).encode())
         context=backup/'context';context.mkdir()
         stage='receive_source'
         with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
@@ -111,8 +127,12 @@ def main():
         run(['docker','run','--rm','--network','none','--memory','512m','--read-only','--tmpfs','/tmp:size=64m','--cap-drop','ALL','--security-opt','no-new-privileges:true','-v',str(check)+':/check','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',PROBE],log=log)
         afterfiles={str(p.relative_to(check)) for p in check.rglob('*.sqlite')}
         require(afterfiles==set(schemas),'DATABASE_SET_CHANGED_REQUIRES_MAINTENANCE')
+        additions={}
         for rel,s in schemas.items():
-            with sqlite3.connect(check/rel) as db:require(schema(db)==s,'SCHEMA_CHANGE_REQUIRES_MAINTENANCE')
+            with sqlite3.connect(check/rel) as db:
+                added=compatible_schema(s,schema(db))
+                if added:additions[rel]=added
+        private(backup/'compatibility.json',json.dumps({'compatible':True,'additiveTables':additions}).encode())
         with sqlite3.connect(data/'control.sqlite') as db:
             admins=db.execute("SELECT id,email,password,role,client_id FROM admins WHERE role='platform_admin' ORDER BY id").fetchall()
         stage='compose_gate'
@@ -140,7 +160,7 @@ def main():
         meta['composeOverrides']=list(dict.fromkeys(meta.get('composeOverrides',[])+[str(overlay)]));meta['apiUiCommit']=sha;meta['apiUiBackup']=str(backup)
         atomic(SECURE/'deployment.json',json.dumps(meta).encode())
         private(backup/'success.json',json.dumps({'commit':sha,'adminPresent':bool(admins),'image':image}).encode())
-        emit(stage='complete',status='ok',backup=str(backup),commit=sha,httpsVerified=True,applicationVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaUnchanged=True,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
+        emit(stage='complete',status='ok',backup=str(backup),commit=sha,httpsVerified=True,applicationVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
         return 0
     except Exception as e:
         code=str(e) if isinstance(e,RuntimeError) and re.fullmatch('[A-Z_]+',str(e)) else 'PRIVATE_ERROR_SEE_STAGE'

@@ -29,7 +29,7 @@ Não importa clientes, operações nem acessos do demo do Mac.
    são consistentes por banco, não uma fotografia atômica entre bancos; o worker
    continua liquidando. Não copia nem modifica volume do feed.
 5. Testa os construtores atuais sobre outra cópia dos bancos, sem rede ou feed.
-   Mudança de esquema/conjunto de bancos bloqueia ANTES de trocar a API. Isso
+   A única adição aprovada é `operation_terminals`, com definição exata e sem alteração nas tabelas existentes. Outras mudanças de esquema/conjunto de bancos bloqueiam ANTES de trocar a API. Isso
    mantém compatibilidade com o worker antigo e rollback sem restaurar dados.
 6. Compara o Compose completo: única diferença permitida é `services.api.image`.
    Conserva todas as definições, volumes, redes, aliases, credenciais e overrides.
@@ -46,6 +46,10 @@ validação 45 s mais tempo do Compose. Worker e POSNET não são reiniciados.
 Não há nova cobrança de recursos AWS pelo executor; imagem/backup consomem disco
 já contratado. Backups não são apagados automaticamente.
 
+A imagem anterior foi comparada localmente: não possuía `operation_terminals`.
+Essa tabela aditiva é ignorada pela versão antiga e pode permanecer em rollback;
+não se apagam terminais nem se restaura o banco.
+
 ## Acesso
 
 Se `administratorPreserved:true`, usar email e senha já cadastrados na AWS.
@@ -57,7 +61,7 @@ administrador pela rotina existente `PlatformStore.bootstrap`, que recusa se já
 houver administrador. Salva o acesso em arquivo 0600 fora do repositório:
 `~/Library/Application Support/ADL/Access/aws-admin-<data>.json`.
 O caminho é mostrado; senha não aparece no terminal nem nos logs. Consultar esse
-arquivo localmente, entrar pelo painel e trocar a senha em **Mi acceso**. Não
+arquivo localmente, entrar pelo painel e trocar a senha em a opção de alteração de senha no painel. Não
 colar o arquivo no chat. Enter sem email deixa inicialização pendente. Uma
 execução não interativa não cria administrador. Não há senha padrão ou do demo.
 
@@ -69,12 +73,12 @@ verifica saúde e restaura os metadados anteriores. Registra
 Não restaura bancos automaticamente: eles continuam recebendo liquidações e
 restaurar o backup perderia gravações posteriores. Se processo/SSH for interrompido,
 antes de repetir comparar deployment/model privado e estado atual; preservar tudo.
-Para retorno manual usar o `model.before.private.json` com todas as definições
+Para retorno manual usar o `rollback.compose.private.json` com todas as definições
 resolvidas (tratar como segredo):
 
 ```bash
 sudo docker compose -p adl-homologation \
-  -f /var/backups/adl-api-update-<ID>/model.before.private.json \
+  -f /var/backups/adl-api-update-<ID>/rollback.compose.private.json \
   up -d --no-deps --no-build --pull never api
 ```
 
@@ -86,6 +90,8 @@ aplicar `down`, `-v`, iniciar worker Mac ou restaurar bancos como rollback de UI
 
 Build Docker offline real sobre imagem ADL anterior, limitado a 1 GiB, concluído.
 Probe isolado da imagem verifica administrador preservado e frontend compilado.
+Teste Docker antigo → novo → antigo também passou, conservando exatamente o
+registro do administrador e sem restaurar dados.
 Testes Python de backup WAL/integridade/esquema/Compose e teste de seleção de
 fonte, além dos testes locais de plataforma/feed, sem chamadas LSports.
 A aplicação real na AWS e login autenticado pelo proprietário continuam sendo

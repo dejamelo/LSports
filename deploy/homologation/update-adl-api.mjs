@@ -11,7 +11,7 @@ const HERE=path.dirname(fileURLToPath(import.meta.url)),ROOT=path.resolve(HERE,'
 const exec=promisify(execFile),quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
 export function productionSource(name){
  return ['package.json','package-lock.json','tsconfig.json'].includes(name) ||
- (/^(apps|packages)\//.test(name)&& !/(^|\/)(node_modules|dist|\.runtime|\.local-synthetic-demo|backups)(\/|$)|(^|\/)\.env|\.test\.|synthetic|\.(sqlite|pem|key|log)(\.|$)/i.test(name)) ||
+ (/^(apps|packages)\//.test(name)&& !/(^|\/)(node_modules|dist|test-fixtures|\.runtime|\.local-synthetic-demo|backups)(\/|$)|(^|\/)\.env|\.test\.|synthetic|\.(sqlite|pem|key|log)(\.|$)/i.test(name)) ||
  ['scripts/bootstrap-platform.ts','scripts/recover-platform-access.ts'].includes(name);
 }
 async function main(){
