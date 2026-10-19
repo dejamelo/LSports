@@ -548,58 +548,76 @@ próximo passo com evidência. Dono morto com lock residual continua bloqueado,
 sem recuperação automática. Nenhum SSH, reload, worker start ou alteração POSNET,
 volumes, backups ou composeOverrides é realizado por essa observação.
 
-### Evidência OS: state=T — recuperação do processo suspenso
+### Evidência OS: state=T — histórico da primeira recuperação
 
-A captura do operador mostra PID 12811 em **T**, CPU 0, sem TCP e sem atualização
-do checkpoint desde 22:59:53Z. **T é estado suspenso pelo sistema operacional**;
-isso deveria ter sido destacado na leitura anterior. O JavaScript não progride
-nesse estado e um SIGTERM enviado pode permanecer pendente. Não comprova deadlock
-AMQP nem qual sinal/job-control causou a suspensão. O commit efetivamente
-carregado permanece desconhecido; `git pull` não atualiza módulos já carregados.
-A recuperação não assume que o runtime antigo possui o código do checkout atual.
+O operador confirmou PID 12811 em T. A versão 34f7f16 tentou usar SIGCONT
+condicionado à máscara pending do ps, mas bloqueou antes de backup/sinais com
+SIGTERM_NOT_PENDING e resumed=false. Esse procedimento foi substituído pela
+sequência corrigida abaixo; a opção antiga --prior-term-confirmed é rejeitada.
+Não remover arquivos de intenção de tentativas anteriores nem retomar outra
+identidade/PID para contornar bloqueios.
 
-Próximo comando no Mac, sem sudo (PID explícito da captura, não aceitar outro):
+### macOS: recuperação corrigida, sem depender de p_siglist
+
+Revisão das fontes oficiais Apple:
+
+- [adv_cmds ps/keyword.c](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/keyword.c):
+  pending é alias de sig; sig imprime p_siglist via formato hexadecimal.
+- [XNU bsd/sys/proc.h](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc.h):
+  p_siglist e p_sigmask no extern_proc são marcados DEPRECATED.
+- [XNU bsd/kern/kern_sysctl.c](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c):
+  fill_user64_externproc exporta outros campos de sinais, mas não preenche p_siglist.
+
+Essas fontes atuais explicam por que esse campo legado não pode ser usado como
+pré-requisito confiável no macOS. Não identificamos a build do kernel ou o commit
+JavaScript carregado pelo processo do operador. Zero nessa máscara não prova que
+o SIGTERM anterior nunca foi enviado/recebido, nem descreve o estado do handler.
+No Darwin, o script deixa de consultar esse campo e reporta a observação como null,
+com pendingMaskAuthority=deprecated_macos_field_ignored. Não troca false por true.
+
+Executar no Mac **uma vez, sem sudo**, com a NOVA opção explícita:
 
 ```bash
 cd "$HOME/LSports" &&
 git pull --ff-only origin feat/sportsbook-demo &&
-node deploy/homologation/recover-stopped-mac-worker.mjs --pid 12811 --prior-term-confirmed
+node deploy/homologation/recover-stopped-mac-worker.mjs --pid 12811 --resume-and-stop
 ```
 
-`--prior-term-confirmed` registra a evidência já fornecida: SIGTERM foi enviado
-com sucesso a esse PID. O comando não envia SIGTERM novamente. Reconfirma lock,
-UID, cwd real, PID/horário de início/argv reconhecido e estado T imediatamente
-antes da ação. Se ps disponibilizar máscara pending/sig, inspeciona apenas o bit
-de SIGTERM; ausência conhecida bloqueia. Se o sistema não expuser máscara válida,
-reporta `pendingTermObserved=null`, usando a afirmação explícita do operador, sem
-alegar que leu sinais pendentes. Se PID, estado ou identidade mudaram, bloqueia.
+1. Revalida PID, UID, horário de início, argumento de worker, cwd real do projeto,
+   posse/inode/dev do lock e estado T. Outro PID/processo/estado bloqueia.
+2. Antes de sinais, cria backup privado 700/600 fora do Git em
+   ~/Library/Application Support/ADL/Recovery/stopped-worker-* com checkpoint,
+   journals, lock e manifesto. Exige espaço, T durante a cópia e SHA-256 igual da
+   fonte antes/depois e backup. Sincroniza os arquivos; não copia .env.
+3. Registra intenção exclusiva por identidade, preservada em disco, e envia um
+   SIGCONT ao dono. Pai também T só é retomado se for launcher tsx não-watch do
+   mesmo projeto/UID, com relação pai-filho revalidada; nunca grupo/npm genérico.
+4. Aguarda 3 segundos para o encerramento anterior progredir. Se já saiu e liberou
+   lock, não envia TERM. Se a máscara é indisponível/legada/sem TERM e o mesmo
+   processo ainda vive, exige novamente estado fora de T, UID/cwd/horário/argv e
+   o mesmo lock. Registra intenção separada e envia **um único SIGTERM dirigido**.
+   No Linux, uma máscara que comprova TERM já pendente evita esse segundo sinal.
+5. Aguarda até 120s após CONT por saída/liberação normal. Não repete sinais, não
+   usa KILL, não remove lock vivo ou órfão e não aplica timeout destrutivo. Se o
+   processo for suspenso de novo ou a identidade mudar, bloqueia sem TERM.
+6. Auditoria e journals estáveis são obrigatórios antes da exportação automática.
+   A saída cutover.prepare informa destination/journals/notBeforeUTC frescos.
 
-Antes de qualquer SIGCONT, cria backup fora do Git em
-`~/Library/Application Support/ADL/Recovery/stopped-worker-*` (700/600): checkpoint,
-journals, cópia do lock e manifesto privado. Não copia .env nem altera dados vivos.
-Exige espaço, estado T durante a cópia, SHA-256 igual entre fonte antes/depois e
-cópia; sincroniza arquivos de backup. A pasta Recovery existente deve ser privada
-e pertencer ao usuário. Falha de backup impede todos os sinais.
+A mudança não é uma repetição cega de SIGTERM: a retomada e a identidade ativa
+são confirmadas antes de um sinal dirigido no novo modo. Se o handler antigo já
+estiver finalizando e sair durante as verificações, a posse desaparecida impede
+novo sinal e o script aguarda a saída natural. Intenções existentes impedem
+reaplicação automática; não são apagadas mesmo se a recuperação ficar parcial.
+O bloqueio SIGTERM_NOT_PENDING/resumed=false ocorreu antes de criar intenções,
+portanto esse resultado por si não exige recuperação de marcador nem locks.
 
-Retoma exclusivamente o dono verificado com um SIGCONT. Se o pai também estiver
-T, só o retoma se for um launcher **tsx reconhecido, não-watch**, do mesmo usuário,
-projeto e relação pai-filho revalidada; nunca retoma npm genérico, shell, grupo ou
-watch supervisor. Isso permite drenar IPC e colher a saída do filho. Qualquer
-pai parado não reconhecido bloqueia antes de sinais, pedindo investigação.
-Um arquivo privado de intenção por identidade de processo impede reaplicação
-cega; nunca é removido automaticamente, mesmo se a ação não concluir.
+Se bloquear novamente, enviar apenas JSON sanitizado com stage/reason/backup/
+resumed/directedTermRequested. Preservar backups e dados, sem tentar outra opção
+para ignorar proteções. Nenhum worker AWS, POSNET, volume ou composeOverride é
+alterado. O consumidor Mac pode progredir brevemente durante a retomada, por isso
+AWS continua parado e os journals finais/cooldown devem ser exportados novamente.
 
-Após CONT, espera o SIGTERM anterior encerrar o worker, liberar seu próprio lock
-e terminar a persistência. Não remove lock vivo **nem órfão**: se o runtime antigo
-não liberar, a saída bloqueia com backup preservado para recuperação offline
-específica, sem migração. Não aplica timeout destrutivo, novo TERM ou KILL.
-Só com ausência de processos/locks e journals estáveis o launcher executa a
-exportação fresca, retornando cutover.prepare/destination/journals/notBeforeUTC.
-AWS continua parado. Não reativar o Mac após concluir essa exportação.
-
-Teste real isolado reproduziu SIGSTOP → SIGTERM pendente → SIGCONT, com handler,
-persistência final e liberação do próprio lock. Não usa conexões/credenciais reais.
-Testes de PID/UID/cwd, pai watch/genérico, identidade alterada, falha de backup,
-intenção já usada e timeout comprovam bloqueio sem sinais adicionais. A parada
-normal também passou a recusar um dono em T antes de enviar TERM, direcionando
-para essa recuperação específica.
+Testes isolados reproduzem os dois cenários reais: TERM pendente + CONT e ausência
+de TERM + CONT seguido de TERM revalidado. Ambos concluem persistência e liberação
+do próprio lock. Também cobrem backup falho, intenção já usada, PID/lock trocado,
+suspensão recorrente e timeout sem repetição/escalada. Nenhum teste usa fornecedor.

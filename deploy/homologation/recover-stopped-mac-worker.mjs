@@ -3,7 +3,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFile,spawn} from 'node:child_process';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
-if(process.argv.length!==5||process.argv[2]!=='--pid'||!/^\d+$/.test(process.argv[3])||process.argv[4]!=='--prior-term-confirmed'){console.log(JSON.stringify({operation:'cutover.resume',status:'blocked',stage:'arguments'}));process.exitCode=2;}
+if(process.argv.length!==5||process.argv[2]!=='--pid'||!/^\d+$/.test(process.argv[3])||process.argv[4]!=='--resume-and-stop'){console.log(JSON.stringify({operation:'cutover.resume',status:'blocked',stage:'arguments'}));process.exitCode=2;}
 else execFile(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/recover-stopped-mac-worker.ts',...process.argv.slice(2)],{cwd:root,timeout:180000,maxBuffer:1024*1024},(error,stdout)=>{
  let complete=false;
  for(const line of stdout.trim().split('\n')){
