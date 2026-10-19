@@ -15,7 +15,12 @@ export function safeError(error:unknown) {
 export function processMatches(text:string){
  return text.split('\n').flatMap(line=>{
   const row=line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);if(!row)return [];
-  const args=row[3];
+  const withState=row[3].match(/^([RSDTtZXIWU][A-Za-z+<NsWTsl-]{0,11})\s+(.+)$/);
+  const state=withState?.[1];const args=withState?.[2]??row[3];
+  if(state?.startsWith('Z'))return [];
+  // A suspended concurrently supervisor contains its child command as text, but is not a consumer.
+  // Running supervisors remain a blocker (they could restart a child).
+  if(state?.startsWith('T')&&/^(?:\S*\/)?node(?:\s|$)/.test(args)&&/(?:^|\/)(?:concurrently\/dist\/bin\/concurrently\.[cm]?js|concurrently\/dist\/bin\/concurrently|node_modules\/\.bin\/concurrently)(?:\s|$)/.test(args))return [];
   const kind=/apps\/worker\/src\/index\.[tj]s/.test(args)?'worker_entrypoint':
    /scripts\/homologation-worker\.[tj]s/.test(args)?'homologation_entrypoint':
    /npm run dev:worker/.test(args)?'worker_supervisor':undefined;
@@ -41,7 +46,7 @@ export async function diagnoseCutover(options:{state:string;refreshMs:number;now
  const now=options.now??Date.now();const state=options.state;const base=basename(state);const folder=dirname(state);
  const blockers:{stage:string;reason:string;item?:string}[]=[];
  const block=(stage:string,reason:string,item?:string)=>blockers.push({stage,reason,...(item?{item}:{})});
- const ps=options.ps??(async()=> (await promisify(execFile)('ps',['-axo','pid=,ppid=,command='],{timeout:5000,maxBuffer:8*1024*1024})).stdout);
+ const ps=options.ps??(async()=> (await promisify(execFile)('ps',['-axo','pid=,ppid=,state=,command='],{timeout:5000,maxBuffer:8*1024*1024})).stdout);
  const alive=options.alive??((pid:number)=>{try{process.kill(pid,0);return 'running';}catch(e){return (e as NodeJS.ErrnoException).code==='ESRCH'?'not_running':'unknown';}});
  const [processResult,listResult,checkpointResult]=await Promise.allSettled([ps(),readdir(folder),jsonFile(state,256*1024*1024,true)]);
  let processes:unknown={status:'unverified'};

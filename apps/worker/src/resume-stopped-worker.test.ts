@@ -84,3 +84,39 @@ test('replacement lock during resumed grace blocks directed TERM',async()=>{
  f.io.lock=async()=>({pid:12811,uid:501,ino:tick>=2?999:1,dev:1});
  await assert.rejects(resumeStoppedWorker(f.io,12811,'/repo',501,10,2),/OWNER_OR_LOCK_CHANGED_BEFORE_TERM/);assert.ok(!f.actions.some(a=>a.startsWith('TERM:')));
 });
+
+test('observed suspended concurrently parent is preserved: only lock owner gets CONT/TERM',async()=>{
+ const f=fixture();f.parent.args='node /repo/node_modules/concurrently/dist/bin/concurrently.js -k node --import tsx /repo/apps/worker/src/index.ts';
+ f.io.pendingTerm=async()=>null;let tick=0;f.io.now=()=>tick;f.io.pause=async()=>{tick++;};
+ const result=await resumeStoppedWorker(f.io,12811,'/repo',501,10,2);
+ assert.equal(result.supervisorPreserved,12809);assert.equal(result.launcherResumed,null);
+ assert.deepEqual(f.actions,['backup','claim','CONT:12811','claimTerm','TERM:12811']);
+});
+
+test('real suspended supervisor stays stopped while child drains, unlocks and becomes unreaped', {timeout:15000},async()=>{
+ const {spawn}=await import('node:child_process');const {once}=await import('node:events');
+ const fs=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {setTimeout:delay}=await import('node:timers/promises');
+ const {processIdentity,processStateCode,readOwner,pathAbsent}=await import('../../../scripts/stop-owned-worker.js');
+ const dir=await fs.mkdtemp(join(tmpdir(),'adl-stopped-supervisor-'));const file=join(dir,'feed.json');
+ const code=`const {spawn}=require('node:child_process');const c=spawn(process.execPath,['--import','tsx','apps/worker/src/test-fixtures/shutdown.ts',process.argv[1],process.argv[2]],{stdio:['ignore','pipe','pipe']});console.log('PID:'+c.pid);c.stdout.pipe(process.stdout);c.stderr.resume();c.once('exit',()=>process.exit(0));`;
+ const parent=spawn(process.execPath,['-e',code,file,join(dir,'tickets.sqlite')],{stdio:['ignore','pipe','pipe']});parent.stderr!.resume();const exited=once(parent,'exit');let text='',childPid=0;
+ try{
+  await new Promise<void>((resolve,reject)=>{parent.stdout!.on('data',d=>{text+=d;const match=text.match(/PID:(\d+)/);if(match)childPid=Number(match[1]);if(text.includes('READY'))resolve();});parent.once('exit',()=>reject(Error('SUPERVISOR_EXITED')));});
+  process.kill(parent.pid!,'SIGSTOP');process.kill(childPid,'SIGSTOP');
+  for(let n=0;n<100&&!/^T/.test(await processStateCode(childPid));n++)await delay(10);
+  assert.match(await processStateCode(parent.pid!),/^T/);process.kill(childPid,'SIGTERM');
+  const identities=async(pid:number)=>{
+   const info=await processIdentity(pid);if(!info)return undefined;
+   return {...info,args:pid===childPid?'node /isolated/apps/worker/src/index.ts':'node /isolated/node_modules/concurrently/dist/bin/concurrently.js node /isolated/apps/worker/src/index.ts'};
+  };
+  const result=await resumeStoppedWorker({lock:()=>readOwner(file+'.lock'),identity:identities,cwd:async()=>'/isolated',state:processStateCode,pendingTerm:async()=>null,
+   backup:()=>fs.copyFile(file,join(dir,'backup.json')),claim:async()=>{},claimTerm:async()=>{},signal:pid=>{assert.equal(pid,childPid);process.kill(pid,'SIGCONT');},
+   terminate:pid=>{assert.equal(pid,childPid);process.kill(pid,'SIGTERM');},absent:()=>pathAbsent(file+'.lock'),pause:()=>delay(20),now:Date.now},childPid,'/isolated',process.getuid!(),5000,100);
+  assert.equal(result.lockReleased,true);assert.equal(result.supervisorPreserved,parent.pid);assert.equal(await processIdentity(childPid),undefined);
+  assert.match(await processStateCode(parent.pid!),/^T/);assert.match(await fs.readFile(file,'utf8'),/ISOLATED TEST DRAINED/);
+ }finally{
+  // Only resume our isolated fixture supervisor to let it reap the already-exited child.
+  if(childPid&&await processIdentity(childPid)){process.kill(childPid,'SIGCONT');process.kill(childPid,'SIGTERM');}
+  if(parent.exitCode===null)parent.kill('SIGCONT');await exited;await fs.rm(dir,{recursive:true,force:true});
+ }
+});

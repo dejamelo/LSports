@@ -16,10 +16,11 @@ export function workerIdentity(info:Identity,root:string,cwd:string,uid:number){
 export function sameIdentity(a:Identity,b:Identity){return a.pid===b.pid&&a.uid===b.uid&&a.startedAt===b.startedAt&&a.args===b.args;}
 export async function processIdentity(pid:number):Promise<Identity|undefined>{
  try{
-  const {stdout}=await promisify(execFile)('ps',['-p',String(pid),'-o','pid=,ppid=,uid=,lstart=,command='],{timeout:5000,maxBuffer:1024*1024,env:{...process.env,LC_ALL:'C'}});
+  const {stdout}=await promisify(execFile)('ps',['-p',String(pid),'-o','pid=,ppid=,uid=,lstart=,state=,command='],{timeout:5000,maxBuffer:1024*1024,env:{...process.env,LC_ALL:'C'}});
   const fields=stdout.trim().split(/\s+/);
-  if(fields.length<9||Number(fields[0])!==pid)throw Error('PROCESS_IDENTITY_UNVERIFIED');
-  return {pid,parentPid:Number(fields[1]),uid:Number(fields[2]),startedAt:fields.slice(3,8).join(' '),args:fields.slice(8).join(' ')};
+  if(fields.length<10||Number(fields[0])!==pid)throw Error('PROCESS_IDENTITY_UNVERIFIED');
+  if(/^Z/.test(fields[8]))return undefined; // Unreaped child has exited; caller still requires lock release.
+  return {pid,parentPid:Number(fields[1]),uid:Number(fields[2]),startedAt:fields.slice(3,8).join(' '),args:fields.slice(9).join(' ')};
  }catch(e){if((e as {code?:unknown;stdout?:unknown}).code===1&&!String((e as {stdout?:unknown}).stdout||'').trim())return undefined;throw e;}
 }
 export async function processStateCode(pid:number){

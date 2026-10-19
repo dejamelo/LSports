@@ -7,16 +7,23 @@ export async function resumeStoppedWorker(io:ResumeIO,expectedPid:number,root:st
  if(lock.pid!==expectedPid||lock.uid!==uid||!owner||!workerIdentity(owner,root,await io.cwd(expectedPid),uid))throw Error('OWNER_IDENTITY_NOT_VERIFIED');
  if(!/^T/.test(await io.state(expectedPid)))throw Error('OWNER_NOT_OS_STOPPED');
  const pending=await io.pendingTerm(expectedPid); // Observation only; a legacy/empty mask is not a shutdown prerequisite.
- let parent:Identity|undefined;
+ let parent:Identity|undefined;let supervisorPreserved:number|null=null;
  const candidate=await io.identity(owner.parentPid);
  if(candidate&&/^T/.test(await io.state(candidate.pid))){
-  if(!workerIdentity(candidate,root,await io.cwd(candidate.pid),uid)||!/(?:^|\/)(?:tsx\/dist\/cli\.[cm]?js|node_modules\/\.bin\/tsx)(?:\s|$)/.test(candidate.args)||/(?:^|\s)watch(?:\s|$)/.test(candidate.args))throw Error('STOPPED_PARENT_NOT_VERIFIED_TSX_LAUNCHER');
-  parent=candidate;
+  const valid=workerIdentity(candidate,root,await io.cwd(candidate.pid),uid);
+  if(valid&&/(?:^|\/)(?:concurrently\/dist\/bin\/concurrently\.[cm]?js|concurrently\/dist\/bin\/concurrently|node_modules\/\.bin\/concurrently)(?:\s|$)/.test(candidate.args)){
+   // Shared supervisor: never resume, terminate or signal its process group.
+   supervisorPreserved=candidate.pid;
+  }else{
+   if(!valid||!/(?:^|\/)(?:tsx\/dist\/cli\.[cm]?js|node_modules\/\.bin\/tsx)(?:\s|$)/.test(candidate.args)||/(?:^|\s)watch(?:\s|$)/.test(candidate.args))throw Error('STOPPED_PARENT_NOT_VERIFIED_TSX_LAUNCHER');
+   parent=candidate;
+  }
  }
  await io.backup();
  const fresh=await io.identity(expectedPid);const latest=await io.lock();
  if(!fresh||!sameIdentity(owner,fresh)||lock.ino!==latest.ino||lock.dev!==latest.dev||lock.uid!==latest.uid||latest.pid!==expectedPid||!/^T/.test(await io.state(expectedPid)))throw Error('OWNER_CHANGED_BEFORE_CONT');
  if(parent&&fresh.parentPid!==parent.pid)throw Error('PARENT_RELATION_CHANGED_BEFORE_CONT');
+ if(supervisorPreserved){const current=await io.identity(supervisorPreserved);if(!current||!candidate||!sameIdentity(candidate,current)||!/^T/.test(await io.state(supervisorPreserved))||fresh.parentPid!==supervisorPreserved)throw Error('SUPERVISOR_CHANGED_BEFORE_OWNER_CONT');}
  if(parent){const current=await io.identity(parent.pid);if(!current||!sameIdentity(parent,current)||!/^T/.test(await io.state(parent.pid)))throw Error('PARENT_CHANGED_BEFORE_CONT');}
  await io.claim(); // Durable one-shot intent: retries cannot blindly issue CONT again.
  if(parent)io.signal(parent.pid);
@@ -24,7 +31,7 @@ export async function resumeStoppedWorker(io:ResumeIO,expectedPid:number,root:st
  const resumedAt=io.now();const deadline=resumedAt+timeoutMs;let termRequested=false;
  while(io.now()<deadline){
   const current=await io.identity(expectedPid);
-  if(!current&&await io.absent())return {ownerPid:expectedPid,launcherResumed:parent?.pid??null,signal:'SIGCONT',pendingTermObserved:pending,directedTermRequested:termRequested,lockReleased:true};
+  if(!current&&await io.absent())return {ownerPid:expectedPid,launcherResumed:parent?.pid??null,supervisorPreserved,signal:'SIGCONT',pendingTermObserved:pending,directedTermRequested:termRequested,lockReleased:true};
   if(current&&!sameIdentity(owner,current))throw Error('OWNER_CHANGED_AFTER_CONT');
   if(current&&pending!==true&&!termRequested&&io.now()-resumedAt>=resumeGraceMs){
    if(/^T/.test(await io.state(expectedPid)))throw Error('OWNER_STOPPED_AGAIN_NO_TERM_SENT');

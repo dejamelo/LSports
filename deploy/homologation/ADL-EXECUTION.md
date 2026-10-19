@@ -631,3 +631,12 @@ identifica todas as condições e o pai real, antes de finalizar o executor úni
 A autorização existente permanece; o bloqueio atual é falta de evidência de identidade,
 não solicitação de nova aprovação. Nenhum worker AWS está autorizado a iniciar
 antes da parada/exportação/importação e cooldown efetivamente verificados.
+
+
+### Corte consolidado após diagnóstico do pai (19/10/2026)
+
+Use [COMPLETE-CUTOVER.md](COMPLETE-CUTOVER.md), seção “Um único comando de execução
+no Mac”. O pai real é concurrently suspenso: preserve-o, retome somente o dono.
+`complete-adl-cutover.mjs --pid 12811` encadeia backup, parada, exportação, importação,
+cooldown, partida única e relatório. Não repetir scripts antigos individualmente.
+A plataforma AWS ainda precisa de bootstrap e operação/sessão para validar iframe.

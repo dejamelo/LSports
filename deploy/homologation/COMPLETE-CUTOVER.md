@@ -12,29 +12,13 @@
   como gate por usar p_siglist legado; não inferir ausência de sinal/handler.
 - A retomada não enviou sinais: bloqueou no tipo do pai, antes do backup/intent.
 
-## Única informação crítica ainda não identificada no Mac
+## Coleta consolidada concluída
 
-A saída STOPPED_PARENT_NOT_VERIFIED_TSX_LAUNCHER informa que o predicado composto
-falhou, mas não identifica o executável/forma do pai nem qual condição falhou.
-Não sabemos se é shell dedicado, node --import, CLI tsx, npm/concurrently/watch,
-outro diretório ou outro usuário. Retomar um supervisor amplo poderia afetar
-outros processos ou recriar o consumidor. Não autorizar isso por correspondência
-solta da palavra worker. O código já confirma identidade do dono; a dúvida é o
-launcher pai. Nenhum novo sinal é necessário para identificar essa informação.
-
-## Uma única coleta local + AWS, com verificações independentes
-
-```bash
-cd "$HOME/LSports" &&
-git pull --ff-only origin feat/sportsbook-demo &&
-node deploy/homologation/inspect-complete-cutover.mjs --pid 12811
-```
-
-É diagnóstico somente leitura, não nova tentativa de recuperação. Não envia
-CONT/TERM, não remove locks, não exporta nem escreve dados, não faz consultas
-LSports, não inicia containers ou altera Caddy/overrides/POSNET. Usa a chave SSH
-existente pelo padrão Lottery.*Key.pem; nunca pede/exibe seu conteúdo.
-Coleta Mac e AWS independentemente, inclusive se uma coleta falhar.
+O relatório recebido identificou o pai 12809 como concurrently suspenso, com UID e
+cwd corretos; faltava somente o marcador de CLI TSX exigido pelo gate anterior.
+O procedimento atual está na seção “Um único comando de execução no Mac”. Não é
+necessário executar novamente o diagnóstico manual; o executor faz a revalidação
+somente leitura antes de agir. O restante desta seção descreve a coleta já feita.
 
 O relatório único contém:
 
@@ -65,8 +49,10 @@ fica no mesmo documento, não como uma nova tentativa de sinal.
 
 O comando de execução final deverá seguir os pontos abaixo sem pedir novamente
 aprovação financeira/manutenção, e sem parar em cada etapa para um novo comando.
-Ele ainda não é liberado: falta o relatório acima para definir a política do pai
-com evidência. Não anunciar como pronto/validado um executor remoto não executado.
+O executor está implementado em `complete-adl-cutover.mjs`. Os testes locais e
+os testes remotos com Docker simulado estão descritos abaixo. Sua execução real
+no Mac/AWS ainda precisa ser confirmada pela saída; não há acesso à chave do Mac
+neste workspace.
 
 1. **Preflight único**: revalidar identidade PID/início/UID/cwd e relação pai-filho,
    confirmar único consumidor Mac e worker AWS parado. Decidir retomada apenas
@@ -99,7 +85,7 @@ com evidência. Não anunciar como pronto/validado um executor remoto não execu
 
 ## O que ainda falta para dados reais e iframe na AWS
 
-- Resolver o launcher com a coleta única; concluir parada/exportação/importação.
+- Launcher identificado e política corrigida; executar parada/exportação/importação.
 - Respeitar cooldown e iniciar um só consumidor por feed com limites PM256/IP128,
   container4GiB/heap3072, sem remover admissão de memória.
 - Validar **realmente** credenciais HTTP/AMQP, distribuição e snapshots sob a nova
@@ -114,3 +100,88 @@ com evidência. Não anunciar como pronto/validado um executor remoto não execu
 O setup do iframe administrativo é independente do consumidor: o feed pode ser
 validado tecnicamente antes de uma operação estar pronta para incorporação.
 Nenhuma etapa usa dados/tickets do Mac para preencher a homologação AWS.
+
+
+## Relatório consolidado recebido e solução aplicada
+
+Coleta de 19/10/2026 00:01:56 de Brasília (03:01:56 UTC): dono 12811,
+Node com `--import tsx`, estado T; pai 12809 é Node executando **concurrently**,
+também T; ancestral npm 12799 também T. Ambos os últimos são supervisores,
+não dois consumidores. A validação TSX falhava por exigir `tsx/dist/cli` no pai.
+O campo de sinais pendentes do macOS não é usado como autoridade.
+
+**Somente o dono recebe SIGCONT** quando o pai observado é concurrently. O pai
+compartilhado e o npm permanecem suspensos: nenhum sinal de grupo, TERM no pai ou
+retomada dos outros comandos. Um launcher TSX dedicado continua com o fluxo
+anterior. Identidade, início, UID, cwd, relação pai-filho e lease são revalidados.
+Depois do backup SHA-256, uma intenção durável impede repetir sinais. Se o dono
+continuar executável após a graça, no máximo um TERM dirigido é permitido.
+
+Com pai suspenso, o filho pode sair e ficar Z até o pai coletar seu status. Z é
+processo encerrado, sem execução nem descritores; NÃO é T. O coletor não o conta
+como consumidor, mas exige liberação normal de TODOS os locks e journals estáveis.
+Um concurrently T não é contado pelo texto do comando do filho; se estiver em
+execução ele volta a bloquear a exportação. **Não execute fg, não retome o npm
+antigo e não execute npm run dev após o corte.** Nenhum lock é removido manualmente.
+
+AWS: API saudável/200, credenciais presentes em 600/700, dois overlays legíveis,
+nenhum worker/checkpoint/journal/lock no volume isolado, aproximadamente 14,1 GiB
+MemAvailable e 24 GiB livres. Plataforma ainda `initialized=false`: o bootstrap,
+cliente/operação e sessão temporária de iframe são uma etapa administrativa
+separada, não preenchida com bilhetes ou dados do Mac.
+
+## Um único comando de execução no Mac
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/complete-adl-cutover.mjs --pid 12811
+```
+
+O PID é explícito, mas nunca confiado isoladamente. Se mudou ou houve reutilização,
+o executor bloqueia por identidade. Não repita este comando após falha real sem
+ler a etapa: intenções, backups e importações parciais são preservados.
+
+O comando revalida as condições essenciais (sem repetir manutenção POSNET), faz
+backup/parada/exportação, importa somente journals por SSH e mostra `notBeforeUTC`.
+Espera automaticamente o maior prazo local/remoto, reaudita ausência do consumidor
+Mac imediatamente antes da partida e inicia apenas `worker` com os overlays salvos.
+A partida é exclusive por fila e sem ACK antecipado, build, pull ou recriação da API.
+Não há chamadas HTTP paralelas de diagnose ao fornecedor. O próprio scheduler
+continua responsável pelos limites e retryAt.
+
+A importação faz backup dos journals AWS existentes, verifica leitura após gravação,
+usa UID/GID do volume e arquivos 600, fsync e rename; não encurta prazos existentes.
+Há recibo por hash do handoff e backup da configuração. Um overlay adicional muda
+somente os três gates operacionais do worker; o modelo completo precisa ser
+idêntico fora desses campos. Nenhuma alteração de Caddy, POSNET, assinaturas ou
+bilhetes. Falha após importação informa backup e arquivos já gravados; não desfaz
+coordenadores nem liga o Mac automaticamente.
+
+A observação por até 15 minutos lê o checkpoint com orçamento de memória e informa
+sessões, snapshots, handoff, diagnósticos, últimas atualizações efetivas/controle e
+contagens de eventos/preços/seleções. Só retorna `snapshots_verified` com uma única
+instância AWS ativa, publicação recente e snapshots completos de ambas as sessões
+iniciadas nesta partida. Keepalive não prova atualização de mercado. Zero seleções
+não é convertido em sucesso de odds. `validation_pending` conserva o worker e seus
+prazos; não é instrução para reiniciar nem repetir consultas.
+
+O relatório distingue `projectionOddsAvailable`, `authenticatedApiVerified=false`
+e `iframeAuthenticated=false`. Receber odds no checkpoint não comprova ainda a
+sessão de incorporação autenticada. Depois do feed, falta criar o administrador
+AWS e configurar sua operação/sessão no painel exclusivo. Nenhuma senha é pedida
+no chat e nenhum segredo LSports vai ao navegador.
+
+## Testes desta correção
+
+- 42 testes Node de identidade/parada, recuperação, processo OS suspenso, zumbi,
+  exportação e cooldown: passaram. Incluem supervisor realmente suspenso que só
+  é retomado no cleanup do próprio fixture isolado, após verificar filho encerrado.
+- 4 testes Python: merge por máximos, rejeição de journals inválidos e fluxo
+  importação/recusa por cooldown/partida somente do worker com overlays preservados; rejeição de snapshots de sessões antigas.
+  Docker/SSH são simulados nesses testes; não comprovam conexão real LSports.
+- Typecheck dirigido dos módulos de parada e sintaxe do executor verificados.
+
+A confirmação final dos feeds reais depende da execução no Mac. Se fornecedor
+recusar autenticação/distribuição, enviar 429 ou apenas eventos encerrados, os
+códigos e retryAt ficam visíveis; nenhuma proteção é removida para apresentar odds.

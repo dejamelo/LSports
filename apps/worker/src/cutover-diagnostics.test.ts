@@ -55,3 +55,11 @@ test('symlinked journals block instead of reading their target',()=>fixture(asyn
  await rm(journal);const secret=join(dir,'private-file');await writeFile(secret,'SECRET');await symlink(secret,journal);
  const result=await diagnoseCutover(options(state));assert.ok(result.blockers.some(b=>b.reason==='NOT_REGULAR_FILE'));assert.equal(await readFile(secret,'utf8'),'SECRET');
 }));
+
+test('suspended concurrently is not a second consumer; running supervisor and stopped worker still block',()=>{
+ const command='node /repo/node_modules/concurrently/dist/bin/concurrently.js node --import tsx apps/worker/src/index.ts';
+ assert.equal(processMatches('12809 12799 T '+command).length,0);
+ assert.equal(processMatches('12809 12799 S '+command).length,1);
+ assert.equal(processMatches('12811 12809 T node --import tsx apps/worker/src/index.ts').length,1);
+ assert.equal(processMatches('12811 12809 Z node --import tsx apps/worker/src/index.ts').length,0);
+});
