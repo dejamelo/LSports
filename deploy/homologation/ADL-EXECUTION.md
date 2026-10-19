@@ -289,3 +289,82 @@ Resume with the same `repair-adl-runtime.mjs --apply` command above after pullin
 It creates a fresh protected backup, retaining all previous backups. Success still
 requires API HTTP 200 and healthy; AWS worker remains stopped. No preparation,
 resize, volume recreation, POSNET changes or Mac worker changes are involved.
+
+## API recuperada: publicação HTTPS e credenciais (próxima etapa)
+
+Evidência do operador: reparo concluído com `stage=complete`, `status=ok`,
+`controlHttpStatus=200`, `health=healthy`; worker não iniciado, POSNET e volumes
+inalterados. Não repetir preparação, rebuild completo ou redimensionamento.
+Os overrides de tmpfs e imagem corrigida permanecem em deployment.json.
+
+Executar no Mac:
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/publish-adl-https.mjs --apply &&
+node deploy/homologation/stage-adl-credentials.mjs
+```
+
+O primeiro comando publica somente `sportbook.apuestadeportiva.lat`, no Caddy
+existente, sem restart dos containers. Confere igualdade ativo/boot e arquivo
+montado, adapta o candidato com o binário Caddy real e permite somente a inclusão
+da rota desse domínio; qualquer outra diferença bloqueia. Backup root-only em
+`/var/backups/adl-https-*`; gravação preserva inode/bind. Reload falho restaura
+arquivo anterior e configuração carregada, informando `rollback`. TLS é validado
+sem ignorar certificado. `https_pending` mantém o candidato válido instalado,
+mas bloqueia a sequência: revisar emissão/DNS/firewall, não anexar o site outra
+vez. O script bloqueia reaplicação se o domínio já estiver presente.
+
+O novo site usa upstream `adl-homologation-api:3001`, bloqueia rotas demo/sintéticas
+e restringe `/control`, `/api/control/*` e `/api/diagnostics/*` ao CIDR administrativo
+já registrado, além da autenticação da aplicação. `log_skip` evita registrar URLs
+de sessões temporárias. Não adiciona X-Frame-Options incompatível com iframe.
+URLs após sucesso: `https://sportbook.apuestadeportiva.lat/sportsbook` e
+`https://sportbook.apuestadeportiva.lat/control`. A AWS é plataforma nova: ainda
+precisa de bootstrap de administrador e operação autorizada, não usar contas ou
+bilhetes Argentina Demo do Mac. Página HTTP 200 não prova feed/sessão incorporada.
+
+O segundo comando lê apenas oito chaves permitidas de `.env` no Mac: USERNAME,
+PASSWORD e o par opcional MQ_USERNAME/MQ_PASSWORD de cada lane. Não modifica o
+arquivo local, não transfere seu conteúdo integral, checkpoint, tickets ou banco.
+O payload vai por stdin no SSH (não argv); a recepção não imprime valores. Usa os
+endpoints/pacotes/vhosts/filas Test do exemplo aprovado e grava `worker.env` em
+0600 sob diretório 0700. Faz backup protegido do arquivo anterior antes da troca
+atômica. O arquivo Compose é raw: `$`, aspas e `#` são literais após o parsing do
+.env de origem; valores com quebra de linha são rejeitados. Credenciais ficam
+somente no worker, não API, imagem, navegador, Git ou logs. Não faz login no
+fornecedor nem abre AMQP; credenciais armazenadas não significam validadas.
+Nenhum override, gate de cutover ou container é modificado nessa transferência.
+
+### Corte preparado, sem partida automática
+
+Manter o worker Mac ligado até HTTPS e nova plataforma estarem preparados. Depois
+encerrar normalmente seu supervisor com Ctrl+C e esperar persistência/lock released.
+Não executar `npm run dev`/`dev:embed` depois do corte: eles iniciam novamente o
+worker. Para continuar UI/API locais sem feed usar somente `dev:web` e `dev:api`.
+
+Após encerramento, executar:
+
+```bash
+cd "$HOME/LSports" && node deploy/homologation/prepare-adl-cutover.mjs
+```
+
+Reaproveita `cutover:audit`: exige ausência de processos e locks, lê checkpoint
+somente para confirmar evidências das lanes, calcula máximo de todos cooldowns e
+retryAt com margem, e exporta APENAS journals do scheduler e relatório para pasta
+0700 fora do repositório (`~/Library/Application Support/ADL/Cutover/.../handoff.json`,
+0600). Não copia checkpoint nem bilhetes, não inicia/para processos e não faz SSH
+ou chamadas LSports. Exportação local não é fencing: manter Mac desligado.
+
+Ainda antes da partida AWS: importar esses journals no volume de feed preservando
+prazos/nomes por host; confirmar `notBeforeUTC` e então configurar gates do deploy
+com os overrides salvos. O worker usa consume exclusivo em ambas as filas e
+persistência antes do ACK. Se conflito, falhar sem fallback não exclusivo. Não
+usar apenas cinco minutos fixos ou diagnosticar fornecedor em paralelo. Nesta
+entrega nenhum comando de start AWS é disparado, para não antecipar corte/cooldown.
+
+Validação pendente real: TLS na AWS, bootstrap/operação de homologação, importação
+dos journals após shutdown, partida única, snapshots completos e odds atuais no
+iframe. Falhas de memória/cooldown local continuam separadas de 429/autorização/
+fechamento AMQP do fornecedor. Não liberar odds do checkpoint nem forçar available.
