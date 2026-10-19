@@ -102,3 +102,9 @@ está em [RESIZE-APPROVAL.md](RESIZE-APPROVAL.md), com backup de configuração 
 parada e retorno dirigido dos outros sete containers sem autostart. Backup
 consistente dos dados do POSNET ainda exige identificação/evidência; metadados
 não o substituem. Nenhuma parada está autorizada.
+
+Preparação de configuração concluída pelo operador (12 containers/7 arquivos,
+status ok, sem restart). Não repetir. Restam dados dos dois volumes replay e do
+volume Caddy: há rotina **offline**, que bloqueia com gravadores ativos, e proposta
+de janela/transferência protegida/retorno explícito dos 12 em RESIZE-APPROVAL.md.
+Não executar backup offline nem parar serviços antes da aprovação da janela.

@@ -218,3 +218,84 @@ nem testa o Supabase; esse campo não invalida as evidências manuais acima.
 local e leitura de verificação. Os volumes/dados locais não são copiados de forma
 consistente por essa rotina. Preservar backups antigos e compartilhar apenas a
 saída sanitizada, nunca arquivos `.private`/inspect ou manifests privados.
+
+## Evidência recebida: configuração EC2 concluída
+
+O operador confirmou saída `stage=complete`, `status=ok`,
+`noRestartRequested=true`, **12 containers em execução**, **7 arquivos de
+configuração** e configuração Supabase presente nos serviços de aplicação.
+Backup exibido na captura: **`/var/backups/posnet-resize-config-3gugdwsa`**.
+Usar o caminho emitido pelo terminal/manifest como referência operacional se a
+transcrição visual divergir; não adivinhar caminhos nem recriar o backup.
+
+Não repetir a preparação, inventário, preços, IP, comparação Caddy ou políticas.
+Nas camadas graváveis, a coleta não encontrou candidatos de banco; isso não
+inspeciona conteúdos dos volumes nem prova ausência de estado. Volumes locais
+que ainda exigem cópia de dados:
+
+1. `posnet-demo-sso-originfix-replay-20261009` — replay do demo atual.
+2. `posnet-demo-sso-canary-replay-20261009` — replay do demo anterior, preservado.
+3. `deploy_caddy_production_data` — certificados/estado do Caddy; os Caddys privados
+   montam o mesmo volume somente leitura, não são cópias independentes.
+
+Também apareceu `D deploy/homologation/diagnose-aws-resize.py` no status local do
+Mac. É uma alteração local, não prova de perda de dados na EC2. Não executar
+reset/clean nem restaurar sem consentimento; não é necessário repetir o diagnóstico
+oficial nem recuperar esse arquivo para efetuar o backup dos volumes.
+
+## Próximo passo: aprovar janela com backup offline antes da mudança EC2
+
+O próximo passo não é copiar um volume ativo com tar e declarar consistência.
+A rotina `backup-posnet-local-volumes.sh` está preparada para a etapa offline:
+
+- Recusa se houver container gravador ativo nos três volumes. Não stop/start/pause
+  containers, não altera políticas, não cria snapshots pagos.
+- Valida volumes locais e espaço, cria arquivos privados em
+  `/var/backups/posnet-local-volumes-*`, preserva ownership/ACLs/xattrs e compara
+  os arquivos arquivados com as origens, além de produzir SHA-256/manifest.
+- Exige que o operador tenha concluído operações e garantido ausência de gravações
+  externas/novos containers durante a cópia. Desligamento forçado ou quiescência
+  não confirmada não autoriza alegar consistência da aplicação.
+- Não restaura por cima da origem e não declara teste de recuperação do aplicativo.
+- Falha mantém backup parcial e bloqueia a mudança; não remover backups existentes.
+
+**Não executar essa etapa agora.** Proposta de janela, para aprovação explícita:
+
+1. Concluir operações POSNET e suspender novas entradas pelo procedimento existente.
+2. Encerrar controladamente os 12 containers antes ativos. Registrar sucesso de
+   término e interromper a mudança se houver gravação pendente/encerramento forçado.
+   Não `compose down`, não remover nada. Como stop manual muda a condição de
+   `unless-stopped`, **retornar explicitamente os 12**, não depender só de autostart.
+3. Executar a rotina offline por SSH, no mesmo modelo já usado. Só prosseguir com
+   `stage=complete/status=ok/tarCompare=ok`, com os três arquivos e hashes presentes.
+4. Copiar configurações e arquivos de volumes, por SSH, para destino protegido
+   fora da EC2 já disponível (ex.: Mac autorizado com pasta 0700/arquivos 0600),
+   e comparar hashes. Contêm segredos e certificados: não publicar, anexar ao chat
+   ou subir ao Git. Uma cópia só no mesmo EBS não protege contra perda do disco.
+   Não criar armazenamento pago para isso sem aprovação. Não liberar entrada
+   pública para transferência nem mudar permissões da origem para facilitar scp.
+5. Só então stop EC2 → alterar tipo → start, preservando EIP/ENI/discos.
+6. Restaurar arquivos temporários apenas se ausentes, a partir do backup, sem
+   sobrescrever divergências. Iniciar os nove backends e depois os três Caddys
+   existentes; são os 12 IDs registrados no manifest de configuração. Não iniciar
+   rollback/hello-world antes parados. Validar saúde, rotas, SSO e canais POSNET.
+7. Retomar operações após validação. Se falhar a etapa de backup/transferência,
+   abortar o redimensionamento e retornar os mesmos serviços antes de liberar
+   operações. Se falhar o tipo novo, voltar ao original conforme o runbook.
+
+A ordem acima substitui a expectativa anterior de que todos retornariam apenas
+por política: os containers parados manualmente precisam de start explícito.
+LSports/worker Mac permanecem fora dessa janela; não ativar consumidor AWS.
+
+A previsão de **20–30 min de janela / 5–15 min de parada EC2** não inclui duração
+comprovada de arquivamento/transferência. Como o backup offline também interrompe
+atendimento, a indisponibilidade total será **backup + transferência + stop/start +
+validação**. Não apresentar 5–15 min como limite total garantido. Reservar a janela
+com margem e medir o tamanho dos arquivos; se exceder o prazo aprovado, abortar
+antes da mudança e retornar serviços, sem sacrificar proteção para cumprir horário.
+
+O custo do tipo aprovado para revisão não mudou: subtotal **US$ 154,02/mês**, mais
+**US$ 85,27/mês** versus atual, com exclusões já documentadas. Nenhum recurso novo
+ou mudança está autorizado por este registro. Restore Supabase continua não testado
+por evidência; PITR permanece desligado. A aprovação operacional deve reconhecer
+esse risco e o intervalo desde o backup diário, sem executar restore de produção.
