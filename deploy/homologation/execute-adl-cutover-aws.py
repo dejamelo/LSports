@@ -68,7 +68,7 @@ def cutover_main():
         if action=='upgrade_partitioned':return upgrade_partitioned(request)
         if action=='preflight':return inspect_aws()
         handoff=request['handoff'];audit=handoff['audit']
-        require(action in ('import','start','status','recover_start'),'INVALID_ACTION')
+        require(action in ('import','start','status','startup_report','recover_start'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(audit['operation']=='cutover.audit' and audit['readOnly'] is True,'INVALID_AUDIT')
         deadline=datetime.datetime.fromisoformat(audit['notBeforeUTC'].replace('Z','+00:00')).timestamp()
@@ -88,8 +88,8 @@ def cutover_main():
         require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','VOLUME_PROJECT_UNVERIFIED')
         directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'VOLUME_SYMLINK')
         receipt=SECURE/('cutover-'+digest+'.json')
-        if action=='status':
-            saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'))
+        if action in ('status','startup_report'):
+            saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'),startup=action=='startup_report')
         if request.get('expectedWorkerImage'):require(model(base)['services']['worker']['image']==request['expectedWorkerImage'],'WORKER_IMAGE_NOT_EXPECTED_CORRECTION')
         stage='no_consumer_gate'
         running=[c for c in states('worker') if c['running']]
@@ -206,7 +206,7 @@ def cutover_main():
         return 2
 
 # Explicit fields only: provider exception text, URLs and message payloads never leave SSH.
-FEED_OPERATIONS={'subscriptions.list','amqp.connection','amqp.channel','amqp.consume','amqp.connect','snapshot.events','snapshot.outright.fixtures','snapshot.outright.markets','distribution.start','distribution.stop','distribution.status','feed.decode','feed.apply','feed.stale','worker.start','file.persist'}
+FEED_OPERATIONS={'subscriptions.list','amqp.connection','amqp.prefetch','amqp.channel','amqp.consume','amqp.connect','snapshot.events','snapshot.outright.fixtures','snapshot.outright.markets','distribution.start','distribution.stop','distribution.status','feed.decode','feed.apply','feed.stale','worker.start','file.persist'}
 def safe_distribution_observation(value):
     out={}
     if value.get('stage') in ('before_start','start_response','after_propagation'):out['stage']=value['stage']
@@ -224,6 +224,9 @@ def safe_feed_diagnostic(value):
     out={}
     enums={'operation':FEED_OPERATIONS,'category':{'network','rate_limited','invalid_response','authentication_rejected','authentication_or_permission','permission_denied','response_limit','unexpected','configuration','invalid_message','unsupported_message','supplier_error'},
        'reason':{'invalid_snapshot','connection_closed','channel_closed','consumer_cancelled','consumer_conflict','distribution_still_off','timeout','memory_budget_exceeded','response_size_limit','application_error','null_response_body','missing_response_body','sdk_conversion','sdk_validation','unknown_exception','provider_interrupted','unsupported_message_type'},
+       'networkCode':{'ECONNREFUSED','ECONNRESET','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','ECONNABORTED','EPIPE','ERR_NETWORK'},
+       'errorType':{'unknown','axios','syntax','type','range','sdk_http','sdk_conversion','sdk_validation','error'},
+       'clientCode':{'ECONNREFUSED','ECONNRESET','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','ECONNABORTED','EPIPE','ERR_NETWORK','ERR_BAD_RESPONSE','ERR_BAD_REQUEST','CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','UNABLE_TO_VERIFY_LEAF_SIGNATURE','ERR_TLS_CERT_ALTNAME_INVALID'},
        'rateLimitSource':{'supplier_http','local_in_flight','local_host_cooldown','local_operation_cooldown'}}
     for key,allowed in enums.items():
         if isinstance(value.get(key),str) and value[key] in allowed:out[key]=value[key]
@@ -310,9 +313,36 @@ def feed_evidence(directory,consumers):
         evidence['schedulers'].append({'nextAt':schedule['nextAt'],'operations':entries})
     return evidence
 
-def cutover_status(directory,start_requested):
+def startup_log_evidence(consumers):
+    reports=[]
+    for c in consumers:
+        require(re.fullmatch('[0-9a-f]{12,64}',c['id']) is not None,'WORKER_CONTAINER_ID_UNVERIFIED')
+        container=json.loads(run(['docker','inspect',c['id']]))[0]
+        started=container['State']['StartedAt']
+        until=(datetime.datetime.fromisoformat(started.replace('Z','+00:00'))+datetime.timedelta(seconds=120)).isoformat().replace('+00:00','Z')
+        logs=subprocess.run(['docker','logs','--timestamps','--since',started,'--until',until,'--tail','400',c['id']],capture_output=True,timeout=20,check=False)
+        report={'startedAtUTC':started,'imageId':container['Image'],'restartCount':container.get('RestartCount'),
+            'logReadOk':logs.returncode==0,'windowSeconds':120,'tailLimit':400,'records':[],
+            'signals':classify(logs.stdout+logs.stderr),'rawLogPrinted':False,'unparsedLines':0}
+        for line in (logs.stdout+b'\n'+logs.stderr).decode(errors='replace').splitlines():
+            match=re.match(r'^(\d{4}-\d{2}-\d{2}T[0-9:.]+Z) (.*)$',line)
+            if not match:continue
+            try:row=json.loads(match[2])
+            except Exception:report['unparsedLines']+=1;continue
+            if not isinstance(row,dict):continue
+            safe=safe_feed_diagnostic(row)
+            if not safe.get('operation'):continue
+            safe['loggedAt']=match[1]
+            if row.get('lane') in ('prematch','inplay'):safe['lane']=row['lane']
+            report['records'].append(safe)
+        report['records']=report['records'][-40:]
+        reports.append(report)
+    return reports
+
+def cutover_status(directory,start_requested,startup=False):
     consumers=states('worker');path=directory/'trade-feed.json';result={'operation':'cutover.aws','stage':'status','readOnly':True,'workers':consumers,'posnetChanged':False}
     result['evidence']=feed_evidence(directory,consumers)
+    if startup:result['startupLogs']=startup_log_evidence(consumers)
     result['validationSinceUTC']=start_requested
     if any(c.get('state')=='exited' for c in consumers):
         result['workerFailure']=inspect_worker_failure(consumers)[0]

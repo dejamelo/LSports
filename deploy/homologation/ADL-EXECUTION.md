@@ -657,3 +657,36 @@ cap/heap e sem repetir a migração. Execute o comando `--partitioned-recovery` 
 [PARTITIONED-RECOVERY.md](PARTITIONED-RECOVERY.md). O mesmo executor prepara e testa
 imagem offline antes da parada, faz SIGTERM/backup offline, mantém overrides e
 retoma a validação real. Não reinicie o consumidor do Mac.
+
+### Full recovery: startup errors hidden by snapshot-only terminal output
+
+The installed full recovery image can report `phase:error` before taking a
+snapshot. The old terminal summary omitted `lane.diagnostic`, InPlay snapshot
+errors, session ends and runtime errors, and could wait 45 minutes despite a
+startup failure. This is a confirmed reporting defect, not proof of a particular
+AMQP or supplier failure. The updated validator exposes these fields and stops
+on an observed non-rate-limited lane error. It does not make odds available.
+`acknowledgedMessages:0` proves only that no ACK was observed in that session;
+this image does not instrument the successful registration of an idle consumer.
+The sanitizer now preserves the existing `amqp.prefetch` operation and explicitly
+allowed network/error codes without printing arbitrary error messages.
+
+One read-only command collects current persisted diagnostics, recent errors and
+the first 120 seconds of the **installed container's** logs (bounded to 400 lines,
+40 sanitized records), plus image ID/start time/restarts. Unstructured lines are
+counted and classified by fixed signatures, never printed. Logs can rotate;
+missing records do not establish absence of failures. The private report is saved
+beside the existing cutover ledger; completed migration steps remain untouched.
+No worker restart, provider call, image rebuild, cooldown reset or POSNET change:
+
+```bash
+cd "$HOME/LSports" &&
+git pull --ff-only origin feat/sportsbook-demo &&
+node deploy/homologation/complete-adl-cutover.mjs --pid 12811 --parent 12809 --startup-report
+```
+
+Review each lane's `diagnostic`, session ends, `startupLogs.records` and
+`evidence.recentErrors` together before choosing a runtime repair. This command
+ends after collection; it never enters the full recovery wait loop. This cloud
+checkout cannot access the Mac SSH key, so actual AWS startup causes remain
+unverified until the collected report is available. Preserve the Mac shutdown.

@@ -14,6 +14,23 @@ exec((HERE/'resume-adl-api.py').read_text().split("if __name__=='__main__':")[0]
 exec((HERE/'execute-adl-cutover-aws.py').read_text().split("if __name__=='__main__':")[0],NS)
 
 class Cutover(unittest.TestCase):
+ def test_startup_diagnostic_keeps_prefetch_and_safe_network_codes_only(self):
+  safe=NS['safe_feed_diagnostic']({'operation':'amqp.prefetch','category':'network','networkCode':'ECONNRESET','errorType':'type','clientCode':'ERR_BAD_RESPONSE','message':'SECRET','password':'SECRET'})
+  self.assertEqual(safe['operation'],'amqp.prefetch');self.assertEqual(safe['networkCode'],'ECONNRESET');self.assertNotIn('SECRET',json.dumps(safe))
+  self.assertNotIn('networkCode',NS['safe_feed_diagnostic']({'networkCode':'SECRET'}))
+ def test_startup_logs_read_installed_container_initial_window_without_raw_text(self):
+  oldrun,oldsub=NS['run'],NS['subprocess']
+  calls=[]
+  def fake_run(args):return json.dumps([{'State':{'StartedAt':'2026-10-19T17:00:00Z'},'Image':'sha256:abc','RestartCount':0}]).encode()
+  def fake_sub(args,**kw):
+   calls.append(args)
+   return types.SimpleNamespace(returncode=0,stdout=b'2026-10-19T17:00:01Z {"lane":"inplay","operation":"amqp.prefetch","category":"network","networkCode":"ECONNRESET","message":"SECRET"}\n2026-10-19T17:00:02Z SECRET\n',stderr=b'')
+  NS['run']=fake_run;NS['subprocess']=types.SimpleNamespace(run=fake_sub)
+  try:result=NS['startup_log_evidence']([{'id':'a'*64}])
+  finally:NS['run'],NS['subprocess']=oldrun,oldsub
+  self.assertEqual(result[0]['records'][0]['networkCode'],'ECONNRESET');self.assertEqual(result[0]['unparsedLines'],1)
+  self.assertNotIn('SECRET',json.dumps(result));self.assertIn('--until',calls[0]);self.assertEqual(result[0]['rawLogPrinted'],False)
+
  def test_distribution_observations_expose_raw_boolean_and_times_only(self):
   row={'stage':'after_propagation','bodyIsDistributionOn':False,'sdkIsDistributionOn':False,'observedAtUTC':'2026-10-19T14:00:03Z','elapsedSinceStartMs':2001,'propagationDelayMs':2000,'secret':'MUST_NEVER_PRINT','startMessage':'MUST_NEVER_PRINT'}
   safe=NS['safe_distribution_observation'](row);self.assertEqual(safe['bodyIsDistributionOn'],False);self.assertEqual(safe['elapsedSinceStartMs'],2001);self.assertNotIn('MUST_NEVER_PRINT',json.dumps(safe))
