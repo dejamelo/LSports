@@ -626,3 +626,42 @@
 .preview-tools label {flex:1;min-width:180px;}
 .preview-tools input[type=checkbox] {width:auto;margin-right:8px;}
 .control-preview-mode .control-shell {max-width:1920px;}
+
+/* The desktop grid and visual hierarchy remain unchanged. Mobile navigation is inline,
+   so expanding it moves the content rather than covering forms or controls. */
+.control-mobile-navigation {display:none;}
+@media (max-width:650px) {
+  .control {min-height:100dvh;}
+  .control-header {flex-wrap:wrap;gap:10px;}
+  .control-brand {flex:1 1 200px;min-width:0;margin-right:0;}
+  .control-brand strong,.control-heading h1,.control-card h2 {overflow-wrap:anywhere;}
+  .control-header > button {flex:1 1 auto;min-height:44px;max-width:100%;white-space:normal;}
+  .control-mobile-navigation {display:block;padding:12px 16px 0;}
+  .control .control-menu-toggle {width:100%;justify-content:space-between;min-height:44px;text-align:left;}
+  .control-menu-toggle span {font-size:12px;overflow-wrap:anywhere;}
+  .control-nav {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:16px;}
+  .control-nav[hidden] {display:none;}
+  .control-nav > strong,.control-nav > label {grid-column:1/-1;width:auto;min-width:0;}
+  .control-nav > button {width:100%;min-width:0;min-height:44px;white-space:normal;}
+  .control-main,.control-card,.control-form,.control-login > *,.control-heading > div {min-width:0;max-width:100%;}
+  .control-main {padding:20px 16px;}
+  .control-login {padding:24px 16px max(24px,env(safe-area-inset-bottom));}
+  .control-heading,.control-card-title,.control-key {flex-wrap:wrap;align-items:flex-start;}
+  .control-heading > div {flex:1 1 200px;}
+  .control-heading h1 {font-size:24px;}
+  .control p,.control small,.control strong,.control label {overflow-wrap:anywhere;}
+  .control button {max-width:100%;min-height:44px;white-space:normal;overflow-wrap:anywhere;}
+  .control input:not([type=checkbox]),.control select,.control textarea {min-width:0;max-width:100%;font-size:16px;min-height:44px;scroll-margin-block:20px;}
+  .control label,.control fieldset,.control-key > div {min-width:0;}
+  .control-form {width:100%;}
+  .control-metrics strong {font-size:26px;overflow-wrap:anywhere;}
+  .control-status {padding:12px;gap:8px;}
+  .control-status > span {min-width:0;}
+  .control-inline {flex-wrap:wrap;}
+  .control-key > div:last-child {flex-wrap:wrap;gap:8px;}
+  .control-table-wrap {width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;}
+  .control-table-wrap > table {min-width:600px;}
+  .control pre {max-width:100%;}
+  .preview-tools {gap:8px;}
+  .preview-tools label,.operation-console .control-inline label {min-width:0;max-width:100%;}
+}

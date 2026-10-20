@@ -31,6 +31,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { root } from "./index.js";
+export const ADMIN_IDLE_TIMEOUT_MS=300000;
 const scrypt = promisify(scryptCallback);
 export function platformEnabled() {
   const value = process.env.PLATFORM_ENABLED ?? "false";
@@ -217,6 +218,9 @@ export class PlatformStore {
       CREATE TABLE IF NOT EXISTS operation_sessions(hash TEXT PRIMARY KEY,operation_id TEXT NOT NULL,client_id TEXT NOT NULL,currency TEXT NOT NULL,player_id TEXT NOT NULL,channel TEXT NOT NULL,terminal_id TEXT,expires INTEGER NOT NULL,credential_id TEXT NOT NULL REFERENCES operation_credentials(id),FOREIGN KEY(operation_id,client_id,currency) REFERENCES operations(id,client_id,currency));
       CREATE TABLE IF NOT EXISTS operation_embed_keys(embed_hash TEXT PRIMARY KEY,credential_id TEXT NOT NULL REFERENCES operation_credentials(id));
       CREATE TABLE IF NOT EXISTS login_limits(key TEXT PRIMARY KEY,attempts INTEGER NOT NULL,reset_at INTEGER NOT NULL);`);
+    // Adopt the shorter idle policy for existing sessions once on opening.
+    // Reads never renew; the worker never authenticates administrative sessions.
+    this.db.prepare("UPDATE sessions SET expires=? WHERE expires>?").run(this.now()+ADMIN_IDLE_TIMEOUT_MS,this.now()+ADMIN_IDLE_TIMEOUT_MS);
   }
   close() {
     this.db.close();
@@ -488,10 +492,10 @@ export class PlatformStore {
       this.db.prepare("DELETE FROM sessions WHERE expires<=?").run(this.now());
       this.db
         .prepare("INSERT INTO sessions VALUES(?,?,?,?)")
-        .run(digest(value), row.id, digest(csrf), this.now() + 8 * 3600000);
+        .run(digest(value), row.id, digest(csrf), this.now() + ADMIN_IDLE_TIMEOUT_MS);
       this.audit(row.id, this.admin(row.id)!.clientId, "auth.login");
     });
-    return { value, csrf, admin: this.admin(row.id)! };
+    return { value, csrf, admin: this.admin(row.id)!, expiresAt:this.now()+ADMIN_IDLE_TIMEOUT_MS,syncId:digest(`sync:${value}`),serverNow:this.now() };
   }
   private admin(id: string): Admin | undefined {
     const row = this.db
@@ -504,14 +508,20 @@ export class PlatformStore {
   session(value: string) {
     const row = this.db
       .prepare(
-        "SELECT user_id,csrf_hash FROM sessions WHERE hash=? AND expires>?",
+        "SELECT user_id,csrf_hash,expires FROM sessions WHERE hash=? AND expires>?",
       )
       .get(digest(value), this.now()) as
-      | { user_id: string; csrf_hash: string }
+      | { user_id: string; csrf_hash: string; expires:number }
       | undefined;
     return row
-      ? { admin: this.admin(row.user_id)!, csrfHash: row.csrf_hash }
+      ? { admin: this.admin(row.user_id)!, csrfHash: row.csrf_hash,expiresAt:row.expires,syncId:digest(`sync:${value}`),serverNow:this.now() }
       : undefined;
+  }
+  recordSessionActivity(value:string){
+    const now=this.now();
+    const updated=this.db.prepare("UPDATE sessions SET expires=? WHERE hash=? AND expires>?").run(now+ADMIN_IDLE_TIMEOUT_MS,digest(value),now);
+    if(!updated.changes)throw new PlatformError("AUTH_REQUIRED","Tu sesión venció. Iniciá sesión nuevamente.",401);
+    return this.session(value)!;
   }
   logout(value: string, actor: Admin) {
     this.transaction(() => {

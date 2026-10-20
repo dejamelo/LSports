@@ -1,6 +1,7 @@
 import PlatformOverview from "./PlatformOverview";
+import {useAdminIdleSession,announceAdminSession,type AdminSessionInfo} from "./useAdminIdleSession";
 import OperationWorkspace from "./OperationWorkspace";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import type { FormEvent } from "react";
 import {
   ShieldCheck,
@@ -61,6 +62,14 @@ export default function ControlPanel() {
   const [admin, setAdmin] = useState<Admin>(),
     [csrf, setCsrf] = useState(""),
     [loading, setLoading] = useState(true);
+  const [mobileNavigation,setMobileNavigation]=useState(()=>matchMedia('(max-width: 650px)').matches);
+  const [navigationOpen,setNavigationOpen]=useState(false);
+  const navigationToggle=useRef<HTMLButtonElement>(null);
+  useEffect(()=>{const media=matchMedia('(max-width: 650px)');const update=()=>{setMobileNavigation(media.matches);setNavigationOpen(false);};media.addEventListener('change',update);return()=>media.removeEventListener('change',update);},[]);
+  useEffect(()=>{if(!navigationOpen)return;const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){setNavigationOpen(false);navigationToggle.current?.focus();}};document.addEventListener('keydown',escape);return()=>document.removeEventListener('keydown',escape);},[navigationOpen]);
+  const [sessionInfo,setSessionInfo]=useState<AdminSessionInfo>();
+  const [showAccountPasswords,setShowAccountPasswords]=useState(false);
+  useAdminIdleSession(!!admin,csrf,sessionInfo,(reason)=>{setAdmin(undefined);setCsrf("");setClients([]);setSelected("");setSessionInfo(undefined);setError("");setNotice(reason);});
   const [recovering, setRecovering] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   useEffect(() => setShowPassword(false), [admin]);
@@ -105,6 +114,7 @@ export default function ControlPanel() {
     });
     if (!response.ok) {
       if (response.status === 401 && path !== "/login") {
+        announceAdminSession('logout',sessionInfo?.syncId||"");
         setAdmin(undefined);
         setCsrf("");
         setClients([]);
@@ -145,6 +155,7 @@ export default function ControlPanel() {
         if (active) {
           setAdmin(result.admin);
           setCsrf(result.csrf);
+          setSessionInfo(result);
         }
       })
       .catch((e) => {
@@ -198,8 +209,10 @@ export default function ControlPanel() {
         email: form.get("email"),
         password: form.get("password"),
       });
+      announceAdminSession('login',result.syncId);
       setAdmin(result.admin);
       setCsrf(result.csrf);
+      setSessionInfo(result);
     });
   };
   const save = () =>
@@ -245,12 +258,14 @@ export default function ControlPanel() {
         <span className="control-test">
           <ShieldCheck size={15} /> Entorno de prueba · Sin dinero real
         </span>
+        {admin&&<button onClick={()=>{setNavigationOpen(false);setTab("Acceso");setCreating(false);setError("");setNotice("");setShowAccountPasswords(false);}} aria-label="Mi cuenta: cambiar mi contraseña">Mi cuenta · Cambiar contraseña</button>}
         {admin && (
           <button
             disabled={busy}
             onClick={() =>
               void action(async () => {
                 await api("/logout", "POST", {});
+                announceAdminSession('logout',sessionInfo?.syncId||"");
                 setNotice("Sesión cerrada.");
                 setAdmin(undefined);
                 setCsrf("");
@@ -362,7 +377,8 @@ export default function ControlPanel() {
         </main>
       ) : (
         <div className="control-shell">
-          <aside className="control-nav">
+          <div className="control-mobile-navigation"><button ref={navigationToggle} className="control-menu-toggle" type="button" aria-label={navigationOpen?'Cerrar menú de navegación':'Abrir menú de navegación'} aria-expanded={navigationOpen} aria-controls="control-navigation" onClick={()=>setNavigationOpen(v=>!v)}>☰ Menú <span>{tab}</span></button></div>
+          <aside id="control-navigation" className="control-nav" hidden={mobileNavigation&&!navigationOpen}>
             <span className="control-kicker">ESPACIO DE TRABAJO</span>
             <strong>
               {admin.role === "platform_admin"
@@ -376,7 +392,7 @@ export default function ControlPanel() {
                 value={selected}
                 onChange={(e) => {
                   setSelected(e.target.value);
-                  setCreating(false);
+                  setNavigationOpen(false);setCreating(false);
                 }}
               >
                 <option value="" disabled>
@@ -390,7 +406,7 @@ export default function ControlPanel() {
               </select>
             </label>
             {admin.role === "platform_admin" && (
-              <button onClick={() => setCreating(!creating)}>
+              <button onClick={() => {setNavigationOpen(false);setCreating(!creating);}}>
                 <Users size={17} /> Nuevo cliente
               </button>
             )}
@@ -410,7 +426,7 @@ export default function ControlPanel() {
                 key={name}
                 className={tab === name ? "active" : ""}
                 onClick={() => {
-                  setTab(name);
+                  setTab(name);setNavigationOpen(false);
                   setError("");setNotice("");
                   setCreating(false);
                 }}
@@ -468,8 +484,10 @@ export default function ControlPanel() {
                       await api("/password", "POST", {
                         currentPassword: data.get("current"),
                         newPassword: data.get("next"),
+                        confirmPassword: data.get("confirm"),
                       });
-                      form.reset();
+                      announceAdminSession('logout',sessionInfo?.syncId||"");
+                      form.reset();setShowAccountPasswords(false);
                       setAdmin(undefined);
                       setCsrf("");
                       setClients([]);
@@ -483,7 +501,7 @@ export default function ControlPanel() {
                     Contraseña actual
                     <input
                       name="current"
-                      type="password"
+                      type={showAccountPasswords?"text":"password"}
                       autoComplete="current-password"
                       required
                       maxLength={256}
@@ -493,14 +511,16 @@ export default function ControlPanel() {
                     Nueva contraseña
                     <input
                       name="next"
-                      type="password"
+                      type={showAccountPasswords?"text":"password"}
                       autoComplete="new-password"
                       required
                       minLength={12}
                       maxLength={256}
                     />
                   </label>
-                  <button disabled={busy}>Cambiar mi contraseña</button>
+                  <label>Confirmar nueva contraseña<input name="confirm" type={showAccountPasswords?"text":"password"} autoComplete="new-password" required minLength={12} maxLength={256}/></label>
+                  <button type="button" aria-pressed={showAccountPasswords} onClick={()=>setShowAccountPasswords(v=>!v)}>{showAccountPasswords?"Ocultar contraseñas":"Mostrar contraseñas"}</button>
+                  <button disabled={busy}>{busy?"Cambiando contraseña…":"Cambiar mi contraseña"}</button>
                 </form>
                 {admin.role === "platform_admin" && client && (
                   <form

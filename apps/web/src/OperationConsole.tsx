@@ -7,11 +7,13 @@ export default function OperationConsole({
   tab,
   api,
   back,
+  readOnly=false,
 }: {
   path: string;
   tab: string;
   api: Api;
   back: () => void;
+  readOnly?: boolean;
 }) {
   const [loading, setLoading] = useState(false),
     [error, setError] = useState(""),
@@ -139,16 +141,14 @@ export default function OperationConsole({
       {tab === "Sportsbook" && (
         <>
           <p>
-            Iframe de esta operación · Solo simulación · Jugador de prueba del
-            administrador. Usa los datos locales del feed; no genera cuotas de
-            prueba. Necesita una credencial vigente y este dominio autorizado en
-            el cliente.
+            {readOnly?"Vista de plataforma · Solo lectura · Sin cliente, operación ni credencial ficticia. Usa la proyección local y mantiene bloqueadas las apuestas.":"Iframe de esta operación · Solo simulación · Jugador de prueba del administrador. Usa los datos locales del feed; no genera cuotas de prueba. Necesita una credencial vigente y este dominio autorizado en el cliente."}
           </p>
           {!url ? (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 void action(async () => {
+                  if(readOnly){setFormat(channel);setKeyboard(false);setFrameLoading(true);setUrl("/control/sportsbook-preview");return;}
                   const data = await api(`${path}/preview`, "POST", {
                     channel,
                     ...(channel === "pos" ? { terminalId } : {}),
@@ -171,7 +171,7 @@ export default function OperationConsole({
                   <option value="pos">POS</option>
                 </select>
               </label>
-              {channel === "pos" && (
+              {channel === "pos" && !readOnly && (
                 <label>
                   ID de terminal
                   <input
@@ -184,7 +184,7 @@ export default function OperationConsole({
                 </label>
               )}
               <button disabled={loading} className="control-primary">
-                Abrir sportsbook de simulación
+                {readOnly?"Abrir sportsbook de solo lectura":"Abrir sportsbook de simulación"}
               </button>
             </form>
           ) : (
@@ -195,12 +195,13 @@ export default function OperationConsole({
                   back();
                 }}
               >
-                Cerrar iframe y volver al resumen
+                {readOnly?"Cerrar sportsbook de solo lectura":"Cerrar iframe y volver al resumen"}
               </button>
               <div className="preview-tools">
                 <label>
                   Formato de la vista previa
                   <select
+                    aria-label="Formato de la vista previa"
                     value={format}
                     onChange={(e) => setFormat(e.target.value)}
                   >
@@ -219,7 +220,7 @@ export default function OperationConsole({
                 </label>
               </div>
               <p role="status">
-                Sesión:{" "}
+                {readOnly?"Vista de solo lectura:":"Sesión:"}{" "}
                 {channel === "mobile"
                   ? "Móvil"
                   : channel === "pos"
@@ -244,7 +245,7 @@ export default function OperationConsole({
                     ),
                     minHeight: 0,
                   }}
-                  title="Sportsbook de simulación"
+                  title={readOnly?"Sportsbook de plataforma · solo lectura":"Sportsbook de simulación"}
                   className="control-sportsbook-frame"
                   src={url}
                   onLoad={() => {

@@ -10,9 +10,9 @@ import { TenantTickets } from "@lsports/feed-store/tenant-tickets";
 import { createApp } from "./app.js";
 import type { EventFeed } from "@lsports/contracts";
 const origin = "http://localhost:3001";
-async function setup() {
+async function setup(clock:()=>number=()=>Date.now()) {
   const directory = await mkdtemp(join(tmpdir(), "adl-platform-test-"));
-  const platform = new PlatformStore(directory);
+  const platform = new PlatformStore(directory,false,clock);
   await platform.bootstrap(
     "platform@test.example",
     "isolated-password-platform",
@@ -1677,8 +1677,8 @@ test('access recovery resets client sessions only, requires platform role and pa
   assert.equal((await s.request(`/api/control/clients/${a.id}/access`,'POST',{newPassword:'new-password-isolated'},s.admin)).status,200);
   assert.equal((await s.request('/api/control/session','GET',undefined,client)).status,401);
   const next=await s.login('accessa@test.example','new-password-isolated');
-  assert.equal((await s.request('/api/control/password','POST',{currentPassword:'wrong',newPassword:'next-password-isolated'},next)).status,403);
-  assert.equal((await s.request('/api/control/password','POST',{currentPassword:'new-password-isolated',newPassword:'next-password-isolated'},next)).status,200);
+  assert.equal((await s.request('/api/control/password','POST',{currentPassword:'wrong',newPassword:'next-password-isolated',confirmPassword:'next-password-isolated'},next)).status,403);
+  assert.equal((await s.request('/api/control/password','POST',{currentPassword:'new-password-isolated',newPassword:'next-password-isolated',confirmPassword:'next-password-isolated'},next)).status,200);
   assert.equal((await s.request('/api/control/session','GET',undefined,next)).status,401);
   await s.login('accessa@test.example','next-password-isolated');
   assert.equal((await s.request('/api/control/session','GET',undefined,s.admin)).status,200);
@@ -1714,5 +1714,35 @@ test('empty platform navigation supports authenticated read-only feed views duri
   assert.equal((await s.request('/api/control/clients','GET',undefined,s.admin)).data.clients.length,0);
   const c=await s.create('readonlyclient'),client=await s.login('readonlyclient@test.example','isolated-client-password');
   assert(c.id);for(const p of ['/api/control/feed-overview','/api/control/feed-preview'])assert.equal((await s.request(p,'GET',undefined,client)).status,403);
+ }finally{await s.close();}
+});
+
+
+test('300-second server idle expiry for platform and client admins; polling never renews and expired activity cannot revive',async()=>{
+ let now=Date.now();const s=await setup(()=>now);try{
+  await s.create('idleclient');
+  for(const [email,password] of [['platform@test.example','isolated-password-platform'],['idleclient@test.example','isolated-client-password']]){
+   const session=await s.login(email,password),initial=(await s.request('/api/control/session','GET',undefined,session)).data;
+   assert.equal(initial.expiresAt,now+300000);
+   now+=250000;
+   const polled=await s.request('/api/control/session','GET',undefined,session);assert.equal(polled.status,200);assert.equal(polled.data.expiresAt,initial.expiresAt);
+   assert.equal((await s.request('/api/control/activity','POST',{}, {...session,csrf:'wrong'})).status,403);
+   const activity=await s.request('/api/control/activity','POST',{},session);assert.equal(activity.status,200);assert.equal(activity.data.expiresAt,now+300000);
+   now+=299999;assert.equal((await s.request('/api/control/session','GET',undefined,session)).status,200);
+   now++;assert.equal((await s.request('/api/control/session','GET',undefined,session)).status,401);assert.equal((await s.request('/api/control/activity','POST',{},session)).status,401);
+  }
+ }finally{await s.close();}
+});
+test('password confirmation required; current account only; password change revokes all its sessions without exposing passwords in audit',async()=>{
+ const s=await setup();try{
+  const a=await s.create('passwordown'),other=await s.login('passwordown@test.example','isolated-client-password');
+  const second=await s.login('platform@test.example','isolated-password-platform');
+  assert.equal((await s.request('/api/control/password','POST',{currentPassword:'isolated-password-platform',newPassword:'changed-platform-password',confirmPassword:'different'},s.admin)).status,400);
+  assert.equal((await s.request('/api/control/session','GET',undefined,s.admin)).status,200);
+  assert.equal((await s.request('/api/control/password','POST',{currentPassword:'isolated-password-platform',newPassword:'changed-platform-password',confirmPassword:'changed-platform-password',userId:a.id},s.admin)).status,200);
+  assert.equal((await s.request('/api/control/session','GET',undefined,second)).status,401);
+  assert.equal((await s.request('/api/control/session','GET',undefined,other)).status,200);
+  const fresh=await s.login('platform@test.example','changed-platform-password');
+  const audit=(await s.request('/api/control/audit','GET',undefined,fresh)).data;assert(!JSON.stringify(audit).includes('changed-platform-password'));assert(!JSON.stringify(audit).includes('isolated-password-platform'));
  }finally{await s.close();}
 });

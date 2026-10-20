@@ -173,11 +173,17 @@ export function platformRoutes(
       path: "/api/control",
       maxAge: 8 * 3600000,
     });
-    res.json({ admin: session.admin, csrf: session.csrf });
+    res.json({ admin: session.admin, csrf: session.csrf,expiresAt:session.expiresAt,syncId:session.syncId,serverNow:session.serverNow });
   });
   router.get("/api/control/session", (req, res) => {
     const current = admin(req);
-    res.json({ admin: current, csrf: digest(`csrf:${cookie(req)}`) });
+    const info=platform.session(cookie(req))!;
+    res.json({ admin: current, csrf: digest(`csrf:${cookie(req)}`),expiresAt:info.expiresAt,syncId:info.syncId,serverNow:info.serverNow });
+  });
+  router.post("/api/control/activity", (req,res)=>{
+    admin(req,true); // explicit interaction endpoint, same origin + CSRF; GET/polls never touch.
+    const info=platform.recordSessionActivity(cookie(req));
+    res.json({expiresAt:info.expiresAt,syncId:info.syncId,serverNow:info.serverNow});
   });
   router.post("/api/control/logout", (req, res) => {
     const current = admin(req, true);
@@ -245,6 +251,7 @@ export function platformRoutes(
   router.post("/api/control/password", async (req, res) => {
     const actor = admin(req, true),
       input = body(req);
+    if(typeof input.confirmPassword!=="string" || input.confirmPassword!==input.newPassword)throw new PlatformError("PASSWORD_CONFIRMATION","La nueva contraseña y su confirmación no coinciden.",400);
     await platform.changePassword(
       actor,
       input.currentPassword,

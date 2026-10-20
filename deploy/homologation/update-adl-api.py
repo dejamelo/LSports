@@ -209,4 +209,42 @@ def bootstrap_main():
         return 0
     except Exception:
         emit(stage='administrator_initialization',status='blocked',existingAdministratorReset=False,rawErrorsPrinted=False);return 2
-if __name__=='__main__':raise SystemExit(bootstrap_main() if '--bootstrap' in sys.argv else main())
+def rollback_main():
+    stage='rollback.preflight';mutated=False;base=None;backup=None
+    try:
+        require(os.geteuid()==0,'ROOT_REQUIRED')
+        require(len(sys.argv)==3 and sys.argv[1]=='--rollback','ROLLBACK_ARGUMENTS_INVALID')
+        require(re.fullmatch(r'/var/backups/adl-api-update-[A-Za-z0-9_-]+',sys.argv[2]),'ROLLBACK_BACKUP_INVALID')
+        backup=Path(sys.argv[2]);require(backup.is_dir() and not backup.is_symlink() and backup.stat().st_mode&0o077==0,'ROLLBACK_BACKUP_NOT_PROTECTED')
+        before_file=backup/'model.before.private.json';old_file=backup/'deployment.before.private.json'
+        require(all(f.is_file() and not f.is_symlink() and f.stat().st_mode&0o077==0 for f in (before_file,old_file)),'ROLLBACK_RECORD_UNVERIFIED')
+        lock=os.open(SECURE/'api-update.lock',os.O_CREAT|os.O_RDWR,0o600);fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        old=json.loads(before_file.read_bytes());target=old['services']['api']['image']
+        image=json.loads(run(['docker','image','inspect',target]))[0]['Id'];require(re.fullmatch(r'sha256:[0-9a-f]{64}',image),'ROLLBACK_IMAGE_UNVERIFIED')
+        original=(SECURE/'deployment.json').read_bytes();meta=json.loads(original);base=compose(meta);current=json.loads(run(base+['--profile','*','config','--format','json']));protected=identities()
+        ids=run(['docker','ps','-aq','--filter','label=com.docker.compose.project=adl-homologation','--filter','label=com.docker.compose.service=api']).decode().split();require(len(ids)==1,'EXACTLY_ONE_API_REQUIRED')
+        installed=json.loads(run(['docker','inspect',ids[0]]))[0]
+        configured_image=json.loads(run(['docker','image','inspect',current['services']['api']['image']]))[0]['Id']
+        if installed['Image']==image and configured_image==image and health():
+            emit(stage='rollback.complete',status='ok',reused=True,apiImageId=image,workerMutationRequested=False,posnetChanged=False,dataRestored=False);return 0
+        overlay=SECURE/('compose.api-rollback-'+backup.name+'.json');content=json.dumps({'services':{'api':{'image':image}}}).encode()
+        if overlay.exists():require(not overlay.is_symlink() and overlay.read_bytes()==content,'ROLLBACK_OVERLAY_CONFLICT')
+        else:private(overlay,content)
+        candidate=base+['-f',str(overlay)];compare_models(current,json.loads(run(candidate+['--profile','*','config','--format','json'])),image)
+        require((SECURE/'deployment.json').read_bytes()==original,'DEPLOYMENT_CHANGED_EXTERNALLY')
+        stage='rollback.api_replace';emit(stage=stage,status='running');mutated=True
+        run(candidate+['up','-d','--no-deps','--no-build','--pull','never','api'],timeout=120,log=backup/'manual-rollback.private.log');health()
+        require(identities()==protected,'PROTECTED_CONTAINERS_CHANGED')
+        meta['composeOverrides']=list(dict.fromkeys(meta.get('composeOverrides',[])+[str(overlay)]))
+        oldmeta=json.loads(old_file.read_bytes());meta['apiUiCommit']=oldmeta.get('apiUiCommit');meta['apiUiRollbackBackup']=str(backup)
+        atomic(SECURE/'deployment.json',json.dumps(meta).encode())
+        emit(stage='rollback.complete',status='ok',apiImageId=image,workerMutationRequested=False,posnetChanged=False,dataRestored=False,administratorReset=False);return 0
+    except Exception as e:
+        recovery='not_needed'
+        if mutated and base:
+            try:run(base+['up','-d','--no-deps','--no-build','--pull','never','api'],timeout=120,log=backup/'manual-rollback-recovery.private.log');health();recovery='previous_current_api_healthy'
+            except Exception:recovery='failed_preserve_logs'
+        reason=str(e) if isinstance(e,RuntimeError) and re.fullmatch('[A-Z_]+',str(e)) else 'ROLLBACK_PRIVATE_ERROR'
+        emit(stage=stage,status='blocked',reason=reason,recovery=recovery,workerMutationRequested=False,posnetChanged=False,dataRestored=False,rawErrorsPrinted=False);return 2
+
+if __name__=='__main__':raise SystemExit(rollback_main() if '--rollback' in sys.argv else bootstrap_main() if '--bootstrap' in sys.argv else main())

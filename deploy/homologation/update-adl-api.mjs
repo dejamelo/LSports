@@ -23,9 +23,10 @@ let activeStage='executor_start';
 const progress=(stage,extra={})=>{activeStage=stage;console.log(JSON.stringify({operation:'adl.api_update',stage,status:'running',...extra}));};
 async function main(){
  progress('executor_start',{entrypointVerified:true});
- const options=process.argv.slice(2);let repo=ROOT,ref='HEAD',preserve=false,inspect=false;
+ const options=process.argv.slice(2);let repo=ROOT,ref='HEAD',preserve=false,inspect=false,rollback;
  for(let i=0;i<options.length;i++){
-  if(options[i]==='--repo'&&options[i+1])repo=path.resolve(options[++i]);
+  if(options[i]==='--rollback'&&options[i+1])rollback=options[++i];
+  else if(options[i]==='--repo'&&options[i+1])repo=path.resolve(options[++i]);
   else if(options[i]==='--commit'&&options[i+1])ref=options[++i];
   else if(options[i]==='--preserve-local-changes')preserve=true;
   else if(options[i]==='--inspect-local')inspect=true;
@@ -34,6 +35,14 @@ async function main(){
  if(ref.startsWith('-'))throw Error('INVALID_COMMIT_REF');
  const sha=(await exec('git',['rev-parse','--verify',ref+'^{commit}'],{cwd:repo})).stdout.trim();
  if(!/^[a-f0-9]{40}$/.test(sha))throw Error('COMMIT_INVALID');
+ if(rollback){
+  if(!/^\/var\/backups\/adl-api-update-[A-Za-z0-9_-]+$/.test(rollback))throw Error('ROLLBACK_BACKUP_INVALID');
+  progress('rollback_preflight',{backup:rollback});
+  const keys=(await fs.readdir(path.join(os.homedir(),'Downloads'),{withFileTypes:true})).filter(x=>x.isFile()&&/Lottery.*Key\.pem$/.test(x.name));if(keys.length!==1)throw Error('EXACTLY_ONE_SSH_KEY_REQUIRED');
+  const source=(await exec('git',['show',sha+':deploy/homologation/update-adl-api.py'],{cwd:repo,maxBuffer:1024*1024})).stdout;
+  const child=spawn('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com','sudo -n python3 -c '+quote(source)+' --rollback '+quote(rollback)],{stdio:['ignore','pipe','pipe']});child.stderr.resume();let raw='';child.stdout.on('data',b=>raw+=b);const code=await new Promise((r,j)=>{child.on('error',j);child.on('close',r)});let confirmed=false;for(const line of raw.split('\n'))try{const row=JSON.parse(line);if(row.stage){console.log(JSON.stringify(row));if(row.stage==='rollback.complete'&&row.status==='ok')confirmed=true}}catch{}
+  if(code!==0||!confirmed)throw Error('ROLLBACK_NOT_CONFIRMED');return;
+ }
  progress('local_source_backup',{intendedCommit:sha});
  const local=await inspectLocalSource(repo,sha,path.join(os.homedir(),'Library','Application Support','ADL','Backups','LocalSource'));
  console.log(JSON.stringify({stage:'local_source_comparison',status:local.trackedChanges.length?'preserved':'clean',...local,remoteChangesRequested:false}));
