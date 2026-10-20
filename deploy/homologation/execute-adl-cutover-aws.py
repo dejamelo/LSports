@@ -535,6 +535,7 @@ def existing_recovery_timeline(consumers,window):
                 if row.get('lane') in ('prematch','inplay'):record['lane']=row['lane']
                 if op=='file.persist':
                     record['operation']=op
+                    if isinstance(row.get('lastCompletedAt'),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',row['lastCompletedAt']):record['lastCompletedAtUTC']=row['lastCompletedAt']
                     for k in ('writes','lastDurationMs','regularFixtures','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','rssBytes'):
                         if type(row.get(k)) is int and 0<=row[k]<=10**12:record[k]=row[k]
                 elif op=='snapshot.events' and row.get('status')=='full_spool_progress':

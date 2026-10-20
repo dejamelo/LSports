@@ -36,6 +36,7 @@ function observation(l={},previous={},projection={},since){
   lastSnapshotAtUTC:utc(l.lastSnapshotAt),snapshotBelongsToCurrentSession:isCurrent(l.lastSnapshotAt),fullSnapshot:progress(l.fullSnapshot),
   lastMarketDecodedAtUTC:utc(l.updates?.lastMarketDecodedAt),marketUpdateBelongsToCurrentSession:isCurrent(l.updates?.lastMarketDecodedAt),
   diagnostic:diagnostic(l.diagnostic),lastSnapshotDiagnostic:diagnostic(d),lastSnapshotDiagnosticScope:when?(isCurrent(when)?'current_session':'historical_before_session'):'timestamp_unknown',
+  cooldown:{sourceAttemptAtUTC:utc(d.coordinator?.at),retryAtUTC:utc(d.retryAt),deadlineActiveAtCollection:Number.isFinite(Date.parse(d.retryAt))?Date.parse(d.retryAt)>Date.now():null,note:'An earlier session request may impose a still-active persisted deadline; source age alone does not invalidate the cooldown.'},
   decodedMessagesByType:Object.fromEntries(Object.entries(l.decodedMessagesByType||{}).filter(([k,v])=>/^[0-9]{1,5}$/.test(k)&&Number.isSafeInteger(v)&&v>=0)),
   persistenceProgress:Object.fromEntries(Object.entries(l.persistenceProgress||{}).filter(([k,v])=>['writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','rssBytes'].includes(k)&&Number.isSafeInteger(v)&&v>=0||k==='lastCompletedAt'&&utc(v))),
   projection,amqp320:closures};
@@ -48,3 +49,16 @@ export function snapshotValidationReport(current,ledger={}){return{readOnlyRemot
  selectableSelections:current.selectableSelections??null,blockedReasons:current.blockedReasons,workers:current.workers,
  historical:{lastValidation:lane(ledger.lastValidation?.lanes?.prematch),preFix:lane(ledger.distributionPreFixEvidence?.current?.lanes?.prematch)},
  evidenceLimit:'One current persisted observation compared with the saved previous sample. ACK delta is unknown across session changes. Stored selections and timestamps alone do not prove feed recovery. No provider requests or worker restart.'};}
+
+export function briefRecoveryTimeline(report){
+ const rows=report.timeline?.records||[],persists=rows.filter(r=>r.operation==='file.persist');
+ const correlations=rows.filter(r=>r.amqpCode===320&&r.lane==='prematch').map(close=>{
+  const end=Date.parse(close.loggedAtUTC),snapshots=rows.filter(r=>r.lane==='prematch'&&r.status==='full_spool_progress'&&Date.parse(r.loggedAtUTC)<=end);
+  const nearest=persists.map((r,i)=>({...r,maxEventLoopWindowApprox:{fromUTC:i?persists[i-1].lastCompletedAtUTC||persists[i-1].loggedAtUTC:null,toUTC:r.lastCompletedAtUTC||r.loggedAtUTC},distanceMs:Math.abs(Date.parse(r.loggedAtUTC)-end)})).filter(r=>r.distanceMs<=20000).sort((a,b)=>a.distanceMs-b.distanceMs).slice(0,3);
+  return{closeAtUTC:close.loggedAtUTC,amqpCode:320,lastSnapshotProgress:snapshots.at(-1)||null,nearbySharedWorkerPersistence:nearest};
+ });
+ return{capturedAtUTC:report.capturedAtUTC,readOnlyRemote:true,providerRequests:0,workerRestarted:false,posnetChanged:false,
+  feedObservations:report.feedObservations,selectableSelections:report.selectableSelections,correlations,
+  logRead:report.timeline?.reads,recordsMayBeTruncated:report.timeline?.recordsMayBeTruncated,
+  interpretation:'Nearby timing is correlation, not a proven cause. Event-loop histogram is reset after each emitted persistence log; window boundaries are approximate log/completion times, not an exact stall duration. First window begins before the collected records. No wire heartbeat trace is recorded.'};
+}

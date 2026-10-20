@@ -1,6 +1,6 @@
 import {writeProtectedReport} from './distribution-validation.mjs';
 const utc=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$/.test(v)?v:undefined;
-const safeReason=v=>typeof v==='string'&&/^[A-Z_]+$/.test(v)?v:'EVIDENCE_NOT_AVAILABLE';
+const safeReason=v=>typeof v==='string'&&/^[A-Z][A-Z0-9_]*$/.test(v)?v:'EVIDENCE_NOT_AVAILABLE';
 export function recoverySummary(ledger){
  const current=ledger.lastValidation||{},started=ledger.steps.throughput_upgrade?.result?.startedAtUTC;
  const fresh=!!started&&current.validationSinceUTC===started;

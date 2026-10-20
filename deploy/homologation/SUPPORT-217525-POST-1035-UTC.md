@@ -1,0 +1,9 @@
+Hello, this supplements the evidence already sent to ticket #217525, using observations AFTER the worker update at **2026-10-20T10:35:41.407227Z**.
+
+PreMatch **4511** received AMQP **320 / connection_forced** at **10:39:48.856Z** (session started **10:35:47.550Z**) and **10:42:18.636Z** (session started **10:40:04.232Z**). A third session started at **10:42:34.314Z**. Distribution was observed OFF at **10:42:41.848Z**, Start returned at **10:42:42.232Z**, and ON was confirmed at **10:42:44.704Z**, after **2,472 ms**, with one consumer and queue depth zero at that instant. This does not establish queue depth at either earlier closure.
+
+The snapshot download coordinator completed at **10:39:03.938Z**; this confirms only the HTTP download operation, not complete snapshot validation/application. No current PreMatch baseline or selectable selections have been verified. We are correlating local parsing/persistence timing separately and do not claim provider fault.
+
+InPlay **4510** remained connected in the session started **10:35:47.550Z**, with a snapshot at **10:40:50.586Z**, 96 ACKs and last control update **10:42:49.552Z**, but no decoded data or market update timestamp and zero selectable selections. This adds to the previously reported control-only message evidence.
+
+Please provide the exact broker close initiator/reason for the two PreMatch closures, including any missed-heartbeat detection, ready/unacknowledged counts and delivery/ACK rates at those times, and any distribution shutdown action. Separately, please confirm event/market delivery for InPlay 4510 and current active fixture IDs. A post-reconnect queue depth of zero, AMQP 320 alone, stored prices and ACK totals do not prove a root cause or successful recovery. No additional deployment, queue purge, subscription change or retry restart is requested by this message.

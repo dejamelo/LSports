@@ -8,7 +8,7 @@ import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:net';
 import {spawn} from 'node:child_process';
-import {snapshotValidationReport} from './snapshot-validation-report.mjs';
+import {snapshotValidationReport,briefRecoveryTimeline} from './snapshot-validation-report.mjs';
 import {validateDistribution} from './distribution-validation.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(process.env.ADL_REPO_ROOT||path.resolve(here,'../..')),runtimeRef=process.env.ADL_RUNTIME_REF||'HEAD';
@@ -124,7 +124,7 @@ export async function run(args){
     const {writeProtectedReport}=await import('./distribution-validation.mjs');
     const reportFile=path.join(folder,`snapshot-validation-${pid}-${parent}.json`);
     await writeProtectedReport(reportFile,JSON.stringify(report,null,2));
-    emit({stage,status:'collected',...report,reportFile});return;
+    emit({stage,status:'collected',...(process.env.ADL_REPORT_BRIEF==='1'?briefRecoveryTimeline(report):report),reportFile});return;
    }
    if(['--repair-snapshot','--snapshot-report'].includes(args[4])){
     stage='snapshot_capacity_repair';
