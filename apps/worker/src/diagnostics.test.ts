@@ -540,6 +540,6 @@ test('distribution response Message is never an activation boolean or an unsanit
 
 test('distribution already on does not POST start or stop; non-boolean status is rejected',async()=>{
  for(const value of [true,'false']){const requests:string[]=[];const server=await httpFixture(async(req,res)=>{for await(const _ of req){}requests.push(req.url||'');res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:{IsDistributionOn:value}}));});
-  try{const call=clients(config(),{snapshotUrl:server.url,customersUrl:server.url}).startDistribution();if(value===true)await call;else await assert.rejects(call);assert.deepEqual(requests,['/Package/GetDistributionStatus']);}finally{await server.close();}
+  try{const call=clients(config(),{snapshotUrl:server.url,customersUrl:server.url}).startDistribution();if(value===true)await call;else await assert.rejects(call);assert.deepEqual(requests,value===true?['/Package/GetDistributionStatus','/Package/GetDistributionStatus']:['/Package/GetDistributionStatus']);}finally{await server.close();}
  }
 });

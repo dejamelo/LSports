@@ -314,8 +314,9 @@ export function clients(
     },
     async startDistribution() {
       let status = await this.distributionStatus();
+      let startMessage:'activated'|'already_active'|'missing'|'unrecognized'='already_active';
       if (!status.isDistributionOn) {
-        const startMessage=await operation("distribution.start", "http", async () => {
+        startMessage=await operation("distribution.start", "http", async () => {
           const response=await distribution.startDistribution(StartResponseBody);
           // SDK StartResponseBody has Message, NOT IsDistributionOn. Keep only
           // official enum classifications: never echo an arbitrary provider message.
@@ -324,8 +325,12 @@ export function clients(
             response?.message==null?'missing' as const:'unrecognized' as const;
         });
         startReturnedAt=Date.now();startReturnedMonotonic=performance.now();recordDistribution({stage:'start_response',observedAtUTC:new Date(startReturnedAt).toISOString(),startMessage,propagationDelayMs:DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS});
-        // Official DistributionUtil.start waits for propagation BEFORE checkStatus.
-        // The existing session delay runs after this method and cannot replace it.
+      }else{
+        startReturnedAt=Date.now();startReturnedMonotonic=performance.now();recordDistribution({stage:'start_response',observedAtUTC:new Date(startReturnedAt).toISOString(),startMessage:'already_active',propagationDelayMs:DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS});
+      }
+        // We call the SDK low-level HTTP client (no wait), not DistributionUtil.start.
+        // Mirror its 2000ms wait ONCE, including already-active distribution; session
+        // never adds a second delay. Then verify raw Body and SDK boolean together.
         await new Promise<void>(resolve=>setTimeout(resolve,DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS));
         status = await this.distributionStatus();
         if (!status?.isDistributionOn)
@@ -338,7 +343,6 @@ export function clients(
             message:
               "La distribución sigue apagada después de solicitar inicio.",
           });
-      }
     },
   };
 }

@@ -11,3 +11,17 @@ test('lane startup failure stops on first observation and includes live diagnost
  assert.equal(calls,1);assert.equal(waits,0);assert.equal(ledger.steps.local_exit.status,'ok');assert.equal(output[0].prematch.diagnostic.operation,'amqp.prefetch');assert.equal(output.at(-1).reason,'CURRENT_LANE_ERROR_SEE_DIAGNOSTIC');assert.equal(output.at(-1).snapshotsVerified,false);
 });
 test('no ACK in an idle lane is absence of delivery evidence, not proof of a failed subscription',()=>{const s=status();s.lanes.prematch.consumerProgress.acknowledgedMessages=0;assert.equal(fullRecoveryResult(s).consumerActiveObserved,false);assert.equal(fullRecoveryResult(s).reason,'NO_CURRENT_ACK_EVIDENCE');});
+
+test('supplier confirmation requires distribution, registered consumers and current market updates in both lanes',()=>{
+ const s=status(),options={requireSupplierOrder:true};
+ assert.equal(fullRecoveryResult(s,options).reason,'DISTRIBUTION_ACTIVE_NOT_VERIFIED');
+ for(const lane of Object.values(s.lanes))lane.distributionObservations=[{stage:'after_propagation',observedAtUTC:end,bodyIsDistributionOn:true,sdkIsDistributionOn:true}];
+ assert.equal(fullRecoveryResult(s,options).reason,'CONSUMER_REGISTRATION_NOT_VERIFIED');
+ for(const lane of Object.values(s.lanes))lane.consumerProgress={...lane.consumerProgress,active:true,registeredAt:end};
+ assert.equal(fullRecoveryResult(s,options).reason,'NO_CURRENT_MARKET_UPDATE_EVIDENCE');
+ for(const lane of Object.values(s.lanes))lane.updates={lastControlDecodedAt:end};
+ assert.equal(fullRecoveryResult(s,options).reason,'NO_CURRENT_MARKET_UPDATE_EVIDENCE');
+ for(const lane of Object.values(s.lanes))lane.updates.lastMarketDecodedAt=end;
+ assert.equal(fullRecoveryResult(s,options).reason,'FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED');
+ s.lanes.inplay.consumerProgress.active=false;assert.equal(fullRecoveryResult(s,options).consumerRegistrationObserved,false);
+});

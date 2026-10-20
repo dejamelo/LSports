@@ -417,7 +417,7 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
         source=feed.get('connections',{}).get(lane,{})
         lanes[lane]={k:source.get(k) for k in fields}
         progress=source.get('consumerProgress') or {};full=source.get('fullSnapshot') or {}
-        lanes[lane]['consumerProgress']={k:v for k,v in progress.items() if k=='acknowledgedMessages' and type(v) is int and 0<=v<=10**12 or k=='lastAckAt' and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
+        lanes[lane]['consumerProgress']={k:v for k,v in progress.items() if k=='active' and type(v) is bool or k=='acknowledgedMessages' and type(v) is int and 0<=v<=10**12 or k in ('lastAckAt','registeredAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
         lanes[lane]['fullSnapshot']={k:v for k,v in full.items() if k=='method' and v=='disk_spool_two_pass' or k in ('rows','bytes','ackedDuringRecovery') and type(v) is int and 0<=v<=2**40 or k in ('startedAt','completedAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
         lanes[lane]['distributionObservations']=[safe_distribution_observation(o) for o in source.get('distributionObservations',[])[-3:] if isinstance(o,dict)]
         lane_coverage=feed.get('coverage',{}).get(lane,{}) or {}

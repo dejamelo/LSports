@@ -202,7 +202,20 @@ export async function session(
   await save();
   const api = dependencies.clientFactory(pkg, config);
   if(signal.aborted)return;
-  const connection = await connectMq(pkg, dependencies.connect);
+  // LSports #217525: OFF distribution rejects AMQP authentication (403).
+  // provider.startDistribution owns the ONE 2000ms SDK-contract propagation wait
+  // and verifies Body.IsDistributionOn before we open any AMQP connection.
+  try{await api.startDistribution();}finally{
+    const observations=api.distributionObservations?.();
+    if(observations){state.set(lane,{distributionObservations:observations});await save();}
+  }
+  if(signal.aborted){await api.stopDistribution?.();state.set(lane,{phase:"stopped"});await save();return;}
+  let connection:Awaited<ReturnType<typeof connectMq>>;
+  try{connection=await connectMq(pkg, dependencies.connect);}catch(error){
+    // Distribution must not remain ON without our consumer after failed connect.
+    try{await api.stopDistribution?.();}catch(stopError){console.error(JSON.stringify({lane,status:'failed',...describeFailure(stopError,'distribution.stop','http')}));}
+    throw error;
+  }
   const transportAbort=new AbortController();
   let failure: unknown;
   let closed = false;
@@ -211,6 +224,7 @@ export async function session(
     if (closed) return;
     failure = error;
     closed = true;transportAbort.abort();
+    state.set(lane,{consumerProgress:{...state.connections[lane].consumerProgress!,active:false}});
     const diagnostic = describeFailure(error, "amqp.connection", "amqp");
     recordSessionEnd(state,lane,diagnostic);
     state.set(lane, {
@@ -255,7 +269,7 @@ export async function session(
     channel.on("close", () => queueMicrotask(() => fail(transportEnd("channel_closed"))));
     await operation("amqp.prefetch", "amqp", () => channel.prefetch(100));
     let acknowledgedMessages=0;
-    const ackDelivery=(msg:ConsumeMessage)=>{channel.ack(msg);state.set(lane,{consumerProgress:{acknowledgedMessages:++acknowledgedMessages,lastAckAt:new Date().toISOString()}});};
+    const ackDelivery=(msg:ConsumeMessage)=>{channel.ack(msg);state.set(lane,{consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages:++acknowledgedMessages,lastAckAt:new Date().toISOString()}});};
     const pendingAcks:ConsumeMessage[]=[];const pendingMetadata=new Map<ConsumeMessage,FeedMessageMetadata>();
     const processMessage = async (msg: ConsumeMessage,commit=true) => {
       if (closed) return;
@@ -372,12 +386,9 @@ export async function session(
         { noAck: false, exclusive: true },
       ),
     );
-    // Install the exclusive durable consumer BEFORE enabling supplier distribution.
-    // Queue delivery and persist-before-ACK continue throughout activation and recovery.
-  try{await api.startDistribution();}finally{
-    const observations=api.distributionObservations?.();
-    if(observations){state.set(lane,{distributionObservations:observations});await save();}
-  }
+    state.set(lane,{consumerProgress:{...state.connections[lane].consumerProgress!,registeredAt:new Date().toISOString(),active:true}});
+    await save();
+    // Exclusive consumer is live before snapshot/inventory and drains continuously.
     if(closed)throw failure;
     if(signal.aborted){abort();return;}
     const nextDue: Record<string, number> = { "snapshot.events": 0,

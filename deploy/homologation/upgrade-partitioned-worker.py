@@ -10,7 +10,7 @@ def partition_base(meta):
 def upgrade_partitioned(request):
     stage='partitioned_upgrade.input';backup=None
     try:
-        require(os.geteuid()==0,'ROOT_REQUIRED');phase=request['phase'];require(phase in ('prepare','activate'),'INVALID_UPGRADE_PHASE')
+        require(os.geteuid()==0,'ROOT_REQUIRED');phase=request['phase'];require(phase in ('prepare','activate','rollback'),'INVALID_UPGRADE_PHASE')
         files=request['files'];require(set(files)==PARTITION_FILES,'UPGRADE_FILE_LIST_UNVERIFIED')
         require(all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'UPGRADE_SOURCE_SIZE_LIMIT')
         digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt_path=SECURE/('partitioned-upgrade-'+digest[:24]+'.json')
@@ -60,15 +60,67 @@ def upgrade_partitioned(request):
             check="""import{mkdtemp,writeFile,rm}from'node:fs/promises';import{walkSnapshot,convertSnapshotRow}from'/app/apps/worker/src/full-snapshot.ts';const dir=await mkdtemp('/tmp/full-offline-');try{const p=dir+'/response';await writeFile(p,JSON.stringify({Body:[{FixtureId:11,Fixture:{Status:1},Markets:[]}],Header:{HttpStatusCode:200}}));let n=0;await walkSnapshot(p,async r=>{if(convertSnapshotRow(r).fixtureId!==11)throw Error();n++});if(n!==1)throw Error();await writeFile(p,'{"Body":[],"Header":{"Errors":["isolated"]}}');let rejected=false;try{await walkSnapshot(p,async()=>{})}catch{rejected=true}if(!rejected)throw Error();console.log('full-recovery-offline-ok')}finally{await rm(dir,{recursive:true,force:true})}"""
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--import','tsx','--input-type=module','-e',check],timeout=30)
             require(b'full-recovery-offline-ok' in output,'FULL_RECOVERY_OFFLINE_TEST_FAILED');progress['fullRecoveryVerified']=True;save(progress)
+        if request.get('supplierOrder') and not progress.get('supplierOrderVerified'):
+            stage='partitioned_upgrade.offline_supplier_order'
+            check="import {session} from '/app/apps/worker/src/connected.ts';import {TradeState} from '/app/apps/worker/src/state.ts';import {EventEmitter} from 'node:events';for(const lane of ['prematch','inplay']){const order=[],state=new TradeState(),abort=new AbortController();let ready=false;const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(){order.push('consume');return{consumerTag:'offline'};}});const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel},async close(){order.push('close');connection.emit('close');}});const api={async startDistribution(){order.push('start');await new Promise(r=>setTimeout(r,5));ready=true;order.push('status_on')},async stopDistribution(){order.push('stop')},async distributionStatus(){return{isDistributionOn:true}},async snapshot(){order.push('snapshot');return[]},async catalog(){return[]}};const pkg={lane,packageId:lane==='prematch'?4511:4510,queue:'unused',hostname:'unused',vhost:'unused',username:'offline',password:'offline',port:5672,tls:false};await session(pkg,{packages:[pkg],staleMs:90000,recoveryMs:300000},state,async()=>{if(state.connections[lane].phase==='connected')abort.abort()},abort.signal,{clientFactory:()=>api,connect:async()=>{if(!ready)throw Error('connect before propagation');order.push('connect');return connection}});if(order.slice(0,5).join(',')!=='start,status_on,connect,consume,snapshot'||order.indexOf('stop')>order.indexOf('close'))throw Error('supplier sequence wrong')}console.log('supplier-order-offline-ok');"
+            output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--import','tsx','--input-type=module','-e',check],timeout=30)
+            require(b'supplier-order-offline-ok' in output,'SUPPLIER_ORDER_OFFLINE_TEST_FAILED');progress['supplierOrderVerified']=True;save(progress)
+        if request.get('supplierOrder') and progress.get('supplierOrderVerified'):
+            # Image rollback preserves every non-worker definition and all current data.
+            # Never start the known pre-fix order automatically after restoring it.
+            rollback=backup/'rollback.worker.private.json'
+            if not rollback.exists():
+                old_worker=json.loads((backup/'model.before.private.json').read_bytes())['services']['worker']
+                private(rollback,json.dumps({'services':{'worker':old_worker}}).replace('$','$$').encode())
         if phase=='prepare':
-            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlineType38Verified=True,offlinePartitionsVerified=True,offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
+            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlineType38Verified=True,offlinePartitionsVerified=True,offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
         stage='partitioned_upgrade.fresh_mac_gate'
         handoff=request['handoff'];audit=handoff['audit'];require(audit['status']=='ok' and audit['workerLockAbsent'] and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(request['freshAuditAt'].endswith('Z') and -5<=time.time()-datetime.datetime.fromisoformat(request['freshAuditAt'].replace('Z','+00:00')).timestamp()<60,'MAC_REAUDIT_EXPIRED')
         digest_handoff=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();migration_receipt=SECURE/('cutover-'+digest_handoff+'.json');migration=json.loads(migration_receipt.read_bytes());require(migration.get('startRequestedAtUTC'),'MIGRATION_NOT_COMPLETE')
         saved_model=json.loads((backup/'model.before.private.json').read_bytes());expected=copy.deepcopy(saved_model);expected['services']['worker']['image']=progress['image'];expected['services']['worker']['environment']['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT']='true'
-        current=model(partition_base(meta));require(current==saved_model or current==expected,'DEPLOYMENT_CHANGED_SINCE_UPGRADE_PREPARE')
+        rollback_expected=copy.deepcopy(expected);rollback_expected['services']['worker']['image']=progress['baseImage']
+        current=model(partition_base(meta));require(current==saved_model or current==expected or phase=='rollback' and current==rollback_expected,'DEPLOYMENT_CHANGED_SINCE_UPGRADE_PREPARE')
         image_id=json.loads(run(['docker','image','inspect',progress['image']]))[0]['Id']
+        if phase=='rollback':
+            stage='partitioned_upgrade.rollback'
+            rollback=backup/'rollback.worker.private.json'
+            require(progress.get('supplierOrderVerified') and rollback.is_file() and not rollback.is_symlink(),'ROLLBACK_NOT_PREPARED')
+            workers=states('worker')
+            if progress['phase']=='rolled_back_stopped':
+                require(not any(w['running'] for w in workers),'ROLLED_BACK_WORKER_UNEXPECTEDLY_RUNNING')
+                emit(operation='cutover.aws',stage='partitioned_upgrade.rollback',status='ok',reused=True,workerStarted=False,oldWorkerKeptStopped=True,posnetChanged=False);return 0
+            if any(w['running'] for w in workers):
+                require(len(workers)==1 and progress.get('rollbackStopRequested') is not True,'ROLLBACK_STOP_PENDING_NO_MORE_SIGNALS')
+                info=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
+                require(info['Image']==image_id,'ROLLBACK_WORKER_IDENTITY_CHANGED')
+                environment=info['Config']['Env'];require(all(isinstance(v,str) and '\n' not in v and '\r' not in v for v in environment),'STOP_ENV_FORMAT_UNVERIFIED')
+                env_file=backup/'rollback-stop.private.env';env_content=('\n'.join(environment)+'\n').encode()
+                if env_file.exists():require(env_file.is_file() and not env_file.is_symlink() and env_file.stat().st_mode&0o077==0 and env_file.read_bytes()==env_content,'ROLLBACK_ENV_CHANGED')
+                else:private(env_file,env_content)
+                code="import{loadConfig}from'/app/apps/worker/src/config.ts';import{clients}from'/app/apps/worker/src/provider.ts';for(const pkg of loadConfig().packages){await clients(pkg,loadConfig()).stopDistribution()}console.log('planned-distribution-stop-ok');"
+                output=run(['docker','run','--rm','--network','container:'+workers[0]['id'],'--memory','256m','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--env-file',str(env_file),'-e','NODE_OPTIONS=--max-old-space-size=128','--entrypoint','node',progress['image'],'--import','tsx','--input-type=module','-e',code],timeout=90,log=backup/'rollback-stop.private.log')
+                require(b'planned-distribution-stop-ok' in output,'ROLLBACK_DISTRIBUTION_STOP_NOT_CONFIRMED')
+                progress['rollbackStopRequested']=True;save(progress)
+                run(['docker','kill','--signal','SIGTERM',workers[0]['id']])
+                deadline=time.time()+90
+                while time.time()<deadline and any(c['running'] for c in states('worker')):time.sleep(1)
+            require(not any(c['running'] for c in states('worker')),'ROLLBACK_GRACEFUL_STOP_PENDING_NO_MORE_SIGNALS')
+            # Use an override containing only the old image. Existing overrides,
+            # data and journals remain authoritative; never restore old data.
+            old_overlay=SECURE/('compose.worker-rollback-'+digest[:24]+'.json')
+            content=json.dumps({'services':{'worker':{'image':progress['baseImage']}}}).encode()
+            if old_overlay.exists():require(old_overlay.is_file() and not old_overlay.is_symlink() and old_overlay.read_bytes()==content,'ROLLBACK_OVERLAY_CHANGED')
+            else:private(old_overlay,content)
+            candidate=partition_base(meta)+['-f',str(old_overlay)]
+            reverted=copy.deepcopy(current);reverted['services']['worker']['image']=progress['baseImage']
+            require(model(candidate)==reverted,'ROLLBACK_NON_WORKER_CHANGE_DETECTED')
+            meta['composeOverrides']=[*meta.get('composeOverrides',[]),str(old_overlay)]
+            temporary=SECURE/(receipt_path.name+'.rollback.tmp');private(temporary,json.dumps(meta).encode());durable_replace(temporary,SECURE/'deployment.json')
+            run(partition_base(meta)+['--profile','feed-consumer','create','--no-deps','--no-build','--pull','never','worker'],timeout=90,log=backup/'rollback.private.log')
+            progress['phase']='rolled_back_stopped';save(progress)
+            emit(operation='cutover.aws',stage='partitioned_upgrade.rollback',status='ok',workerStarted=False,oldImageRestored=True,oldWorkerKeptStopped=True,dataRestored=False,posnetChanged=False);return 0
+        require(progress['phase']!='rolled_back_stopped','ROLLED_BACK_WORKER_REQUIRES_REVIEW')
         if progress['phase'] in ('start_requested','running'):
             workers=states('worker');require(len(workers)==1 and workers[0]['running'],'UPGRADED_WORKER_NOT_RUNNING_NO_BLIND_RESTART');current_container=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
             require(current_container['Image']==image_id and snapshot_memory_bytes(current_container['HostConfig']['Memory'])==4294967296,'UPGRADED_CONTAINER_MISMATCH')
