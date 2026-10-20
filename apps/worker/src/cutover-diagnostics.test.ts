@@ -63,3 +63,20 @@ test('suspended concurrently is not a second consumer; running supervisor and st
  assert.equal(processMatches('12811 12809 T node --import tsx apps/worker/src/index.ts').length,1);
  assert.equal(processMatches('12811 12809 Z node --import tsx apps/worker/src/index.ts').length,0);
 });
+
+test('Mac git show mentioning worker source is not a consumer; independently verify the node parent',()=>fixture(async(_dir,state)=>{
+ const ps='49460 49384 T /Library/Developer/CommandLineTools/usr/bin/git show b89f5df:apps/worker/src/index.ts\n49384 1 T node /tmp/run/deploy/homologation/complete-adl-cutover.mjs --pid 12811 --parent 12809 --durable-ingress-repair';
+ const comm='49460 /Library/Developer/CommandLineTools/usr/bin/git\n49384 /usr/local/bin/node';
+ const report=await diagnoseCutover({...options(state),ps:async()=>ps,executables:async()=>comm});
+ assert.equal(report.status,'ok');assert.equal(report.matchingWorkerProcesses,0);
+ const unknown=await diagnoseCutover({...options(state),ps:async()=>ps.replace('/tmp/run/deploy/homologation/complete-adl-cutover.mjs','/tmp/unknown.js'),executables:async()=>comm});
+ assert.equal(unknown.status,'blocked');assert.ok(unknown.blockers.some(b=>b.reason==='PROCESS_IDENTITY_INCONCLUSIVE'));
+ assert.deepEqual((unknown.processes as any).matches,[{pid:49384,parentPid:1,kind:'identity_inconclusive'}]);
+}));
+test('Git and worker references in arguments cannot hide real entrypoints, dynamic loaders or failed executable lookup',()=>fixture(async(_dir,state)=>{
+ for(const args of ['node --import tsx apps/worker/src/index.ts','node /repo/node_modules/tsx/dist/cli.mjs apps/worker/src/index.ts','node --eval=consumer apps/worker/src/index.ts','node --import apps/worker/src/index.ts /tmp/deploy/homologation/complete-adl-cutover.mjs']){
+  const r=await diagnoseCutover({...options(state),ps:async()=>`12811 1 T ${args}`,executables:async()=>'12811 /usr/local/bin/node'});assert.equal(r.status,'blocked');assert.equal(r.matchingWorkerProcesses,1);
+ }
+ const mismatched=processMatches('49460 1 T git show apps/worker/src/index.ts','49460 /usr/local/bin/node');assert.equal(mismatched[0].kind,'identity_inconclusive');
+ const r=await diagnoseCutover({...options(state),executables:async()=>{throw Error('PRIVATE');}});assert.equal(r.status,'blocked');assert.ok(r.blockers.some(b=>b.reason==='PROCESS_EXECUTABLE_QUERY_FAILED'));assert.ok(!JSON.stringify(r).includes('PRIVATE'));
+}));

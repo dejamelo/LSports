@@ -12,6 +12,7 @@ import {snapshotValidationReport,briefRecoveryTimeline} from './snapshot-validat
 import {validateDistribution} from './distribution-validation.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(process.env.ADL_REPO_ROOT||path.resolve(here,'../..')),runtimeRef=process.env.ADL_RUNTIME_REF||'HEAD';
+const auditEntrypoint=path.resolve(here,'../../scripts/audit-aws-cutover.ts');
 const emit=value=>console.log(JSON.stringify({operation:'cutover.resumable',...value}));
 export async function step(ledger,name,save,action){
  if(ledger.steps[name]?.status==='ok'){emit({stage:name,status:'reused'});return ledger.steps[name].result;}
@@ -84,7 +85,7 @@ export async function run(args){
    if(!health.ready)throw Error('API_HEALTH_UNRESOLVED_SEE_PROTECTED_REPORT_NO_RESTART');
    if(!health.workerInstallation?.verified)throw Error('INSTALLED_WORKER_CORRECTIONS_UNVERIFIED_NO_RESTART');
    stage='validation_resume_gate';
-   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
+   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);
    const mac=rows.find(r=>r.operation==='cutover.audit');
    if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
@@ -100,7 +101,7 @@ export async function run(args){
    stage='validation_resume_gate';
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
    if(!['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
-   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
+   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);
    const mac=rows.find(r=>r.operation==='cutover.audit');if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
    if(args[4]==='--startup-report'){
@@ -204,7 +205,7 @@ export async function run(args){
     if(fullMode&&prepared.offlineFullRecoveryVerified!==true)throw Error('FULL_RECOVERY_OFFLINE_UNVERIFIED');
     if(distributionMode&&prepared.offlinePropagationVerified!==true)throw Error('DISTRIBUTION_PROPAGATION_TEST_UNVERIFIED');
     ledger.steps[throughputMode?'throughput_image':nullableMode?'nullable_markets_image':supplierMode?'supplier_order_image':fullMode?'full_image':distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
-    const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);const fresh=freshRows.find(r=>r.operation==='cutover.audit');
+    const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);const fresh=freshRows.find(r=>r.operation==='cutover.audit');
     if(fresh?.status!=='ok'||fresh.matchingWorkerProcesses!==0||fresh.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     if(['--supplier-order-rollback','--nullable-markets-rollback','--recovery-throughput-rollback'].includes(args[4])){const result=await remote('upgrade_partitioned',{phase:'rollback',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});ledger.steps[throughputMode?'throughput_rollback':nullableMode?'nullable_markets_rollback':'supplier_order_rollback']={status:'ok',result};await save();return;}
     const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});
@@ -232,7 +233,7 @@ export async function run(args){
    const result=rows.find(r=>r.operation==='cutover.protected'&&r.stage==='complete'&&r.status==='ok');if(!result)throw Error('MAC_EXIT_NOT_CONFIRMED');return result;
   });
   const audit=async()=>{
-   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);const result=rows.find(r=>r.operation==='cutover.audit');
+   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);const result=rows.find(r=>r.operation==='cutover.audit');
    if(result?.status!=='ok'||result.matchingWorkerProcesses!==0||result.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');return result;
   };
   await audit();

@@ -12,19 +12,46 @@ export function safeError(error:unknown) {
  const allowed=['ENOENT','EACCES','EPERM','EISDIR','ELOOP','ERR_CHILD_PROCESS_STDIO_MAXBUFFER'];
  return typeof e?.code==='string'&&allowed.includes(e.code)?e.code:typeof e?.code==='number'?'PROCESS_EXIT_NONZERO':'UNEXPECTED_ERROR';
 }
-export function processMatches(text:string){
- return text.split('\n').flatMap(line=>{
+// Inspect the executable and the executed script, never a substring in arbitrary arguments.
+export function processMatches(text:string, executableText?:string){
+ const executables=new Map((executableText||'').split('\n').flatMap(line=>{const m=line.match(/^\s*(\d+)\s+(.+?)\s*$/);return m?[[Number(m[1]),basename(m[2])] as const]:[];}));
+ const rows=text.split('\n').flatMap(line=>{
   const row=line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);if(!row)return [];
   const withState=row[3].match(/^([RSDTtZXIWU][A-Za-z+<NsWTsl-]{0,11})\s+(.+)$/);
-  const state=withState?.[1];const args=withState?.[2]??row[3];
-  if(state?.startsWith('Z'))return [];
-  // A suspended concurrently supervisor contains its child command as text, but is not a consumer.
-  // Running supervisors remain a blocker (they could restart a child).
-  if(state?.startsWith('T')&&/^(?:\S*\/)?node(?:\s|$)/.test(args)&&/(?:^|\/)(?:concurrently\/dist\/bin\/concurrently\.[cm]?js|concurrently\/dist\/bin\/concurrently|node_modules\/\.bin\/concurrently)(?:\s|$)/.test(args))return [];
-  const kind=/apps\/worker\/src\/index\.[tj]s/.test(args)?'worker_entrypoint':
-   /scripts\/homologation-worker\.[tj]s/.test(args)?'homologation_entrypoint':
-   /npm run dev:worker/.test(args)?'worker_supervisor':undefined;
-  return kind?[{pid:Number(row[1]),parentPid:Number(row[2]),kind}]:[];
+  const args=withState?.[2]??row[3],tokens=args.match(/"[^"\n]*"|'[^'\n]*'|[^\s]+/g)?.map(t=>t.replace(/^(?:"(.*)"|'(.*)')$/,'$1$2'))||[];
+  return [{pid:Number(row[1]),parentPid:Number(row[2]),state:withState?.[1],args,tokens,exe:executables.get(Number(row[1]))}];
+ });
+ const mentions=(args:string)=>/apps\/worker(?:\/|\s|$)|scripts\/homologation-worker\.[tj]s|(?:dev|start):worker|@lsports\/worker/.test(args);
+ const linkedParents=new Set(rows.filter(r=>mentions(r.args)).map(r=>r.parentPid));
+ return rows.flatMap(row=>{
+  if(row.state?.startsWith('Z'))return [];
+  const suspicious=mentions(row.args)||linkedParents.has(row.pid);
+  if(!suspicious)return [];
+  const uncertain=()=>[{pid:row.pid,parentPid:row.parentPid,kind:'identity_inconclusive'}];
+  const first=basename(row.tokens[0]||'');
+  if(executableText!==undefined&&(!row.exe||row.exe!==first))return uncertain();
+  // Git can read worker source; it cannot consume AMQP. Require independent comm evidence.
+  if(row.exe==='git'&&first==='git')return row.parentPid>1&&!rows.some(r=>r.pid===row.parentPid)?[{pid:row.parentPid,parentPid:0,kind:'identity_inconclusive'}]:[];
+  const runtime=row.exe||first;
+  if(!['node','nodejs','tsx','ts-node','npm','npx'].includes(runtime))return uncertain();
+  let tokens=row.tokens.slice(1);
+  const valueFlags=new Set(['--import','--loader','--experimental-loader','--require','-r','--conditions','-C','--env-file','--env-file-if-exists','--tsconfig']);
+  while(tokens[0]?.startsWith('-')){
+   const flag=tokens.shift()!;
+   if(['-e','--eval','-p','--print'].includes(flag)||/^--(?:eval|print)=/.test(flag))return uncertain();
+   if(mentions(flag))return uncertain();
+   if(valueFlags.has(flag)){if(!tokens.length||mentions(tokens[0]))return uncertain();tokens.shift();}
+   else if(!flag.includes('=')&&!['--no-warnings','--enable-source-maps','--trace-warnings','--watch','--watch-preserve-output','--experimental-strip-types'].includes(flag))return uncertain();
+  }
+  let entry=tokens.shift()||'';
+  if(/(?:^|\/)(?:tsx\/dist\/cli\.[cm]?js|node_modules\/\.bin\/tsx)$/.test(entry)){entry=tokens.shift()||'';}
+  if(/(?:^|\/)apps\/worker\/(?:src|dist)\/index\.[tj]s$/.test(entry))return [{pid:row.pid,parentPid:row.parentPid,kind:'worker_entrypoint'}];
+  if(/(?:^|\/)scripts\/homologation-worker\.[tj]s$/.test(entry))return [{pid:row.pid,parentPid:row.parentPid,kind:'homologation_entrypoint'}];
+  if(/(?:^|\/)(?:concurrently\/dist\/bin\/concurrently(?:\.[cm]?js)?|node_modules\/\.bin\/concurrently)$/.test(entry))return row.state?.startsWith('T')?[]:[{pid:row.pid,parentPid:row.parentPid,kind:'worker_supervisor'}];
+  if((['npm','npx'].includes(runtime)||/npm-cli\.js$/.test(entry))&&tokens.some(t=>/^(?:dev|start):worker$/.test(t)))return [{pid:row.pid,parentPid:row.parentPid,kind:'worker_supervisor'}];
+  const knownTool=/(?:^|\/)deploy\/homologation\/(?:complete-adl-cutover|resumable-adl-cutover)\.mjs$|(?:^|\/)scripts\/(?:audit-aws-cutover|diagnose-cutover)\.ts$/.test(entry);
+  if(knownTool)return [];
+  return uncertain();
  });
 }
 async function jsonFile(path:string,maxBytes:number,admitMemory=false){
@@ -42,17 +69,21 @@ async function jsonFile(path:string,maxBytes:number,admitMemory=false){
   catch(e){return {ok:false,reason:e instanceof SyntaxError?'INVALID_JSON':safeError(e),bytes:info.size};}
  }catch(e){return {ok:false,reason:safeError(e)};}
 }
-export async function diagnoseCutover(options:{state:string;refreshMs:number;now?:number;ps?:()=>Promise<string>;alive?:(pid:number)=>string}){
+export async function diagnoseCutover(options:{state:string;refreshMs:number;now?:number;ps?:()=>Promise<string>;executables?:()=>Promise<string>;alive?:(pid:number)=>string}){
  const now=options.now??Date.now();const state=options.state;const base=basename(state);const folder=dirname(state);
  const blockers:{stage:string;reason:string;item?:string}[]=[];
  const block=(stage:string,reason:string,item?:string)=>blockers.push({stage,reason,...(item?{item}:{})});
  const ps=options.ps??(async()=> (await promisify(execFile)('ps',['-axo','pid=,ppid=,state=,command='],{timeout:5000,maxBuffer:8*1024*1024})).stdout);
  const alive=options.alive??((pid:number)=>{try{process.kill(pid,0);return 'running';}catch(e){return (e as NodeJS.ErrnoException).code==='ESRCH'?'not_running':'unknown';}});
- const [processResult,listResult,checkpointResult]=await Promise.allSettled([ps(),readdir(folder),jsonFile(state,256*1024*1024,true)]);
+ const executableQuery=options.executables??(options.ps?async()=>undefined:async()=>(await promisify(execFile)('ps',['-axo','pid=,comm='],{timeout:5000,maxBuffer:8*1024*1024})).stdout);
+ const [processResult,listResult,checkpointResult,executableResult]=await Promise.allSettled([ps(),readdir(folder),jsonFile(state,256*1024*1024,true),executableQuery()]);
+ const executableText=executableResult.status==='fulfilled'?executableResult.value:undefined;
+ if(executableResult.status==='rejected')block('processes','PROCESS_EXECUTABLE_QUERY_FAILED');
  let processes:unknown={status:'unverified'};
  if(processResult.status==='fulfilled'){
-  const matches=processMatches(processResult.value);processes={status:'ok',matching:matches.length,matches};
-  if(matches.length)block('processes','WORKER_PROCESS_PRESENT');
+  const matches=processMatches(processResult.value,executableText);processes={status:'ok',matching:matches.length,matches};
+  if(matches.some(m=>m.kind!=='identity_inconclusive'))block('processes','WORKER_PROCESS_PRESENT');
+  if(matches.some(m=>m.kind==='identity_inconclusive'))block('processes','PROCESS_IDENTITY_INCONCLUSIVE');
  }else{const reason=safeError(processResult.reason);processes={status:'unverified',reason};block('processes',reason);}
  let names:string[]=[];
  if(listResult.status==='fulfilled')names=listResult.value;
@@ -117,7 +148,7 @@ export async function diagnoseCutover(options:{state:string;refreshMs:number;now
  }else if(!Number.isSafeInteger(options.refreshMs)||options.refreshMs<60000)block('cooldown','INVALID_REFRESH_INTERVAL');
  return {operation:'cutover.diagnose',status:blockers.length?'blocked':'ok',readOnly:true,providerRequests:0,workerStarted:false,
   nodeVersion:process.version,capturedAt:new Date(now).toISOString(),blockers,processes,locks,journals,checkpoint,
-  workerLockAbsent:lockNames.length===0,matchingWorkerProcesses:processResult.status==='fulfilled'?processMatches(processResult.value).length:null,
+  workerLockAbsent:lockNames.length===0,matchingWorkerProcesses:processResult.status==='fulfilled'?processMatches(processResult.value,executableText).length:null,
   journalCount:journalNames.length,refreshMs:Number.isFinite(options.refreshMs)?options.refreshMs:null,notBeforeUTC,
   note:'No commands, payloads, credentials or raw errors printed. All locks preserved, including dead owners. No lock reclamation, provider requests or AWS changes.'};
 }
