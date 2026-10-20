@@ -37,7 +37,7 @@ async function* tokens(file:string,max:number){let primitive='',quoted=false,esc
 }
 export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes){
  const it=tokens(file,limit)[Symbol.asyncIterator]();let batch:string[]=[],offset=0;
- const fill=async()=>{const next=await it.next();if(next.done)fail('truncated_json');batch=next.value;offset=0;};
+ const fill=async()=>{const next=await it.next();if(next.done)fail('truncated_json');batch=next.value as string[];offset=0;};
  const take=async()=>{if(offset>=batch.length)await fill();return batch[offset++];};
  const rawValue=async(first:string,max=limit)=>{let n=first.length;const pieces=[first];let depth=first==='{'||first==='['?1:0;
   while(depth){if(offset>=batch.length)await fill();while(offset<batch.length&&depth){const t=batch[offset++];n+=t.length;if(n>max)fail('item_size_limit');pieces.push(t);if(t==='{'||t==='[')depth++;if(t==='}'||t===']')depth--;if(depth>128)fail('nesting_limit');if(depth<0)fail('invalid_json');}}
@@ -79,7 +79,7 @@ export function convertSnapshotRow(raw:unknown):TradeEvent{
  if(row.fixtureId!==r.FixtureId||!row.fixture||row.markets?.some(m=>!Number.isSafeInteger(m.id)||!m.id||m.bets?.some(b=>b.id===undefined||b.id===null||String(b.id).trim()==='')))return fail('sdk_row_mismatch');return row;
 }
 export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string};
-export async function fullSnapshot(options:{url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
+export async function fullSnapshot(options:{timestamp?:number;url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
  const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};fullSnapshotMemory();options.assertOpen();
  const space=await statfs(options.directory);if(Number(space.bavail)*Number(space.bsize)<limits.responseBytes+512*MiB)fail('disk_headroom');
  const dir=await mkdtemp(join(options.directory,'.full-snapshot-'));const file=join(dir,'response.private.json');
@@ -87,7 +87,8 @@ export async function fullSnapshot(options:{url:string;credentials:{packageId:nu
  const timer=setTimeout(()=>{timedOut=true;abort.abort();},limits.totalMs);timer.unref();
  try{
   const url=new URL('/Prematch/GetEvents',options.url);if(url.username||url.password||!['http:','https:'].includes(url.protocol))fail('invalid_endpoint');
-  const body=JSON.stringify(new Mapper(options.credentials).map(new GetEventRequestDto({}),GetEventRequest));
+  if(options.timestamp!==undefined&&(!Number.isSafeInteger(options.timestamp)||options.timestamp<0||options.timestamp>99999999999))throw Error('INVALID_RECOVERY_TIMESTAMP_SECONDS');
+  const body=JSON.stringify(new Mapper(options.credentials).map(new GetEventRequestDto(options.timestamp===undefined?{}:{timestamp:options.timestamp}),GetEventRequest));
   progress('waiting_http');const download=()=>{progress('download');return new Promise<void>((resolve,reject)=>{
    const req=(url.protocol==='https:'?httpsRequest:httpRequest)(url,{method:'POST',signal,headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body),'Accept-Encoding':'gzip, deflate, br'}},res=>{
     httpStatus=res.statusCode;

@@ -281,7 +281,7 @@ def safe_feed_diagnostic(value):
     if not isinstance(value,dict):return {}
     out={}
     enums={'operation':FEED_OPERATIONS,'category':{'network','rate_limited','invalid_response','authentication_rejected','authentication_or_permission','permission_denied','response_limit','unexpected','configuration','invalid_message','unsupported_message','supplier_error'},
-       'reason':{'invalid_snapshot','connection_closed','channel_closed','consumer_cancelled','consumer_conflict','distribution_still_off','timeout','memory_budget_exceeded','response_size_limit','application_error','null_response_body','missing_response_body','sdk_conversion','sdk_validation','unknown_exception','provider_interrupted','unsupported_message_type'},
+       'reason':{'inbox_capacity_exceeded','invalid_snapshot','connection_closed','channel_closed','consumer_cancelled','consumer_conflict','distribution_still_off','timeout','memory_budget_exceeded','response_size_limit','application_error','null_response_body','missing_response_body','sdk_conversion','sdk_validation','unknown_exception','provider_interrupted','unsupported_message_type'},
        'networkCode':{'ECONNREFUSED','ECONNRESET','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','ECONNABORTED','EPIPE','ERR_NETWORK'},
        'errorType':{'unknown','axios','syntax','type','range','sdk_http','sdk_conversion','sdk_validation','error'},
        'clientCode':{'ECONNREFUSED','ECONNRESET','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','ECONNABORTED','EPIPE','ERR_NETWORK','ERR_BAD_RESPONSE','ERR_BAD_REQUEST','CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','UNABLE_TO_VERIFY_LEAF_SIGNATURE','ERR_TLS_CERT_ALTNAME_INVALID'},
@@ -327,7 +327,7 @@ def safe_feed_diagnostic(value):
                 if type(shape.get('flatEventsPresent')) is bool:safe_shape['flatEventsPresent']=shape['flatEventsPresent']
                 safe['entityShape']=safe_shape
             out['messageMetadata']=safe
-    for key,allowed in {'deliveryDisposition':{'requeue_requested','unacknowledged_until_close'},'retryPolicy':{'restart_required'}}.items():
+    for key,allowed in {'deliveryDisposition':{'requeue_requested','unacknowledged_until_close','retained_in_durable_inbox'},'retryPolicy':{'restart_required'}}.items():
         if isinstance(value.get(key),str) and value[key] in allowed:out[key]=value[key]
     if isinstance(value.get('coordinator'),dict):out['coordinator']=safe_coordinator(value['coordinator'])
     return out
@@ -580,7 +580,10 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
         progress=source.get('consumerProgress') or {};full=source.get('fullSnapshot') or {}
         lanes[lane]['consumerProgress']={k:v for k,v in progress.items() if k=='active' and type(v) is bool or k=='acknowledgedMessages' and type(v) is int and 0<=v<=10**12 or k in ('lastAckAt','registeredAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
         lanes[lane]['fullSnapshot']={k:v for k,v in full.items() if k=='method' and v=='disk_spool_two_pass' or k=='stage' and v in ('waiting_http','download','validate','apply','complete') or k in ('rows','bytes','ackedDuringRecovery','validatedRows','appliedRows') and type(v) is int and 0<=v<=2**40 or k in ('startedAt','completedAt','lastProgressAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
-        persistence=source.get('persistenceProgress') or {};lanes[lane]['persistenceProgress']={k:v for k,v in persistence.items() if k in ('writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','rssBytes') and type(v) is int and 0<=v<=10**12 or k=='lastCompletedAt' and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
+        ingress=source.get('ingressProgress') or {}
+        lanes[lane]['ingressProgress']={k:v for k,v in ingress.items() if k in ('received','acknowledged','processed','backlog','bytes','oldestAgeMs','receivedBytes','durableCommitMs','rssBytes','ingressMaxEventLoopDelayMs') and type(v) in (int,float) and math.isfinite(v) and 0<=v<=10**15 or k in ('lastReceiveAt','lastAckAt','metricWindowStartUTC','metricWindowEndUTC') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
+        lanes[lane]['ingressProgress']['headersByType']={str(k):v for k,v in (ingress.get('headersByType') or {}).items() if re.fullmatch(r'\d{1,3}|unknown',str(k)) and type(v) is int and 0<=v<=10**15}
+        persistence=source.get('persistenceProgress') or {};lanes[lane]['persistenceProgress']={k:v for k,v in persistence.items() if k in ('writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','rssBytes') and type(v) is int and 0<=v<=10**12 or k in ('lastCompletedAt','metricWindowStartUTC','metricWindowEndUTC') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
         lanes[lane]['distributionObservations']=[safe_distribution_observation(o) for o in source.get('distributionObservations',[])[-3:] if isinstance(o,dict)]
         lane_coverage=feed.get('coverage',{}).get(lane,{}) or {}
         coverage=lane_coverage.get('activity',{})

@@ -68,7 +68,7 @@ export interface ProviderClients {
   }>;
   startDistribution(): Promise<void>;
   stopDistribution?(): Promise<void>;
-  snapshotFull?:(sink:{assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal;progress?:(progress:import('./full-snapshot.js').FullSnapshotProgress)=>void})=>Promise<{ids:Set<number>;rows:number;bytes:number}>;
+  snapshotFull?:(sink:{timestamp?:number;assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal;progress?:(progress:import('./full-snapshot.js').FullSnapshotProgress)=>void})=>Promise<{ids:Set<number>;rows:number;bytes:number}>;
   snapshotAudit?: () => SnapshotAudit | undefined;
   outrightResponseInspections?: () => NonNullable<import("@lsports/contracts").ConnectionState["outrightRecovery"]>["responseInspections"];
   subscriptions?: () => Promise<{ fixtures: number }>;
@@ -260,7 +260,7 @@ export function clients(
         return result;
       },
     }:{}),
-    ...(config.lane==='prematch'?{async snapshotFull(sink:{assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal;progress?:(progress:import('./full-snapshot.js').FullSnapshotProgress)=>void}){
+    ...(config.lane==='prematch'?{async snapshotFull(sink:{timestamp?:number;assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal;progress?:(progress:import('./full-snapshot.js').FullSnapshotProgress)=>void}){
       // HTTP reservation ends when download completes, not after local parsing/apply.
       const result=await operation('snapshot.events','http',()=>fullSnapshot({url:urls.snapshotUrl,credentials,directory:dirname(statePath()),...sink,downloadGate:download=>scheduler.run('snapshot.events',download)}));
       audit={transport:{receivedBytes:result.bytes,responseLimitBytes:2147483648,timeoutMs:120000},bodyShape:'array',providerRows:result.rows,sdkRows:result.rows,acceptedRows:result.rows,filters:'none'};

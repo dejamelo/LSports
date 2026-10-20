@@ -49,7 +49,7 @@ test('offline recovery: bounded full download, cancel during validation/applicat
     let stablePhase = false, pendingAcked = 0;
     const pkg = { lane: 'prematch' as const, packageId: 4511, username: 'synthetic-only', password: 'not-a-credential', hostname: 'unused', vhost: 'unused', queue: 'isolated', port: 5672, tls: false };
     // Historical disk-only prices must never become current if snapshot omits/rejects their quote.
-    state.apply('prematch', [8, 9].map(fixtureId => ({ fixtureId, fixture: { status: 1, sport: { name: 'Football' } }, markets: [{ id: 1, status: 1, bets: [{ id: '1', price: '4.0', status: 1 }] }] })), Date.now() + 1000);
+    state.apply('prematch', [8, 9].map(fixtureId => ({ fixtureId, fixture: { status: 1, sport: { name: 'Football' } }, markets: [{ id: 1, status: 1, bets: [{ id: '1', price: '4.0', status: 1, isChanged:1 }] }] })), Date.now() + 1000);
     const publish = createPublisher(path);
     const save = coalescedPersistence(async () => {
         const feed = state.feed(), { regular, ...saved } = checkpoint(state);

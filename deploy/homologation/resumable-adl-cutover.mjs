@@ -42,6 +42,9 @@ async function helperPreflightReport(stage){
 }
 async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFile()||info.isSymbolicLink()||info.uid!==process.getuid()||(info.mode&0o077)||info.size>2*1024*1024)throw Error('PROGRESS_FILE_UNVERIFIED');return JSON.parse(await fs.readFile(file,'utf8'));}
 export async function run(args){
+ const durableMode=args[4]==='--durable-ingress-repair'||args[4]==='--durable-ingress-rollback';
+ const durableRollback=args[4]==='--durable-ingress-rollback';
+ if(durableMode)args=[...args.slice(0,4),durableRollback?'--recovery-throughput-rollback':'--snapshot-throughput-repair'];
  let ledger,progress,save,lease,stage='arguments';
  try{
   if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
@@ -165,9 +168,9 @@ export async function run(args){
      const evidence={capturedAt:new Date().toISOString(),previous,current,readOnly:true,providerRequests:0};ledger.inventoryRepairEvidence??=evidence;ledger.inventoryRepairLatestEvidence=evidence;await save();
      emit({stage:'inventory_evidence',status:'saved',providerRequests:0,progressFile:progress,workerRestarted:false});
     }
-    const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts'].map(name=>'apps/worker/src/'+name);names.push('packages/contracts/src/index.ts','packages/feed-store/src/index.ts');
+    const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','durable-ingress.mjs','durable-ingress.d.mts'].map(name=>'apps/worker/src/'+name);names.push('packages/contracts/src/index.ts','packages/feed-store/src/index.ts');
     const {createHash}=await import('node:crypto'),files={},baseHashes={};
-    const baseRef=args[4]==='--snapshot-throughput-repair'?'043af2e':['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?'dcd644b':throughputMode?'b63e735':nullableMode?'db4c193':supplierMode?'3425f72':fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
+    const baseRef=durableMode?'789707f':args[4]==='--snapshot-throughput-repair'?'043af2e':['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?'dcd644b':throughputMode?'b63e735':nullableMode?'db4c193':supplierMode?'3425f72':fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
     for(const name of names){files[name]=await command('git',['show',runtimeRef+':'+name],undefined,10000,true);baseHashes[name]=existing.includes(name)?createHash('sha256').update(await command('git',['show',baseRef+':'+name],undefined,10000,true)).digest('hex'):null;}
     if(args[4]==='--recovery-throughput-rollback'&&ledger.steps.throughput_rollback?.status==='ok'){emit({stage:'throughput_rollback',status:'reused',workerStarted:false,posnetChanged:false});return;}
     if(args[4]==='--recovery-throughput-rollback'&&ledger.steps.throughput_image?.status!=='ok')throw Error('THROUGHPUT_ROLLBACK_NOT_PREPARED');
@@ -190,7 +193,9 @@ export async function run(args){
     }
     if(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])){ledger.spoolMemoryBefore??={validation:ledger.lastValidation,upgrade:ledger.steps.throughput_upgrade,evidence:ledger.recoveryThroughputLatestEvidence};await save();}
     const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true}:distributionMode?{fixCommit:'2aa06f7'}:{};
+    if(durableMode)repairOptions.durableIngress=true;
     const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
+    if(durableMode&&prepared.offlineDurableIngressVerified!==true)throw Error('DURABLE_INGRESS_OFFLINE_UNVERIFIED');
     if(args[4]==='--snapshot-throughput-repair'&&prepared.offlineSnapshotThroughputVerified!==true)throw Error('SNAPSHOT_THROUGHPUT_OFFLINE_REQUIRED');
     if(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])&&prepared.offlineSpoolMemoryVerified!==true)throw Error('SPOOL_MEMORY_OFFLINE_TEST_REQUIRED');
     if(throughputMode&&prepared.offlineThroughputVerified!==true)throw Error('THROUGHPUT_FIX_OFFLINE_UNVERIFIED');
@@ -204,7 +209,7 @@ export async function run(args){
     if(['--supplier-order-rollback','--nullable-markets-rollback','--recovery-throughput-rollback'].includes(args[4])){const result=await remote('upgrade_partitioned',{phase:'rollback',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});ledger.steps[throughputMode?'throughput_rollback':nullableMode?'nullable_markets_rollback':'supplier_order_rollback']={status:'ok',result};await save();return;}
     const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});
     ledger.steps[throughputMode?'throughput_upgrade':nullableMode?'nullable_markets_upgrade':supplierMode?'supplier_order_upgrade':fullMode?'full_upgrade':distributionMode?'distribution_upgrade':'partitioned_upgrade']={status:'ok',at:new Date().toISOString(),result:activated};await save();
-    if(fullMode){stage='full_feed_validation';try{await validateFullRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,{requireSupplierOrder:supplierMode,allowTransientReconnect:throughputMode,stableForMs:throughputMode?120000:0});}finally{if(throughputMode)await writeRecoverySupport(ledger,path.join(folder,`support-217525-recovery-${pid}-${parent}.md`));}return;}
+    if(fullMode){stage='full_feed_validation';try{await validateFullRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,{requireSupplierOrder:supplierMode,allowTransientReconnect:throughputMode,stableForMs:durableMode?1800000:throughputMode?120000:0,requireIngress:durableMode});}finally{if(throughputMode)await writeRecoverySupport(ledger,path.join(folder,`support-217525-recovery-${pid}-${parent}.md`));}return;}
     if(distributionMode){stage='distribution_validation';await validateDistribution((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,path.join(folder,`support-217525-post-2aa06f7-${pid}-${parent}.md`));return;}
     stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress,45*60000,args[4]==='--inventory-repair');return;
    }

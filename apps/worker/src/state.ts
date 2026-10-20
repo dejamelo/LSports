@@ -407,6 +407,7 @@ export class TradeState {
             : undefined) ?? fixture.status;
         const available =
           this.connections[lane].phase === "connected" &&
+          !(this.connections[lane].ingressProgress && this.connections[lane].ingressProgress!.backlog > 0 && this.connections[lane].ingressProgress!.oldestAgeMs > 5000) &&
           [1, 2, 9].includes(status ?? 0);
         const prefix = `${lane}:${id}`;
         const markets: EventMarket[] = [...row.markets.values()].map((m) => ({
@@ -416,6 +417,7 @@ export class TradeState {
           selections: (m.bets || []).map((b) => {
             const unavailableReasons = [
               ...(this.connections[lane].phase !== "connected" ? ["feed_disconnected"] : []),
+              ...(this.connections[lane].ingressProgress && this.connections[lane].ingressProgress!.backlog > 0 && this.connections[lane].ingressProgress!.oldestAgeMs > 5000 ? ["processing_backlog"] : []),
               ...(![1, 2, 9].includes(status ?? 0) ? ["event_inactive"] : []),
               ...(m.status !== 1 ? [m.status === 3 ? "market_settled" : "market_not_open"] : []),
               ...((b.betStatusId ?? b.status) !== 1 ? ["selection_not_open"] : []),

@@ -1,3 +1,4 @@
+import {connectDurableMq} from "./durable-ingress.mjs";
 import {snapshotCapacity} from './snapshot-capacity.js';
 import { connectionCloser } from './connection-closer.js';
 import {monitorEventLoopDelay} from "node:perf_hooks";
@@ -74,7 +75,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     }
     const publish = createPublisher(path);
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
-    let writes=0,lastPersistLog=0;
+    let writes=0,lastPersistLog=0,loopWindowStart=Date.now();
     const save = coalescedPersistence(()=>operation("file.persist", "local", async () => {
         const started=performance.now();const feed = state.feed();
         tenantTickets?.reconcile(feed);
@@ -84,9 +85,9 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         await persistRegularCheckpoint(path,regular);
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
         await publish(feed,{...saved,regularExternal:true});
-        const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),rssBytes:process.memoryUsage().rss};
+        const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
-        if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:regular.length}));loopDelay.reset();}
+        if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:regular.length}));loopDelay.reset();loopWindowStart=Date.now();}
     }));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
@@ -115,7 +116,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         let attempt = 0;
         while (!signal.aborted) {
           try {
-            await (dependencies.session ?? session)(pkg, config, state, save, signal);
+            await (dependencies.session ?? session)(pkg, config, state, save, signal, undefined, `${path}.${pkg.lane}.inbox.sqlite`);
             attempt = 0;
           } catch (error) {
             if (!signal.aborted) {
@@ -198,9 +199,12 @@ export async function session(
   state: TradeState,
   save: () => Promise<void>,
   signal: AbortSignal,
-  dependencies = { connect: amqp.connect, clientFactory: clients },
+  dependencies: {connect:typeof amqp.connect;clientFactory:typeof clients;durableConnect?:typeof connectDurableMq} = { connect: amqp.connect, clientFactory: clients },
+  ingressPath?: string,
 ) {
   const lane = pkg.lane;
+  let acknowledgedMessages=0,lastReceived=Date.now(),processedSourceFloor:number|undefined;
+  const durable=!!ingressPath;
   state.set(lane, {
     consumerProgress:{acknowledgedMessages:0},fullSnapshot:undefined,
     phase: "recovering",
@@ -221,7 +225,11 @@ export async function session(
   }
   if(signal.aborted){await api.stopDistribution?.();state.set(lane,{phase:"stopped"});await save();return;}
   let connection:Awaited<ReturnType<typeof connectMq>>;
-  try{connection=await connectMq(pkg, dependencies.connect);}catch(error){
+  try{connection=ingressPath ? await (dependencies.durableConnect ?? connectDurableMq)(pkg,ingressPath,metrics=>{
+    acknowledgedMessages=metrics.acknowledged;
+    lastReceived=Math.max(lastReceived,Date.parse(metrics.lastReceiveAt||"")||0);
+    state.set(lane,{ingressProgress:metrics,consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages,lastAckAt:metrics.lastAckAt||undefined}});
+  }) : await connectMq(pkg, dependencies.connect);}catch(error){
     // Distribution must not remain ON without our consumer after failed connect.
     try{await api.stopDistribution?.();}catch(stopError){console.error(JSON.stringify({lane,status:'failed',...describeFailure(stopError,'distribution.stop','http')}));}
     throw error;
@@ -248,7 +256,12 @@ export async function session(
     // Unacknowledged deliveries remain on the supplier's existing queue.
     void closeConnection();
   };
-  connection.on("error", fail);
+  connection.on("error", (error:unknown)=>{
+    if(error instanceof Error&&error.message==='INBOX_CAPACITY_EXCEEDED'){
+      fail(new OperationError({operation:'feed.apply',protocol:'local',category:'response_limit',reason:'inbox_capacity_exceeded',message:'Inbox durable sin capacidad; mensajes conservados, consumidor pausado y cuotas bloqueadas.'}));
+      void api.stopDistribution?.().catch(stopError=>console.error(JSON.stringify({lane,...describeFailure(stopError,'distribution.stop','http')})));
+    }else fail(error);
+  });
   connection.on("close", (cause:unknown) => {
     const diagnostic=cause instanceof Error?describeFailure(cause,"amqp.connection","amqp"):undefined;
     fail(diagnostic?new OperationError({...diagnostic,...(!diagnostic.reason||diagnostic.reason==="unknown_exception"?{reason:"connection_closed" as const}:{})}):transportEnd("connection_closed"));
@@ -262,7 +275,7 @@ export async function session(
   let processing = Promise.resolve();
   let buffered: ConsumeMessage[] = [];
   let bufferingForSnapshot = false;
-  let lastReceived = Date.now();
+  let drainTimer:ReturnType<typeof setTimeout>|undefined;
   const seen = new Set<string>();
   const reportedShapes = new Set<string>();
   try {
@@ -278,8 +291,7 @@ export async function session(
     // Give that event its turn so a generic channel closure cannot hide broker codes.
     channel.on("close", () => queueMicrotask(() => fail(transportEnd("channel_closed"))));
     await operation("amqp.prefetch", "amqp", () => channel.prefetch(100));
-    let acknowledgedMessages=0;
-    const ackDelivery=(msg:ConsumeMessage)=>{channel.ack(msg);state.set(lane,{consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages:++acknowledgedMessages,lastAckAt:new Date().toISOString()}});};
+    const ackDelivery=(msg:ConsumeMessage)=>{channel.ack(msg);if(durable)return;state.set(lane,{consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages:++acknowledgedMessages,lastAckAt:new Date().toISOString()}});};
     const pendingAcks:ConsumeMessage[]=[];const pendingMetadata=new Map<ConsumeMessage,FeedMessageMetadata>();
     const processMessage = async (msg: ConsumeMessage,commit=true) => {
       if (closed) return;
@@ -328,9 +340,10 @@ export async function session(
         }
         if (!seen.has(decoded.guid)) {
           await operation("feed.apply", "local", async () =>
-            state.apply(lane, decoded.events, decoded.at,{source:"amqp",receivedAt:Date.now()}),
+            state.apply(lane, decoded.events, decoded.at,{source:"amqp",receivedAt:Number((msg.fields as unknown as {inboxReceived?:number}|undefined)?.inboxReceived)||Date.now()}),
           );
         }
+        if(decoded.events.length>0&&decoded.metadata.timestampSource!=='received_control')processedSourceFloor=Math.min(processedSourceFloor??Infinity,decoded.at);
         state.set(lane, {
           lastMessageAt: new Date(lastReceived).toISOString(),
         });
@@ -363,23 +376,26 @@ export async function session(
           ...(messageMetadata ? { messageMetadata } : {}),
         };
         let deliveryDisposition:
-          "requeue_requested" | "unacknowledged_until_close" =
+          "requeue_requested" | "unacknowledged_until_close" | "retained_in_durable_inbox" =
           "unacknowledged_until_close";
         try {
-          channel.nack(msg, false, true);
-          deliveryDisposition = "requeue_requested";
+          if(durable)deliveryDisposition="retained_in_durable_inbox";
+          else {channel.nack(msg, false, true);deliveryDisposition = "requeue_requested";}
         } catch {}
         fail(new OperationError({ ...diagnostic, deliveryDisposition }));
       }
     };
     let drainScheduled=false;
     const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;
+      const enqueue=()=>{if(closed){drainScheduled=false;return;}
       processing=processing.then(async()=>{
-        drainScheduled=false;const messages=buffered.splice(0,100);
+        drainScheduled=false;const messages=buffered.splice(0,durable?500:100);
         for(const msg of messages){await processMessage(msg,false);if(closed)break;}
         if(!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}
         if(buffered.length&&!closed)scheduleDrain();
-      }).catch(error=>{const metadata=pendingMetadata.values().next().value;for(const msg of pendingAcks){try{channel.nack(msg,false,true);}catch{}}pendingAcks.length=0;pendingMetadata.clear();fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'requeue_requested'}));});
+      }).catch(error=>{const metadata=pendingMetadata.values().next().value;for(const msg of pendingAcks){try{channel.nack(msg,false,true);}catch{}}pendingAcks.length=0;pendingMetadata.clear();fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:durable?'retained_in_durable_inbox':'requeue_requested'}));});
+      };
+      if(durable)drainTimer=setTimeout(enqueue,250);else enqueue();
     };
     await operation("amqp.consume", "amqp", () =>
       channel.consume(
@@ -408,6 +424,10 @@ export async function session(
     // A reconnect must establish its own regular snapshot baseline; a previous
     // session's lastSnapshotAt is not proof that this connection recovered.
     let regularSnapshotReady = false;
+    const durableConnection=connection as typeof connection & {recoveryAnchor?:()=>number|undefined;checkpointAnchor?:(seconds:number)=>Promise<boolean>};
+    const recoveryAnchor=durableConnection.recoveryAnchor?.();
+    let timestampRecoveryPending=recoveryAnchor!==undefined;
+    let checkpointAnchorSeconds:number|undefined;
     const requireOpen=()=>{if(closed || signal.aborted)throw failure || transportEnd("worker_stopped");};
     const recover = async () => {
       requireOpen();
@@ -427,7 +447,15 @@ export async function session(
         state.set(lane,{lastSnapshotAttemptAt:new Date(started).toISOString()});
         try {
           if(lane==='prematch'&&api.snapshotFull){
-            const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();let lastProgressLog=0;
+            if(timestampRecoveryPending){
+              state.set(lane,{message:"Recuperando eventos y liquidaciones desde el checkpoint seguro; cuotas bloqueadas."});
+              await api.snapshotFull({timestamp:recoveryAnchor,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,apply:async(row,at)=>{
+                const applied=processing.then(async()=>{requireOpen();state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});});processing=applied;await applied;
+              }});
+              requireOpen();await processing;await save();timestampRecoveryPending=false;
+              console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
+            }
+            const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
             regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});state.beginPartitionedSnapshot(lane);await save();
             const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>{
               const applied=processing.then(async()=>{requireOpen();state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});});
@@ -442,7 +470,7 @@ export async function session(
             // deliveries until begin(ids): that callback only runs AFTER inventory HTTP.
             state.beginPartitionedSnapshot(lane);await save();
             const prefix=buffered;buffered=[];
-            const handoff=processing.then(async()=>{for(const msg of prefix){await processMessage(msg);if(closed)break;}});
+            const handoff=processing.then(async()=>{for(const msg of prefix){await processMessage(msg,!durable);if(closed)break;}if(durable&&!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}});
             processing=handoff;bufferingForSnapshot=false;await handoff;requireOpen();
             const result=await api.snapshotPartitioned({assertOpen:requireOpen,
               begin:async ids=>{requireOpen();inventory=new Set(ids);await processing;requireOpen();},
@@ -527,11 +555,12 @@ export async function session(
       state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,stage:"handoff",queuedAtHandoff:batch.length,processedAtHandoff:0,lastProgressAt:new Date().toISOString()}});
       const barrier = processing.then(async () => {
         for (const msg of batch) {
-          await processMessage(msg);
+          await processMessage(msg,!durable);
           if (closed) break;
           const progress=state.connections[lane].recoveryProgress!;
           state.set(lane,{recoveryProgress:{...progress,processedAtHandoff:(progress.processedAtHandoff || 0)+1,lastProgressAt:new Date().toISOString()}});
         }
+        if(durable&&!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}
       });
       processing = barrier;
       bufferingForSnapshot = false;
@@ -545,6 +574,7 @@ export async function session(
           : (rows === undefined ? "Feed AMQP conectado; recuperación HTTP pendiente." : "Feed conectado; snapshot regular vacío (0 fixtures).") + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : " Recuperación Outright consultada por separado."),
       });
       await save();
+      if(!closed&&!signal.aborted&&regularSnapshotReady&&!timestampRecoveryPending&&checkpointAnchorSeconds!==undefined&&processedSourceFloor!==undefined)await durableConnection.checkpointAnchor?.(Math.min(checkpointAnchorSeconds,Math.max(0,Math.floor(processedSourceFloor/1000)-2)));
       console.log(
         JSON.stringify({
           lane,
@@ -574,6 +604,7 @@ export async function session(
         }),
       );
     }
+    let nextStatus=Date.now()+30000;
     let nextSnapshot = Math.min(...Object.values(nextDue));
     while (!closed && !signal.aborted) {
       await delay(500, undefined, { signal }).catch(() => {});
@@ -585,6 +616,10 @@ export async function session(
             "amqp",
           ),
         );
+      if(durable&&Date.now()>=nextStatus){
+        nextStatus=Date.now()+30000;
+        try{const status=await api.distributionStatus();state.set(lane,{distributionObservations:api.distributionObservations?.()||state.connections[lane].distributionObservations});if(status.numberMessagesInQueue>500)console.warn(JSON.stringify({lane,operation:'distribution.status',status:'backlog_alert',queueDepth:status.numberMessagesInQueue,alertThreshold:500}));}catch(error){console.warn(JSON.stringify({lane,...describeFailure(error,'distribution.status','http')}));}
+      }
       if (Date.now() >= nextSnapshot) {
         await recover();
         nextSnapshot = Math.min(...Object.values(nextDue));
@@ -595,6 +630,7 @@ export async function session(
     if (!signal.aborted) fail(error);
     throw error;
   } finally {
+    clearTimeout(drainTimer);
     signal.removeEventListener("abort", abort);
     state.set(lane, {
       consumerProgress:{...state.connections[lane].consumerProgress!,active:false},

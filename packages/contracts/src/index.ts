@@ -267,6 +267,7 @@ export interface IntegrationDiagnostic {
     | "unexpected";
   message: string;
   reason?:
+    | "inbox_capacity_exceeded"
     | "timeout"
     | "response_size_limit"
     | "memory_budget_exceeded"
@@ -347,7 +348,7 @@ export interface IntegrationDiagnostic {
   messageMetadata?: FeedMessageMetadata;
   timestampInspection?: TimestampInspection;
   retryPolicy?: "restart_required";
-  deliveryDisposition?: "requeue_requested" | "unacknowledged_until_close";
+  deliveryDisposition?: "requeue_requested" | "unacknowledged_until_close" | "retained_in_durable_inbox";
 }
 export interface FeedMessageMetadata {
   entityShape?: {leagueFixtureRows?:number;leagueFixtureMissingRows?:number;competition:"object"|"missing_or_invalid";seasons:number|null;flatEventsPresent:boolean;seasonEvents:(number|null)[]};
@@ -376,8 +377,9 @@ export interface FeedMessageMetadata {
   warnings?: string[];
 }
 export interface ConnectionState {
+  ingressProgress?:{received:number;acknowledged:number;processed:number;backlog:number;bytes:number;oldestAgeMs:number;receivedBytes:number;lastReceiveAt:string|null;lastAckAt:string|null;durableCommitMs:number;rssBytes:number;ingressMaxEventLoopDelayMs:number;metricWindowStartUTC:string;metricWindowEndUTC:string;headersByType:Record<string,number>};
   consumerProgress?:{acknowledgedMessages:number;lastAckAt?:string;registeredAt?:string;active?:boolean};
-  persistenceProgress?:{writes:number;lastDurationMs:number;lastCompletedAt:string;captureDurationMs?:number;regularDurationMs?:number;publishDurationMs?:number;maxEventLoopDelayMs?:number;rssBytes?:number};
+  persistenceProgress?:{writes:number;lastDurationMs:number;lastCompletedAt:string;captureDurationMs?:number;regularDurationMs?:number;publishDurationMs?:number;maxEventLoopDelayMs?:number;metricWindowStartUTC?:string;metricWindowEndUTC?:string;rssBytes?:number};
   fullSnapshot?:{stage?:'waiting_http'|'download'|'validate'|'apply'|'complete';validatedRows?:number;appliedRows?:number;lastProgressAt?:string;method:'disk_spool_two_pass';startedAt:string;completedAt?:string;rows?:number;bytes?:number;ackedDuringRecovery?:number};
   distributionObservations?:DistributionObservation[];
   session?: {id:string;startedAt:string};
