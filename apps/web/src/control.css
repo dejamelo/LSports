@@ -665,3 +665,14 @@
   .preview-tools {gap:8px;}
   .preview-tools label,.operation-console .control-inline label {min-width:0;max-width:100%;}
 }
+
+@media(max-width:650px){
+ .control,.control * {box-sizing:border-box;}
+ .control-card > form,.operation-console form {display:grid;gap:12px;min-width:0;}
+ .control-card > form > *, .operation-console form > * {min-width:0;max-width:100%;}
+ .control-password {flex-wrap:wrap;}
+ .control-password input {flex:1 1 160px;}
+ .control-card {padding:16px;}
+ .control-table-wrap {min-width:0;}
+ .control [role=dialog] {max-width:calc(100vw - 32px);max-height:calc(100dvh - 32px);overflow:auto;}
+}

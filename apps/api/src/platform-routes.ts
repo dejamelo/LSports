@@ -702,6 +702,7 @@ export function platformRoutes(
   });
   router.get(["/control","/control/sportsbook-preview"], async (req, res) => {
     const preview=req.path==="/control/sportsbook-preview";
+    res.setHeader("Cache-Control", "no-store");
     // Static shell only, like /control; admin cookie intentionally stays scoped
     // to /api/control. Protected data requests authenticate the iframe.
     res.setHeader(

@@ -89,6 +89,15 @@ def main():
         ids=run(['docker','ps','-q','--filter','label=com.docker.compose.project=adl-homologation','--filter','label=com.docker.compose.service=api']).decode().split()
         require(len(ids)==1,'EXACTLY_ONE_RUNNING_API_REQUIRED')
         api=json.loads(run(['docker','inspect',ids[0]]))[0]
+        baseline_hashes={'apps/web/src/control.css': '2842493134411e8b4e33553b960c6819d06f3dec9526eb7cb281c73255e71d11', 'apps/web/src/ControlPanel.tsx': 'f6c3b3932fe1f7f0c51ed1ff67ff2f3ccb238bee144fe1536305cc95ff744e10'}
+        matches={}
+        for name,expected in baseline_hashes.items():
+            data=run(['docker','exec',ids[0],'cat','/app/'+name])
+            matches[name]=hashlib.sha256(data).hexdigest()==expected
+        emit(stage='installed_before_update',status='collected',apiUiCommit=meta.get('apiUiCommit'),imageId=api['Image'],responsive6efd8c8SourceMatches=matches)
+        caddy_path=Path('/home/ubuntu/pixel-lottery-hub/deploy/Caddyfile.production')
+        require(caddy_path.is_file(),'CADDY_CONFIGURATION_REQUIRED')
+        caddy_before=caddy_path.read_bytes()
         protected=identities()
         mount=next(m for m in api['Mounts'] if m['Destination']=='/app/.runtime/platform')
         require(mount['Type']=='volume','PLATFORM_VOLUME_REQUIRED');platform=Path(mount['Source'])
@@ -96,6 +105,7 @@ def main():
         require(available>=1536*1024**2 and shutil.disk_usage('/var/backups').free>3*1024**3,'BUILD_CAPACITY_INSUFFICIENT')
         sha=sys.argv[1];require(re.fullmatch('[a-f0-9]{40}',sha),'COMMIT_INVALID')
         backup=Path(tempfile.mkdtemp(prefix='adl-api-update-',dir=BACKUPS));log=backup/'update.private.log'
+        private(backup/'Caddyfile.before.private',caddy_before)
         private(backup/'deployment.before.private.json',oldmeta);private(backup/'model.before.private.json',json.dumps(before).encode())
         # Compose reparses interpolation on manual rollback: escape literal dollars.
         def literal(v):
@@ -174,6 +184,7 @@ def main():
         for asset in assets[:1]:
             local_code,local_body=request(asset.decode());public_code,public_body=request(asset.decode(),'https://sportbook.apuestadeportiva.lat')
             require(local_code==public_code==200 and hashlib.sha256(local_body).digest()==hashlib.sha256(public_body).digest(),'HTTPS_ASSET_MISMATCH')
+        require(caddy_path.read_bytes()==caddy_before,'CADDY_CONFIGURATION_CHANGED_EXTERNALLY')
         require(identities()==protected,'PROTECTED_CONTAINER_CHANGED_EXTERNALLY')
         with sqlite3.connect((platform/'control.sqlite').as_uri()+'?mode=ro',uri=True) as db:
             current=db.execute("SELECT id,email,password,role,client_id FROM admins WHERE role='platform_admin' ORDER BY id").fetchall()
@@ -181,7 +192,7 @@ def main():
         meta['composeOverrides']=list(dict.fromkeys(meta.get('composeOverrides',[])+[str(overlay)]));meta['apiUiCommit']=sha;meta['apiUiBackup']=str(backup)
         atomic(SECURE/'deployment.json',json.dumps(meta).encode())
         private(backup/'success.json',json.dumps({'commit':sha,'adminPresent':bool(admins),'image':image,'installedImageId':installed['Image'],'installedSourceVerified':True}).encode())
-        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,httpsVerified=True,applicationVerified=True,panelRoutesVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
+        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,httpsVerified=True,applicationVerified=True,panelRoutesVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,caddyConfigurationPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
         return 0
     except Exception as e:
         code=str(e) if isinstance(e,RuntimeError) and re.fullmatch('[A-Z_]+',str(e)) else 'PRIVATE_ERROR_SEE_STAGE'

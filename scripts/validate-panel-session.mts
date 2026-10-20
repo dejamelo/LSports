@@ -87,6 +87,32 @@ try {
     const context = await browser.newContext({ viewport: { width: 1680, height: 1100 } }), page = await pageIn(context);
     await login(page, email, password);
     assert.equal(platform.allClientIds().length, 0);
+    for (const width of [360,390,430]) {
+        const touchContext = await browser.newContext({viewport:{width,height:844},hasTouch:true,isMobile:true});
+        const touch = await pageIn(touchContext);
+        await login(touch,email,password);
+        for (const format of ['web','mobile','pos']) {
+            await touch.getByRole('button',{name:/menú de navegación/}).click();
+            await touch.getByRole('button',{name:'Sportsbook',exact:true}).click();
+            await touch.getByLabel('Canal de la vista previa').selectOption(format);
+            await touch.getByRole('button',{name:'Abrir sportsbook de solo lectura',exact:true}).click();
+            const f=touch.frameLocator('iframe');
+            await f.locator(`[data-presentation="${format}"]`).waitFor();
+            await f.getByText('No hay eventos actuales disponibles', {exact:false}).waitFor();
+            assert.equal(await touch.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+            assert.equal(await f.locator('body').evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+            await f.getByRole('tab',{name:'En vivo',exact:true}).click();
+            await touch.getByRole('button',{name:'Cerrar sportsbook de solo lectura',exact:true}).click();
+        }
+        for(const format of ['web','mobile','pos']) {
+            await touch.goto(base+'/control/sportsbook-preview?format='+format);
+            await touch.locator(`[data-presentation="${format}"]`).waitFor();
+            await touch.getByRole('link',{name:'Volver al panel'}).click();
+            await touch.getByRole('button',{name:'Salir',exact:true}).waitFor();
+        }
+        await touchContext.close();
+        results.formats.push({viewportWidth:width,initialChannelOpen:['web','mobile','pos'],directLinks:true,touchNavigation:true,noClients:true});
+    }
     await page.getByRole('button', { name: 'Sportsbook', exact: true }).click();
     await page.getByRole('button', { name: 'Abrir sportsbook de solo lectura', exact: true }).click();
     const frame = page.frameLocator('iframe[title="Sportsbook de plataforma · solo lectura"]');

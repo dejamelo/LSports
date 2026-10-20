@@ -148,7 +148,7 @@ export default function OperationConsole({
               onSubmit={(e) => {
                 e.preventDefault();
                 void action(async () => {
-                  if(readOnly){setFormat(channel);setKeyboard(false);setFrameLoading(true);setUrl("/control/sportsbook-preview");return;}
+                  if(readOnly){setFormat(channel);setKeyboard(false);setFrameLoading(true);setUrl(`/control/sportsbook-preview?format=${channel}`);return;}
                   const data = await api(`${path}/preview`, "POST", {
                     channel,
                     ...(channel === "pos" ? { terminalId } : {}),

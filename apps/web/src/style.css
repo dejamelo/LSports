@@ -1360,3 +1360,8 @@ footer {
 .pos-review{padding:10px;border-top:1px solid var(--border,#ddd);overflow:auto;max-height:180px;flex-shrink:1;font-size:13px}.pos-review p{margin:6px 0}.compact-sportsbook .slip-confirm{flex-shrink:0}@media(max-height:560px){.pos-review{max-height:100px}}
 
 .read-only-preview .layout{grid-template-columns:205px minmax(0,1fr)}
+
+.preview-notice {padding:10px 14px;background:#203315;color:#e3f6cf;overflow-wrap:anywhere;}
+.preview-notice a {color:inherit;text-decoration:underline;display:inline-block;padding:6px;min-height:32px;}
+.read-only-preview.compact-sportsbook .layout {display:block;min-width:0;}
+.read-only-preview.compact-sportsbook main {min-width:0;max-width:100%;}

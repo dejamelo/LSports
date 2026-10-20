@@ -40,7 +40,8 @@ const money = (v: number) =>
   new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(v);
 export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={}) {
   const embedScope=getEmbedContext();
-  const presentation=usePresentation(embedScope?.channel||"web");
+  const previewFormat = new URLSearchParams(location.search).get("format");
+  const presentation=usePresentation(readOnlyPreview && (previewFormat === "mobile" || previewFormat === "pos") ? previewFormat : embedScope?.channel||"web");
   const [feed, setFeed] = useState<EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:StakeLimits}>();
   const [error, setError] = useState("");
   const [tab, setTab] = useState("Prepartido");
@@ -223,6 +224,7 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
     );
   return (
     <div className={`sportsbook ${readOnlyPreview?"read-only-preview":""} presentation-${presentation.format} ${presentation.compact?"compact-sportsbook":""}`} data-session-channel={embedScope?.channel||"web"} data-presentation={presentation.format} style={presentation.style}>
+      {readOnlyPreview && <div className="preview-notice" role="status">Solo lectura · Las apuestas están deshabilitadas. <a href="/control" target="_top">Volver al panel</a></div>}
       <header className="header">
         <div className="brand" aria-label="Apuesta DEPORTIVA LAT">
           <span className="brand-icon" aria-hidden="true">
@@ -471,7 +473,7 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
               <div className="empty">
                 <Search size={28} />
                 <h3>No hay eventos para esta selección</h3>
-                <p>Probá otro deporte, pestaña o búsqueda.</p>
+                <p>{readOnlyPreview ? "No hay eventos actuales disponibles para esta selección. No se generan datos ni cuotas de prueba." : "Probá otro deporte, pestaña o búsqueda."}</p>
                 <button onClick={() => setQuery("")}>Limpiar búsqueda</button>
               </div>
             ) : (
