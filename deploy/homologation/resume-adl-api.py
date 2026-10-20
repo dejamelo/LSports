@@ -26,6 +26,25 @@ def run(args,timeout=30,log=None):
     if p.returncode:raise RuntimeError('command_failed')
     return p.stdout
 
+def safe_helper_error(error):
+    # No exception text, stderr values, filenames, command arguments or env.
+    import subprocess as process_module
+    import errno as errno_module
+    kind=type(error).__name__
+    out={'exceptionType':kind if kind in {'CalledProcessError','TimeoutExpired','FileNotFoundError','PermissionError','JSONDecodeError','ValueError','TypeError','KeyError','RuntimeError','OSError'} else 'other'}
+    if isinstance(error,process_module.CalledProcessError):
+        out['childExitCode']=error.returncode
+        cmd=error.cmd
+        if isinstance(cmd,(list,tuple)) and cmd and cmd[0] in ('docker','node','python3'):out['childProgram']=cmd[0]
+        raw=error.stderr if isinstance(error.stderr,bytes) else error.stderr.encode() if isinstance(error.stderr,str) else b''
+        raw=raw[:65536].lower()
+        if b'permission denied' in raw:out['diagnostic']='CHILD_PERMISSION_DENIED'
+        elif b'cannot connect to the docker daemon' in raw:out['diagnostic']='DOCKER_DAEMON_UNAVAILABLE'
+        elif b'no such container' in raw or b'no such object' in raw or b'no such image' in raw:out['diagnostic']='DOCKER_OBJECT_NOT_FOUND'
+        elif b'argument list too long' in raw:out['diagnostic']='CHILD_ARGUMENT_LIMIT_EXCEEDED'
+    if isinstance(error,OSError) and error.errno in (2,7,12,13):out['osCode']=errno_module.errorcode[error.errno]
+    return out
+
 def private(path,data):
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'wb') as f:f.write(data);f.flush();os.fsync(f.fileno())

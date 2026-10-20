@@ -63,6 +63,7 @@ def cutover_main():
         require(os.geteuid()==0,'ROOT_REQUIRED')
         raw=sys.stdin.buffer.read(1024*1024+1);require(len(raw)<=1024*1024,'HANDOFF_SIZE_LIMIT')
         request=json.loads(raw);action=request.get('action')
+        if action in ('patch_worker','repair_snapshot','upgrade_partitioned','preflight','import','start','status','startup_report','recover_start'):stage=action
         if action=='patch_worker':return patch_worker(request)
         if action=='repair_snapshot':return repair_snapshot(request)
         if action=='upgrade_partitioned':return upgrade_partitioned(request)
@@ -202,7 +203,8 @@ def cutover_main():
         return 0
     except Exception as error:
         reason=str(error) if re.fullmatch('[A-Z][A-Z_]+',str(error)) else 'PRIVATE_OPERATION_FAILED'
-        emit(operation='cutover.aws',stage=stage,status='blocked',reason=reason,backup=str(backup) if backup else None,journalsWritten=written,workerStartRequested=worker_requested,workerStarted=None if worker_requested else False,posnetChanged=False,rawExceptionPrinted=False)
+        detail=safe_helper_error(error)
+        emit(operation='cutover.aws',stage=stage,status='blocked',reason=reason,backup=str(backup) if backup else None,journalsWritten=written,workerStartRequested=worker_requested,workerStarted=None if worker_requested else False,posnetChanged=False,rawExceptionPrinted=False,**detail)
         return 2
 
 # Explicit fields only: provider exception text, URLs and message payloads never leave SSH.

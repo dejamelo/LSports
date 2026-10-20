@@ -1,3 +1,4 @@
+import {assembleRemoteHelper,helperInvocation,sanitizedHelperExit} from './remote-helper-transport.mjs';
 import {validateFullRecovery} from './full-recovery-validation.mjs';
 // Authorized protected recovery + resumable migration. No credentials are copied or printed.
 import fs from 'node:fs/promises';
@@ -10,36 +11,42 @@ import {snapshotValidationReport} from './snapshot-validation-report.mjs';
 import {validateDistribution} from './distribution-validation.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(process.env.ADL_REPO_ROOT||path.resolve(here,'../..')),runtimeRef=process.env.ADL_RUNTIME_REF||'HEAD';
-const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
 const emit=value=>console.log(JSON.stringify({operation:'cutover.resumable',...value}));
 export async function step(ledger,name,save,action){
  if(ledger.steps[name]?.status==='ok'){emit({stage:name,status:'reused'});return ledger.steps[name].result;}
  ledger.currentStage=name;ledger.steps[name]={status:'started',at:new Date().toISOString()};await save();emit({stage:name,status:'running'});
  const result=await action();ledger.steps[name]={status:'ok',at:new Date().toISOString(),result};await save();return result;
 }
-async function command(bin,args,input,timeout=180000,raw=false,quiet=false){
+export async function command(bin,args,input,timeout=180000,raw=false,quiet=false,context={}){
  return new Promise((resolve,reject)=>{
-  const child=spawn(bin,args,{cwd:root,stdio:['pipe','pipe','pipe']});let buffer='',all='',bytes=0,stderr='';const rows=[];
+  const child=spawn(bin,args,{cwd:root,stdio:['pipe','pipe','pipe']});let buffer='',all='',bytes=0,stderr='',failed=false;const rows=[];
   const parse=line=>{try{const row=JSON.parse(line);if(typeof row.operation==='string'&&/^(cutover\.|shutdown\.)/.test(row.operation)){rows.push(row);if(!quiet||row.status==='blocked')console.log(JSON.stringify(row));}}catch{}};
   child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
-  const timer=setTimeout(()=>{child.kill('SIGTERM');reject(Error('HELPER_TIMEOUT_PRESERVED'));},timeout);
+  const timer=setTimeout(()=>{failed=true;child.kill('SIGTERM');const detail={...sanitizedHelperExit({...context,code:null,signal:'SIGTERM',stderr,rows}),reason:'HELPER_TIMEOUT_PRESERVED'};console.log(JSON.stringify(detail));reject(Object.assign(Error(detail.reason),{helperExit:detail}));},timeout);
   child.stdout.on('data',chunk=>{bytes+=chunk.length;if(bytes>4*1024*1024){child.kill('SIGTERM');return;}if(raw){all+=chunk;return;}buffer+=chunk;const lines=buffer.split('\n');buffer=lines.pop();lines.forEach(parse);});
   child.stderr.on('data',chunk=>{if(stderr.length<65536)stderr+=chunk;});child.stdin.on('error',()=>{});child.stdin.end(input);
-  child.on('error',()=>{clearTimeout(timer);reject(Error('HELPER_START_FAILED'));});
-  child.on('close',code=>{clearTimeout(timer);if(!raw)parse(buffer);if(code!==0||bytes>4*1024*1024){
-   const concrete=rows.findLast(row=>row.status==='blocked'&&/^[A-Z_]+$/.test(row.reason||''))?.reason;
-   const reason=concrete||(/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(stderr)?'SSH_HOST_KEY_VERIFICATION_FAILED':/Permission denied.*publickey|Permission denied.*password/i.test(stderr)?'SSH_AUTHENTICATION_FAILED':/Could not resolve hostname/i.test(stderr)?'SSH_DNS_FAILED':/Connection refused/i.test(stderr)?'SSH_CONNECTION_REFUSED':/timed out/i.test(stderr)?'SSH_TIMEOUT':/ERR_MODULE_NOT_FOUND/.test(stderr)?'LOCAL_DEPENDENCY_MISSING':/bad option|unknown option/i.test(stderr)?'NODE_OPTION_UNSUPPORTED':'HELPER_EXIT_NONZERO_SEE_STAGE');
-   reject(Error(reason));
+  child.on('error',error=>{failed=true;clearTimeout(timer);const detail=sanitizedHelperExit({...context,spawnCode:error.code,rows,stderr});console.log(JSON.stringify(detail));reject(Object.assign(Error(detail.reason),{helperExit:detail}));});
+  child.on('close',(code,signal)=>{clearTimeout(timer);if(failed)return;if(!raw)parse(buffer);if(code!==0||bytes>4*1024*1024){
+   const detail=sanitizedHelperExit({...context,code,signal,stderr,rows});console.log(JSON.stringify(detail));reject(Object.assign(Error(detail.reason),{helperExit:detail}));
   }else resolve(raw?all:rows);});
  });
+}
+async function helperPreflightReport(stage){
+ const keys=(await fs.readdir(path.join(os.homedir(),'Downloads'),{withFileTypes:true})).filter(f=>f.isFile()&&/Lottery.*Key\.pem$/.test(f.name));if(keys.length!==1)throw Error('SSH_KEY_NOT_UNIQUE_OR_AVAILABLE');
+ const source=await assembleRemoteHelper(here),invocation=await helperInvocation(here,source,{action:'preflight'});
+ emit({stage,status:'running',readOnly:true,providerRequests:0,workerRestarted:false,ledgerChanged:false,sourceBytes:Buffer.byteLength(source),remoteCommandBytes:Buffer.byteLength(invocation.command)});
+ const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,90000,false,false,{stage,action:'preflight'});
+ const result=rows.findLast(r=>r.operation==='cutover.complete_preflight.aws');if(result?.status!=='collected')throw Error('READ_ONLY_PREFLIGHT_NOT_COLLECTED');
+ emit({stage:'helper_preflight_report',status:'collected',readOnly:true,providerRequests:0,workerRestarted:false,ledgerChanged:false,posnetChanged:false});
 }
 async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFile()||info.isSymbolicLink()||info.uid!==process.getuid()||(info.mode&0o077)||info.size>2*1024*1024)throw Error('PROGRESS_FILE_UNVERIFIED');return JSON.parse(await fs.readFile(file,'utf8'));}
 export async function run(args){
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
-  lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
+  if(args[4]==='--helper-preflight-report'){stage='remote_consumer_gate';await helperPreflightReport(stage);return;}
+  lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
   const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
   if(directory.isSymbolicLink()||!directory.isDirectory()||directory.uid!==process.getuid()||(directory.mode&0o077))throw Error('PROGRESS_DIRECTORY_NOT_PROTECTED');
   progress=path.join(folder,`execution-${pid}-${parent}.json`);
@@ -49,11 +56,10 @@ export async function run(args){
   ledger.lastExecutorCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();if(!ledger.initialExecutorCommit)ledger.initialExecutorCommit=ledger.lastExecutorCommit;
   await save();
   const keys=(await fs.readdir(path.join(os.homedir(),'Downloads'),{withFileTypes:true})).filter(f=>f.isFile()&&/Lottery.*Key\.pem$/.test(f.name));if(keys.length!==1)throw Error('SSH_KEY_NOT_UNIQUE_OR_AVAILABLE');
-  const common=(await fs.readFile(path.join(here,'resume-adl-api.py'),'utf8')).split("if __name__=='__main__':")[0];
-  const inspect=(await fs.readFile(path.join(here,'inspect-cutover-aws.py'),'utf8')).split("if __name__=='__main__':")[0];
-  const source=common+'\n'+inspect+'\n'+await fs.readFile(path.join(here,'patch-adl-worker-image.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'repair-adl-snapshot.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'upgrade-partitioned-worker.py'),'utf8')+'\n'+await fs.readFile(path.join(here,'execute-adl-cutover-aws.py'),'utf8');
+  const source=await assembleRemoteHelper(here);
   const remote=async(action,extra={},quiet=false)=>{
-   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com','sudo -n python3 -c '+quote(source)],JSON.stringify({action,...extra}),360000,false,quiet);
+   const invocation=await helperInvocation(here,source,{action,...extra});
+   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,360000,false,quiet,{stage,action});
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
@@ -198,8 +204,8 @@ export async function run(args){
   }
   stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress);
  }catch(error){
-  if(ledger&&save){ledger.lastFailure={stage,at:new Date().toISOString(),reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED'};try{await save();}catch{}}
-  emit({stage,status:'blocked',reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED',progressFile:progress,localExitConfirmed:ledger?.steps?.local_exit?.status==='ok',awsStartConfirmed:ledger?.steps?.aws_start?.status==='ok',note:'See concrete sanitized child stage. Completed results and backups preserved. No blind signal replay, Mac restart or provider cooldown reset.'});process.exitCode=2;
+  if(ledger&&save){ledger.lastFailure={stage,at:new Date().toISOString(),reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED',...(error.helperExit?{helperExit:error.helperExit}:{})};try{await save();}catch{}}
+  emit({stage,status:'blocked',reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED',...(error.helperExit?{helperExit:error.helperExit}:{}),progressFile:progress,localExitConfirmed:ledger?.steps?.local_exit?.status==='ok',awsStartConfirmed:ledger?.steps?.aws_start?.status==='ok',note:'See concrete sanitized child stage. Completed results and backups preserved. No blind signal replay, Mac restart or provider cooldown reset.'});process.exitCode=2;
  }
 finally{if(lease)await new Promise(resolve=>lease.close(resolve));}
 }

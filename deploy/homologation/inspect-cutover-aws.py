@@ -8,8 +8,8 @@ def inspect_aws():
     def section(name,action):
         try:
             result=action();report[name]=result;return result
-        except Exception:
-            errors.append({'stage':name,'reason':'INSPECTION_UNVERIFIED'});return None
+        except Exception as error:
+            errors.append({'stage':name,'reason':'INSPECTION_UNVERIFIED',**safe_helper_error(error)});return None
     if os.geteuid()!=0:
         emit(**report,status='unverified',errors=[{'stage':'privileges','reason':'ROOT_REQUIRED'}]);return 2
     def deployment():
