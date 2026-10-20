@@ -494,6 +494,18 @@ def recovery_runtime_evidence(directory,consumers,expected):
         try:
             row=json.loads(stats.stdout);result['resources']={k:float(str(row[key]).rstrip('%')) for k,key in (('cpuPercent','CPUPerc'),('memoryPercent','MemPerc')) if re.fullmatch(r'[0-9]+(?:\.[0-9]+)?%',str(row.get(key,'')))}
         except Exception:result['resourceStatsUnavailable']=True
+    probe="for f in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory/memory.usage_in_bytes /sys/fs/cgroup/memory/memory.limit_in_bytes /sys/fs/cgroup/memory/memory.max_usage_in_bytes; do if test -r $f; then echo $f; cat $f; fi; done"
+    measured=run(['docker','exec',consumers[0]['id'],'sh','-c',probe],timeout=15).decode().splitlines()
+    readings={};key=None
+    for line in measured:
+        if line.startswith('/sys/fs/cgroup/'):key=line.rsplit('/',1)[-1];readings[key]={} if key=='memory.events' else None
+        elif key=='memory.events':
+            parts=line.split()
+            if len(parts)==2 and parts[0] in ('oom','oom_kill','high','max') and parts[1].isdigit():readings[key][parts[0]]=int(parts[1])
+        elif key and line.isdigit():readings[key]=int(line)
+    result['cgroupMemory']=readings
+    result['containerMemoryLimitBytes']=info.get('HostConfig',{}).get('Memory')
+    result['hostAvailableMemoryBytes']=int(next((line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')),'0'))*1024
     return result
 
 def cutover_status(directory,start_requested,startup=False,expected_sources=None,recovery_expected=None):

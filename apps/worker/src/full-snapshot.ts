@@ -19,7 +19,7 @@ import type {TradeEvent} from './state.js';
 const MiB=1024*1024;
 export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:20000,totalMs:120000};
 const fail=(reason:string,shape:Partial<NonNullable<import('@lsports/contracts').IntegrationDiagnostic['snapshotValidation']>>={}):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven',...shape},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
-export function fullSnapshotMemory(retainedBudget=0){const c=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'},undefined,'prematch');if(!c.allowed||c.headroomBytes<retainedBudget)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:Math.max(c.budgetBytes,retainedBudget),memoryHeadroomBytes:c.headroomBytes,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}
+export function fullSnapshotMemory(){const c=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'},undefined,'prematch');if(!c.allowed)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.
 async function* tokens(file:string,max:number){let primitive='',quoted=false,escape=false,parts:string[]=[],size=0;
  for await(const chunk of createReadStream(file,{encoding:'utf8',highWaterMark:64*1024})){
@@ -98,7 +98,9 @@ export async function fullSnapshot(options:{url:string;credentials:{packageId:nu
   await (options.downloadGate?options.downloadGate(download):download());clearTimeout(timer);options.assertOpen();progress('validate');
   const ids=new Set<number>();let rows=0;
   await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){fullSnapshotMemory();await yieldTurn();}},limits.itemBytes);
-  fullSnapshotMemory(bytes*4+128*MiB);
+  // The file stays on disk: never reserve four copies of the entire HTTP body.
+  // Conversion is item-bounded; re-check live heap/available headroom before EACH row.
+  fullSnapshotMemory();
   progress('apply');
   // Envelope (including trailing Header/errors) and ALL rows verified before first application.
   await walkSnapshot(file,async raw=>{options.assertOpen();fullSnapshotMemory();await options.apply(convertSnapshotRow(raw),started);appliedRows++;if(appliedRows%100===0)progress('apply');},limits.itemBytes);

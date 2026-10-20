@@ -1,7 +1,7 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,readdir,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {createServer} from 'node:http';import {once} from 'node:events';
-import {walkSnapshot,convertSnapshotRow,fullSnapshot} from './full-snapshot.js';
+import {walkSnapshot,convertSnapshotRow,fullSnapshot,fullSnapshotMemory} from './full-snapshot.js';
 const row=(FixtureId:number)=>({FixtureId,Fixture:{Status:1,LastUpdate:'2026-10-19T14:00:00.0173136'},Markets:[]});
 test('bounded envelope parser validates ordering, trailing Header, UTF8 and rejects truncation, duplicate root and application errors',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-full-envelope-'));try{const file=join(dir,'body');
@@ -12,13 +12,14 @@ test('bounded envelope parser validates ordering, trailing Header, UTF8 and reje
 });
 test('full HTTP >256 MiB is spooled, not aggregated; exact unfiltered SDK request and bounded item conversion',{timeout:120000},async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-full-volume-'));let applied=0,largestRSS=process.memoryUsage().rss;const before=largestRSS;
+ const available=process.availableMemory;process.availableMemory=()=>768*1024*1024;
  const count=260,padding='x'.repeat(1024*1024);let mode='valid';
  const server=createServer(async(req,res)=>{let text='';for await(const b of req)text+=b;const request=JSON.parse(text);assert.equal(req.url,'/Prematch/GetEvents');assert.deepEqual(Object.keys(request).sort(),['packageId','password','username']);assert.equal(request.packageId,4511);res.setHeader('Content-Type','application/json');
  res.write('{"Body":[');for(let i=1;i<=count;i++){const data=(i>1?',':'')+JSON.stringify({...row(i),Padding:padding});if(!res.write(data))await once(res,'drain');}res.end('],"Header":'+JSON.stringify(mode==='valid'?{HttpStatusCode:200}:{Errors:['PRIVATE']})+'}');});
  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const url='http://127.0.0.1:'+(server.address() as {port:number}).port;
  const opts={url,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},async apply(r:ReturnType<typeof convertSnapshotRow>){assert.equal(r.fixtureId,++applied);largestRSS=Math.max(largestRSS,process.memoryUsage().rss);},limits:{responseBytes:280*1024*1024}};
  try{const result=await fullSnapshot(opts);assert.ok(result.bytes>256*1024*1024);assert.equal(result.rows,count);assert.equal(applied,count);assert.ok(largestRSS-before<256*1024*1024,`RSS increase ${largestRSS-before}`);assert.deepEqual(await readdir(dir),[]);
- }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
+ }finally{process.availableMemory=available;server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
 });
 test('HTTP 429 keeps Retry-After and malformed trailing envelope never applies partially',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-full-http-'));let mode='429',applied=0;
@@ -79,3 +80,5 @@ test('HTTP coordinator is released before local snapshot validation/application;
  }});assert.equal(otherRequests,1);assert.ok(stages.indexOf('validate')<stages.indexOf('apply'));assert.equal(stages.at(-1),'complete');}
  finally{server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
 });
+
+test('disk-spool guard preserves 320 MiB working reserve and refuses exhausted available memory',()=>{const original=process.availableMemory;try{process.availableMemory=()=>768*1024*1024;fullSnapshotMemory();process.availableMemory=()=>64*1024*1024;assert.throws(()=>fullSnapshotMemory(),(e:any)=>e.diagnostic.reason==='memory_budget_exceeded'&&e.diagnostic.memoryBudgetBytes===320*1024*1024);}finally{process.availableMemory=original;}});
