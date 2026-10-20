@@ -35,6 +35,43 @@ def canonical_barrier(value):
     if dt.microsecond%1000:dt+=datetime.timedelta(microseconds=1000-dt.microsecond%1000)
     return dt.isoformat(timespec='milliseconds').replace('+00:00','Z')
 
+def worker_exit_report():
+    consumers=states('worker');reports=[]
+    for c in consumers:
+        require(re.fullmatch('[0-9a-f]{12,64}',c['id']) is not None,'WORKER_CONTAINER_ID_UNVERIFIED')
+        item=json.loads(run(['docker','inspect',c['id']]))[0]
+        labels=item.get('Config',{}).get('Labels',{})
+        require(labels.get('com.docker.compose.project')=='adl-homologation' and labels.get('com.docker.compose.service')=='worker','WORKER_LABELS_UNVERIFIED')
+        state=item.get('State',{});host=item.get('HostConfig',{})
+        row={**c,'startedAtUTC':state.get('StartedAt'),'finishedAtUTC':state.get('FinishedAt'),'imageId':item.get('Image'),'restartCount':item.get('RestartCount'),'memoryLimitBytes':host.get('Memory'),'memorySwapBytes':host.get('MemorySwap'),'rawLogPrinted':False}
+        end=datetime.datetime.now(datetime.timezone.utc)
+        if state.get('Status')=='exited':end=datetime.datetime.fromisoformat(state['FinishedAt'].replace('Z','+00:00'))
+        start=end-datetime.timedelta(minutes=20)
+        row['timeline']=existing_recovery_timeline([c],{'fromUTC':start.strftime('%Y-%m-%dT%H:%M:%SZ'),'toUTC':(end+datetime.timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')})
+        with tempfile.TemporaryFile() as raw:
+            process=subprocess.Popen(['docker','logs','--timestamps','--tail','250',c['id']],stdout=raw,stderr=raw)
+            try:code=process.wait(timeout=20)
+            except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=5);code=-1
+            size=raw.tell();raw.seek(max(0,size-2*1024*1024));tail=raw.read(2*1024*1024)
+        row['finalLogReadExitCode']=code;row['finalLogSha256']=hashlib.sha256(tail).hexdigest();row['finalLogTruncated']=size>2*1024*1024
+        text=tail.decode(errors='replace').lower()
+        row['finalLogSignals']=sorted(set(classify(tail)+[label for token,label in [('heap out of memory','node_heap_exhausted'),('allocation failed','allocation_failed'),('invalid string length','string_size_exceeded'),('maximum call stack','call_stack_exceeded'),('err_worker_out_of_memory','ingress_worker_heap_exhausted'),('inbox_capacity_exceeded','inbox_capacity_exceeded'),('memory_budget_exceeded','preventive_memory_budget_rejection'),('uncaught','uncaught_exception'),('sqlite_full','sqlite_disk_full'),('sqlite_corrupt','sqlite_corrupt'),('sigterm','sigterm_logged'),('sigkill','sigkill_logged')] if token in text]))
+        row['finalStackFrames']=[{'source':m[0],'line':int(m[1]),'column':int(m[2])} for m in re.findall(r'/app/(apps/worker/src/[a-zA-Z0-9_.-]+\.(?:mjs|ts|js)):(\d{1,7}):(\d{1,7})',tail.decode(errors='replace'))][-12:]
+        row['oomConclusion']='docker_oom_confirmed' if state.get('OOMKilled') is True else 'node_heap_exhaustion_logged' if 'node_heap_exhausted' in row['finalLogSignals'] else 'ingress_worker_heap_exhaustion_logged' if 'ingress_worker_heap_exhausted' in row['finalLogSignals'] else 'not_proven'
+        row['persistedFiles']=[]
+        for mount in item.get('Mounts',[]):
+            if mount.get('Destination')!='/app/.runtime/feed' or mount.get('Type')!='volume':continue
+            volume=json.loads(run(['docker','volume','inspect',mount['Name']]))[0]
+            require(volume.get('Labels',{}).get('com.docker.compose.project')=='adl-homologation','VOLUME_PROJECT_UNVERIFIED')
+            directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'VOLUME_SYMLINK')
+            for path in sorted(directory.glob('trade-feed.json*'))[:100]:
+                if path.is_symlink() or not path.is_file():continue
+                name=path.name
+                kind='inbox_wal' if name.endswith('.inbox.sqlite-wal') else 'inbox_shm' if name.endswith('.inbox.sqlite-shm') else 'inbox' if name.endswith('.inbox.sqlite') else 'checkpoint' if name in ('trade-feed.json','trade-feed.json.regular-checkpoint.json') else 'other_feed_file'
+                stat=path.stat();row['persistedFiles'].append({'kind':kind,'lane':'prematch' if '.prematch.' in name else 'inplay' if '.inplay.' in name else None,'bytes':stat.st_size,'modifiedAtUTC':datetime.datetime.fromtimestamp(stat.st_mtime,datetime.timezone.utc).isoformat()})
+        reports.append(row)
+    emit(operation='cutover.aws',stage='worker_exit_report',status='collected',readOnly=True,providerRequests=0,workerRestarted=False,posnetChanged=False,workers=reports,evidenceLimit='No restart or database open. File metadata does not verify inbox integrity; logs may be rotated. Exit 137 alone is not proof of OOM. Preventive memory rejection alone does not explain process exit.');return 0
+
 def inspect_worker_failure(consumers):
     report={'records':[],'signals':[],'rawLogPrinted':False};raw=b''
     for c in consumers:
@@ -116,16 +153,17 @@ def cutover_main():
         require(os.geteuid()==0,'ROOT_REQUIRED')
         raw=sys.stdin.buffer.read(1024*1024+1);require(len(raw)<=1024*1024,'HANDOFF_SIZE_LIMIT')
         request=json.loads(raw);action=request.get('action')
-        if action in ('patch_worker','repair_snapshot','upgrade_partitioned','preflight','import','start','status','startup_report','recover_start','recovery_evidence'):stage=action
+        if action in ('patch_worker','repair_snapshot','upgrade_partitioned','preflight','import','start','status','startup_report','worker_exit_report','recover_start','recovery_evidence'):stage=action
         if action=='patch_worker':return patch_worker(request)
         if action=='repair_snapshot':return repair_snapshot(request)
         if action=='upgrade_partitioned':return upgrade_partitioned(request)
         if action=='preflight':return inspect_aws()
         if action=='api_health':return api_health_report()
         handoff=request['handoff'];audit=handoff['audit']
-        require(action in ('import','start','status','startup_report','recover_start','recovery_evidence'),'INVALID_ACTION')
+        require(action in ('import','start','status','startup_report','worker_exit_report','recover_start','recovery_evidence'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(audit['operation']=='cutover.audit' and audit['readOnly'] is True,'INVALID_AUDIT')
+        if action=='worker_exit_report':return worker_exit_report()
         deadline=datetime.datetime.fromisoformat(audit['notBeforeUTC'].replace('Z','+00:00')).timestamp()
         require(audit['notBeforeUTC'].endswith('Z') and math.isfinite(deadline),'INVALID_DEADLINE')
         digest=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest()

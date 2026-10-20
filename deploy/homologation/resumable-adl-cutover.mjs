@@ -48,7 +48,7 @@ export async function run(args){
  if(durableMode)args=[...args.slice(0,4),durableRollback?'--recovery-throughput-rollback':'--snapshot-throughput-repair'];
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--worker-exit-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   if(args[4]==='--helper-preflight-report'){stage='remote_consumer_gate';await helperPreflightReport(stage);return;}
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
@@ -58,8 +58,10 @@ export async function run(args){
   try{ledger=await protectedJson(progress);}catch(error){if(error.code!=='ENOENT')throw error;ledger={version:1,ownerPid:Number(pid),parentPid:Number(parent),steps:{},authorization:'Explicit user approval: non-cooperative termination of verified worker after protected persisted-state backup; no SIGKILL; migrate to AWS within existing budget.'};}
   if(ledger.version!==1||ledger.ownerPid!==Number(pid)||ledger.parentPid!==Number(parent))throw Error('PROGRESS_IDENTITY_MISMATCH');
   save=async()=>{const tmp=progress+'.'+process.pid+'.tmp';const file=await fs.open(tmp,'wx',0o600);try{await file.writeFile(JSON.stringify(ledger));await file.sync();}finally{await file.close();}await fs.rename(tmp,progress);};
+  if(args[4]!=='--worker-exit-report'){
   ledger.lastExecutorCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();if(!ledger.initialExecutorCommit)ledger.initialExecutorCommit=ledger.lastExecutorCommit;
   await save();
+  }
   const keys=(await fs.readdir(path.join(os.homedir(),'Downloads'),{withFileTypes:true})).filter(f=>f.isFile()&&/Lottery.*Key\.pem$/.test(f.name));if(keys.length!==1)throw Error('SSH_KEY_NOT_UNIQUE_OR_AVAILABLE');
   const source=await assembleRemoteHelper(here);
   const remote=async(action,extra={},quiet=false)=>{
@@ -67,6 +69,19 @@ export async function run(args){
    const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,360000,false,quiet,{stage,action});
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
+   if(args[4]==='--worker-exit-report'){
+    stage='worker_exit_report';
+    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('REPORT_REQUIRES_COMPLETED_CUTOVER');
+    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);
+    const mac=rows.find(r=>r.operation==='cutover.audit');
+    if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
+    const report=await remote('worker_exit_report',{handoff},true);
+    const {writeProtectedReport}=await import('./distribution-validation.mjs');
+    const reportFile=path.join(folder,`worker-exit-${pid}-${parent}.json`);
+    await writeProtectedReport(reportFile,JSON.stringify(report,null,2));
+    emit({stage,status:'collected',readOnly:true,providerRequests:0,workerRestarted:false,workers:report.workers?.map(({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})=>({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})),reportFile,posnetChanged:false});return;
+   }
   if(args[4]==='--api-validation-resume'){
    stage='api_health';
    if(!['local_exit','journal_export','journal_import','aws_start','throughput_upgrade'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_THROUGHPUT_UPGRADE');
