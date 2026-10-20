@@ -193,3 +193,46 @@ Pendiente físico: identificar APK y contrato autenticado/bridge nativo, modelo
 de terminal e impresora, SDK/driver, papel (80 mm preparado; 58 mm requiere
 adaptación y prueba), teclado Android real, corte de papel, caracteres españoles,
 lectura del ID, reconexión y reimpresión del mismo ID. No se validó dispositivo.
+
+### Plataforma AWS recém-inicializada: navegação sem cliente/operação
+
+Causa reproduzida em ambiente isolado: o conteúdo da maioria das abas era
+renderizado somente dentro de `client && (...)`. Os handlers alteravam a aba,
+mas a área principal voltava ao mesmo estado vazio. A auditoria global também
+ficava dentro desse gate; o demo pré-configurado não reproduzia o problema.
+Não há evidência de perda de permissão do administrador por esse sintoma.
+
+Correção: Resumen mostra estado global; cada aba dependente indica cliente e/ou
+operação necessários; Acceso e Auditoría funcionam sem cliente. Sportsbook
+permite abrir o componente existente em somente leitura antes da configuração,
+sem fabricar cliente, operação, moeda, credencial ou bilhete. A vista exibe os
+erros de conexão e não registra apostas. Na operação configurada, continuam
+obrigatórios domínio autorizado e credencial vigente para a sessão do iframe.
+
+Endpoints globais GET `/api/control/feed-overview` e `/api/control/feed-preview`
+exigem sessão de platform_admin no servidor. Cliente admin recebe 403; sem
+sessão, 401. A página `/control/sportsbook-preview` é apenas shell estático como
+/control e pode ser embutida somente no mesmo domínio; os dados são protegidos.
+O cookie administrativo permanece HttpOnly e restrito a `/api/control`.
+Não se ampliam o cookie, os domínios autorizados nem as permissões de aposta.
+Os dados vêm exclusivamente da projeção local; nenhuma consulta LSports nova.
+
+Removida a importação remota de Google Fonts que era bloqueada pelo CSP:
+fontes de fallback locais, sem dependência de rede para o funcionamento.
+Corrigido também o favicon `/adl.svg`, antes respondido com 404 no modo plataforma.
+A vista global de somente leitura não exibe bilhete, valor ou controles de admissão.
+
+Validação local: `scripts/validate-empty-platform.mts` cria plataforma sem
+clientes nem operações, com erros AMQP 403 simulados e zero eventos. Percorre
+todas as abas, acesso/auditoria, atualização, abertura/fechamento do sportsbook,
+orientações por escopo, criação de cliente e formulário de operação, logout.
+Confere ausência de erros de JS/rede e de POST de bilhetes. Testes de API
+verificam autorização e bloqueio de admissão. Regressões completas de painel e
+demo isolados passaram; esse resultado NÃO é validação real do feed AWS.
+
+Não houve acesso autenticado ao painel AWS neste ambiente. A consulta pública
+por domínio falhou com EAI_AGAIN; não se afirma ter inspecionado o console ou o
+bundle remoto nesta sessão. O deploy informado d6d3d3a já teve a fonte verificada
+pelo executor. A atualização usa o mesmo executor API-only, backups e rollback,
+sem migração nem mudança de workers. Após aplicar: confirmar installedCommit,
+installedSourceVerified, HTTPS/API 200 e navegar no painel com a conta existente.

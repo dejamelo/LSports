@@ -139,6 +139,18 @@ export function platformRoutes(
         409,
       );
   };
+  // Read-only platform views are available before a casino/operation is configured.
+  // Explicit platform permission; no credentials, writes, snapshots or provider calls.
+  router.get("/api/control/feed-overview", async (req,res)=>{
+    if(admin(req).role!=="platform_admin")throw new PlatformError("FORBIDDEN","Vista global reservada a la plataforma.",403);
+    const feed=await source.getEvents(),report=feedEvidence(feed);
+    res.json({readOnly:true,events:feed.events.length,selectableSelections:report.events.filter(e=>e.available===true).reduce((n,e)=>n+e.selectableSelections,0),lanes:report.lanes});
+  });
+  router.get("/api/control/feed-preview", async (req,res)=>{
+    if(admin(req).role!=="platform_admin")throw new PlatformError("FORBIDDEN","Vista global reservada a la plataforma.",403);
+    const feed=await source.getEvents();
+    res.json({...feed,readOnly:true,notice:"Vista administrativa de solo lectura. Sin admisión de billetes. "+(feed.notice||"")});
+  });
   router.get("/api/control/status", (_req, res) =>
     res.json({
       enabled: true,
@@ -659,6 +671,7 @@ export function platformRoutes(
       fallthrough: true,
     }),
   );
+  router.get("/adl.svg", (_req,res)=>res.type("image/svg+xml").sendFile(resolve(webDist,"adl.svg")));
   router.get("/embed/:id/:operationId/sportsbook", async (req, res) => {
     const client = platform.client(req.params.id),
       op = platform.operation(req.params.operationId);
@@ -680,12 +693,15 @@ export function platformRoutes(
       });
     }
   });
-  router.get("/control", async (_req, res) => {
+  router.get(["/control","/control/sportsbook-preview"], async (req, res) => {
+    const preview=req.path==="/control/sportsbook-preview";
+    // Static shell only, like /control; admin cookie intentionally stays scoped
+    // to /api/control. Protected data requests authenticate the iframe.
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'",
+      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors ${preview?"'self'":"'none'"}; base-uri 'none'; object-src 'none'; form-action 'self'`,
     );
-    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-Frame-Options", preview?"SAMEORIGIN":"DENY");
     try {
       res
         .type("html")

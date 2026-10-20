@@ -1,5 +1,5 @@
 """API-only update: private online backups, offline schema gate, image-only rollback."""
-import copy, fcntl, hashlib, json, os, re, shutil, sqlite3, subprocess, sys, tarfile, tempfile, time, urllib.request
+import copy, fcntl, hashlib, json, os, re, shutil, sqlite3, subprocess, sys, tarfile, tempfile, time, urllib.request, urllib.error
 from pathlib import Path
 SECURE=Path('/etc/adl-homologation')
 BACKUPS=Path('/var/backups')
@@ -160,6 +160,13 @@ def main():
         verified=json.loads(run(['docker','exec','-i','--user','0:0',current_ids[0],'node','-e',verify],input=json.dumps(source_hashes).encode(),log=log))
         require(verified.get('valid') is True,'INSTALLED_SOURCE_MISMATCH')
         emit(stage='installed_version',status='ok',installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,verifiedSourceFiles=verified['count'])
+        stage='protected_panel_routes';emit(stage=stage,status='running')
+        for route in ('/api/control/feed-overview','/api/control/feed-preview'):
+            try:code,_=request(route)
+            except urllib.error.HTTPError as e:code=e.code
+            require(code==401,'PANEL_ROUTE_AUTH_GUARD_FAILED')
+        code,_=request('/control/sportsbook-preview');require(code==200,'SPORTSBOOK_SHELL_FAILED')
+        emit(stage=stage,status='ok',anonymousDataAccessBlocked=True,sportsbookShellVerified=True)
         stage='health_and_https';emit(stage=stage,status='running')
         code,html=request('/control');require(code==200 and b'<html' in html.lower(),'LOCAL_PANEL_FAILED')
         assets=re.findall(rb'(?:src|href)=[\"\'](/assets/[a-zA-Z0-9_.-]+\.js)[\"\']',html)
@@ -174,7 +181,7 @@ def main():
         meta['composeOverrides']=list(dict.fromkeys(meta.get('composeOverrides',[])+[str(overlay)]));meta['apiUiCommit']=sha;meta['apiUiBackup']=str(backup)
         atomic(SECURE/'deployment.json',json.dumps(meta).encode())
         private(backup/'success.json',json.dumps({'commit':sha,'adminPresent':bool(admins),'image':image,'installedImageId':installed['Image'],'installedSourceVerified':True}).encode())
-        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,httpsVerified=True,applicationVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
+        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,httpsVerified=True,applicationVerified=True,panelRoutesVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
         return 0
     except Exception as e:
         code=str(e) if isinstance(e,RuntimeError) and re.fullmatch('[A-Z_]+',str(e)) else 'PRIVATE_ERROR_SEE_STAGE'

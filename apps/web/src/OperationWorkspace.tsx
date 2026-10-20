@@ -1,3 +1,4 @@
+import PlatformOverview from "./PlatformOverview";
 import OperationConsole from "./OperationConsole";
 import RiskPanel from "./RiskPanel";
 import { useEffect, useState } from "react";
@@ -350,12 +351,14 @@ export default function OperationWorkspace({
         </form>
       ) : !op ? (
         <section className="control-card">
-          <h2>Creá una operación</h2>
+          <h2>{tab} · Seleccioná o creá una operación</h2>
           <p>
             Un cliente puede tener varias operaciones, incluso con la misma
             moneda. Cada una tiene sus propias credenciales, límites, billetes y
             reportes.
           </p>
+          <p>Usá Nueva operación para continuar. No se crean operaciones automáticamente.</p>
+          {tab==="Sportsbook"&&platformAdmin&&<PlatformOverview api={api} sportsbook/>}
         </section>
       ) : (
         <>

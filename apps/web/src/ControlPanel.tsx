@@ -1,3 +1,4 @@
+import PlatformOverview from "./PlatformOverview";
 import OperationWorkspace from "./OperationWorkspace";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
@@ -172,10 +173,10 @@ export default function ControlPanel() {
     }
   }, [client]);
   useEffect(() => {
-    if (!admin || !selected) return;
+    if (!admin || (!selected && !(tab==="Auditoría" && admin.role==="platform_admin"))) return;
     let active = true;
     void api(
-      globalAudit && admin.role === "platform_admin"
+      (globalAudit || !selected) && admin.role === "platform_admin"
         ? "/audit"
         : `/audit?clientId=${selected}`,
     )
@@ -223,7 +224,7 @@ export default function ControlPanel() {
       setAudit(
         (
           await api(
-            globalAudit && admin?.role === "platform_admin"
+            (globalAudit || !selected) && admin?.role === "platform_admin"
               ? "/audit"
               : `/audit?clientId=${selected}`,
           )
@@ -410,6 +411,7 @@ export default function ControlPanel() {
                 className={tab === name ? "active" : ""}
                 onClick={() => {
                   setTab(name);
+                  setError("");setNotice("");
                   setCreating(false);
                 }}
               >
@@ -443,7 +445,7 @@ export default function ControlPanel() {
                     : `${tab} · Iframe, API y control del sportsbook`}
                 </p>
               </div>
-              {selected && !creating && (
+              {!creating && (
                 <button disabled={busy} onClick={() => void refresh()}>
                   <RefreshCw size={16} /> Actualizar
                 </button>
@@ -545,6 +547,58 @@ export default function ControlPanel() {
                 {notice}
               </p>
             )}
+                  {tab === "Auditoría" && !creating && (
+                    <section className="control-card">
+                      <h2>Actividad administrativa</h2>
+                      <p>
+                        Últimas 100 acciones del ámbito seleccionado. Sin
+                        contraseñas, claves ni payloads del proveedor.
+                      </p>
+                      {admin.role === "platform_admin" && (
+                        <label className="control-check">
+                          <input
+                            type="checkbox"
+                            checked={globalAudit || !selected}
+                            disabled={!selected}
+                            onChange={(e) => setGlobalAudit(e.target.checked)}
+                          />{" "}
+                          Ver auditoría de toda la plataforma
+                        </label>
+                      )}
+                      <div className="control-table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Fecha</th>
+                              <th>Acción</th>
+                              <th>Actor</th>
+                              <th>Detalle</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {audit.map((a) => (
+                              <tr key={a.id}>
+                                <td>
+                                  {new Date(a.at).toLocaleString("es-AR")}
+                                </td>
+                                <td>
+                                  {auditLabels[a.action] || a.action}
+                                  <br />
+                                  <small>{a.action}</small>
+                                </td>
+                                <td>
+                                  <code>{a.actor}</code>
+                                </td>
+                                <td>
+                                  <code>{JSON.stringify(a.details)}</code>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </section>
+                  )}
             {creating ? (
               <form
                 className="control-card control-form"
@@ -722,69 +776,18 @@ export default function ControlPanel() {
                       )}
                     </section>
                   )}
-                  {tab === "Auditoría" && (
-                    <section className="control-card">
-                      <h2>Actividad administrativa</h2>
-                      <p>
-                        Últimas 100 acciones del ámbito seleccionado. Sin
-                        contraseñas, claves ni payloads del proveedor.
-                      </p>
-                      {admin.role === "platform_admin" && (
-                        <label className="control-check">
-                          <input
-                            type="checkbox"
-                            checked={globalAudit}
-                            onChange={(e) => setGlobalAudit(e.target.checked)}
-                          />{" "}
-                          Ver auditoría de toda la plataforma
-                        </label>
-                      )}
-                      <div className="control-table-wrap">
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>Fecha</th>
-                              <th>Acción</th>
-                              <th>Actor</th>
-                              <th>Detalle</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {audit.map((a) => (
-                              <tr key={a.id}>
-                                <td>
-                                  {new Date(a.at).toLocaleString("es-AR")}
-                                </td>
-                                <td>
-                                  {auditLabels[a.action] || a.action}
-                                  <br />
-                                  <small>{a.action}</small>
-                                </td>
-                                <td>
-                                  <code>{a.actor}</code>
-                                </td>
-                                <td>
-                                  <code>{JSON.stringify(a.details)}</code>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </section>
-                  )}
+
                 </>
               )
             )}
+            {!creating && !client && admin.role==="platform_admin" && ["Resumen","Sportsbook"].includes(tab)&&<PlatformOverview key={tab} api={api} sportsbook={tab==="Sportsbook"}/>}
             {!creating && !client && (
               <section className="control-card">
                 <Users size={32} />
-                <h2>Un espacio para cada operador</h2>
-                <p>
-                  {admin.role === "platform_admin"
-                    ? "Creá el primer cliente para configurar su iframe, accesos y administrador."
-                    : "No hay un cliente disponible para tu cuenta."}
-                </p>
+                <h2>{tab} · {clients.length?"Seleccioná un cliente":"Todavía no hay clientes"}</h2>
+                <p>{["Resumen","Sportsbook","Auditoría","Acceso"].includes(tab)?"Podés consultar el estado global y administrar tu acceso sin crear un cliente.":`${tab} requiere un cliente seleccionado y, cuando corresponda, una operación con moneda fija.`}</p>
+                <p>{admin.role==="platform_admin"?"Creá tu cliente real para configurar su operación, dominios y credenciales. No se importan datos del demo.":"Pedile al administrador de la plataforma que revise el cliente asignado a tu cuenta."}</p>
+                {admin.role==="platform_admin"&&<button onClick={()=>setCreating(true)}>Crear primer cliente</button>}
               </section>
             )}
             <footer>

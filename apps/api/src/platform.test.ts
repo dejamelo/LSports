@@ -1697,3 +1697,22 @@ test('protected operator recovery CLI revokes platform sessions without changing
   await s.login('platform@test.example','recovered-platform-password');assert.equal(await readFile(join(s.directory,'credentials',key.id+'.key'),'utf8'),before);assert(s.platform.integration(key.value));
  }finally{await s.close();}
 });
+
+test('empty platform navigation supports authenticated read-only feed views during AMQP403 without clients or admission',async()=>{
+ const s=await setup();try{
+  Object.assign(s.feed,{health:'unavailable',events:[],connections:{prematch:{phase:'error',diagnostic:{operation:'amqp.connect',protocol:'amqp',category:'authentication',amqpCode:403}},inplay:{phase:'error',diagnostic:{operation:'amqp.connect',protocol:'amqp',category:'authentication',amqpCode:403}}}});
+  assert.equal((await s.request('/api/control/clients','GET',undefined,s.admin)).data.clients.length,0);
+  for(const p of ['/api/control/feed-overview','/api/control/feed-preview']){
+   assert.equal((await s.request(p)).status,401);
+   const r=await s.request(p,'GET',undefined,s.admin);assert.equal(r.status,200);assert.equal(r.data.readOnly,true);
+  }
+  const overview=(await s.request('/api/control/feed-overview','GET',undefined,s.admin)).data;
+  assert.equal(overview.selectableSelections,0);assert.equal(overview.lanes[0].diagnostic.amqpCode,403);
+  const html=await fetch(s.base+'/control/sportsbook-preview',{headers:{Cookie:s.admin.cookie}});assert.equal(html.status,200);assert.match(html.headers.get('content-security-policy')! ,/frame-ancestors 'self'/);
+  assert.equal((await s.request('/api/tickets','POST',{},s.admin)).status,401);
+  assert.equal((await s.request('/api/integration/v1/tickets','POST',{},s.admin)).status,401);
+  assert.equal((await s.request('/api/control/clients','GET',undefined,s.admin)).data.clients.length,0);
+  const c=await s.create('readonlyclient'),client=await s.login('readonlyclient@test.example','isolated-client-password');
+  assert(c.id);for(const p of ['/api/control/feed-overview','/api/control/feed-preview'])assert.equal((await s.request(p,'GET',undefined,client)).status,403);
+ }finally{await s.close();}
+});

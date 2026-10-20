@@ -1,4 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap");
 :root {
   font-family: "DM Sans", Arial, sans-serif;
   color: #e8edef;
@@ -1359,3 +1358,5 @@ footer {
 .compact-sportsbook .markets {width:100%;max-width:100%;margin-top:12px;}
 .compact-sportsbook .section-title {display:none;}
 .pos-review{padding:10px;border-top:1px solid var(--border,#ddd);overflow:auto;max-height:180px;flex-shrink:1;font-size:13px}.pos-review p{margin:6px 0}.compact-sportsbook .slip-confirm{flex-shrink:0}@media(max-height:560px){.pos-review{max-height:100px}}
+
+.read-only-preview .layout{grid-template-columns:205px minmax(0,1fr)}

@@ -38,7 +38,7 @@ const sports: { id: Sport; icon: string; name: string }[] = [
 ];
 const money = (v: number) =>
   new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(v);
-export default function App() {
+export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={}) {
   const embedScope=getEmbedContext();
   const presentation=usePresentation(embedScope?.channel||"web");
   const [feed, setFeed] = useState<EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:StakeLimits}>();
@@ -76,10 +76,11 @@ export default function App() {
       controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
       try {
-        const response = await sportsbookApi("/events", {
+        const response = await (readOnlyPreview?fetch("/api/control/feed-preview",{credentials:"same-origin",signal:controller.signal}):sportsbookApi("/events", {
           signal: controller.signal,
-        });
+        }));
         if(response.status===401)throw Error("Sesión vencida. Cerrá esta vista y pedí una nueva sesión al casino o desde el panel.");
+        if(response.status===403)throw Error("No tenés permiso para esta vista. Volvé al panel.");
         if (!response.ok) throw Error();
         const next = (await response.json()) as EventFeed & {client?:{displayName:string;acceptingTickets:boolean};effectiveLimits?:StakeLimits};
         if (
@@ -93,7 +94,7 @@ export default function App() {
         }
       } catch (failure) {
         if (!disposed)
-          setError(failure instanceof Error&&failure.message.startsWith("Sesión vencida")?failure.message:"Sin conexión con la API. Cuotas y simulación bloqueadas.");
+          setError(failure instanceof Error&&(failure.message.startsWith("Sesión vencida")||failure.message.startsWith("No tenés permiso"))?failure.message:"Sin conexión con la API. Cuotas y simulación bloqueadas.");
       } finally {
         clearTimeout(timeout);
         if (!disposed) timer = setTimeout(load, 3000);
@@ -126,7 +127,7 @@ export default function App() {
     };
   });
   const picksBlocked =
-    !!error || feed?.client?.acceptingTickets === false ||
+    readOnlyPreview || !!error || feed?.client?.acceptingTickets === false ||
     currentPicks.some(
       (p) => p.selection.available === false || p.event.available === false,
     );
@@ -156,6 +157,7 @@ export default function App() {
   const toggle = (event: SportEvent, selection: Selection) => {
     if(presentation.format==="pos")setMobileSlip(true);
     setMessage("");
+    if(readOnlyPreview)return;
     setPicks((old) =>
       old.some((p) => p.selection.id === selection.id)
         ? old.filter((p) => p.selection.id !== selection.id)
@@ -186,6 +188,7 @@ export default function App() {
   const reviewFingerprint=JSON.stringify({amount,picks:currentPicks.map(p=>[p.event.id,p.selection.id,p.selection.odds])});
   const reviewReady=reviewed===reviewFingerprint;
   const submitTicket = async () => {
+    if(readOnlyPreview)return;
     if(posReview && !reviewReady){setReviewed(reviewFingerprint);return;}
     if(inFlight.current) return;
     const payload=JSON.stringify({...embedScope,stakeMinor:embedScope?simulatedMinor:Math.round(stake*100),selections:currentPicks.map(p=>({eventId:p.event.id,
@@ -211,7 +214,7 @@ export default function App() {
     } catch {setMessage("Respuesta no confirmada. Reintentá sin cambiar el billete para evitar duplicados.");}
     finally{inFlight.current=false;setSubmitting(false);}
   };
-  if (!embedded && location.pathname !== "/sportsbook" && location.pathname !== "/")
+  if (!readOnlyPreview && !embedded && location.pathname !== "/sportsbook" && location.pathname !== "/")
     return (
       <div className="not-found">
         <h1>Página no encontrada</h1>
@@ -219,7 +222,7 @@ export default function App() {
       </div>
     );
   return (
-    <div className={`sportsbook presentation-${presentation.format} ${presentation.compact?"compact-sportsbook":""}`} data-session-channel={embedScope?.channel||"web"} data-presentation={presentation.format} style={presentation.style}>
+    <div className={`sportsbook ${readOnlyPreview?"read-only-preview":""} presentation-${presentation.format} ${presentation.compact?"compact-sportsbook":""}`} data-session-channel={embedScope?.channel||"web"} data-presentation={presentation.format} style={presentation.style}>
       <header className="header">
         <div className="brand" aria-label="Apuesta DEPORTIVA LAT">
           <span className="brand-icon" aria-hidden="true">
@@ -510,7 +513,7 @@ export default function App() {
                     <EventMarkets
                       event={event}
                       selected={picks.map((p) => p.selection.id)}
-                      blocked={!!error || feed?.client?.acceptingTickets === false || event.available === false}
+                      blocked={readOnlyPreview || !!error || feed?.client?.acceptingTickets === false || event.available === false}
                       onSelect={toggle}
                     />
                   </div>
@@ -526,7 +529,7 @@ export default function App() {
                 : "Eventos y cuotas ficticios. Modo demo separado de la integración real. Sin apuestas ni dinero real."}
             </p>
           </div>
-          <TicketHistory refresh={ticketRefresh} focusTicketId={focusTicketId}/>
+          {!readOnlyPreview&&<TicketHistory refresh={ticketRefresh} focusTicketId={focusTicketId}/>}
           <footer>
             <span>
               © {new Date().getFullYear()} Apuesta DEPORTIVA LAT ·{" "}
@@ -535,7 +538,7 @@ export default function App() {
             <span>Jugá con responsabilidad. 18+</span>
           </footer>
         </main>
-        <aside aria-label="Billete de simulación" className={`betslip ${mobileSlip ? "slip-open" : ""}`}>
+        {!readOnlyPreview&&<aside aria-label="Billete de simulación" className={`betslip ${mobileSlip ? "slip-open" : ""}`}>
           <div className="slip-title">
             <h2>
               <Ticket size={20} /> Mi billete <span>{picks.length}</span>
@@ -717,15 +720,15 @@ export default function App() {
               <strong>Sin riesgo. Sin dinero real.</strong>
             </span>
           </div>
-        </aside>
+        </aside>}
       </div>
-      <button
+      {!readOnlyPreview&&<button
         className="mobile-slip-button"
         aria-expanded={mobileSlip}
         onClick={() => setMobileSlip(!mobileSlip)}
       >
         <Ticket size={19} /> Mi billete <b>{picks.length}</b>
-      </button>
+      </button>}
     </div>
   );
 }
