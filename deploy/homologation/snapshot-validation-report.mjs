@@ -36,12 +36,15 @@ function observation(l={},previous={},projection={},since){
   lastSnapshotAtUTC:utc(l.lastSnapshotAt),snapshotBelongsToCurrentSession:isCurrent(l.lastSnapshotAt),fullSnapshot:progress(l.fullSnapshot),
   lastMarketDecodedAtUTC:utc(l.updates?.lastMarketDecodedAt),marketUpdateBelongsToCurrentSession:isCurrent(l.updates?.lastMarketDecodedAt),
   diagnostic:diagnostic(l.diagnostic),lastSnapshotDiagnostic:diagnostic(d),lastSnapshotDiagnosticScope:when?(isCurrent(when)?'current_session':'historical_before_session'):'timestamp_unknown',
+  decodedMessagesByType:Object.fromEntries(Object.entries(l.decodedMessagesByType||{}).filter(([k,v])=>/^[0-9]{1,5}$/.test(k)&&Number.isSafeInteger(v)&&v>=0)),
+  persistenceProgress:Object.fromEntries(Object.entries(l.persistenceProgress||{}).filter(([k,v])=>['writes','lastDurationMs'].includes(k)&&Number.isSafeInteger(v)&&v>=0||k==='lastCompletedAt'&&utc(v))),
   projection,amqp320:closures};
 }
 export function snapshotValidationReport(current,ledger={}){return{readOnlyRemote:true,providerRequests:0,workerRestarted:false,posnetChanged:false,
  capturedAtUTC:new Date().toISOString(),validationSinceUTC:utc(current.validationSinceUTC),
  current:{prematch:lane(current.lanes?.prematch),inplay:lane(current.lanes?.inplay)},
  feedObservations:Object.fromEntries(['prematch','inplay'].map(name=>[name,observation(current.lanes?.[name],ledger.lastValidation?.lanes?.[name],current.projectionByLane?.[name],current.validationSinceUTC)])),
+ ...(current.timeline?{timeline:current.timeline}:{}),
  selectableSelections:current.selectableSelections??null,blockedReasons:current.blockedReasons,workers:current.workers,
  historical:{lastValidation:lane(ledger.lastValidation?.lanes?.prematch),preFix:lane(ledger.distributionPreFixEvidence?.current?.lanes?.prematch)},
  evidenceLimit:'One current persisted observation compared with the saved previous sample. ACK delta is unknown across session changes. Stored selections and timestamps alone do not prove feed recovery. No provider requests or worker restart.'};}

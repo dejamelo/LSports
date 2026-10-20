@@ -144,7 +144,7 @@ def cutover_main():
         directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'VOLUME_SYMLINK')
         receipt=SECURE/('cutover-'+digest+'.json')
         if action in ('status','startup_report','recovery_evidence'):
-            saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'),startup=action=='startup_report',expected_sources=request.get('expectedSources'),recovery_expected=request.get('expectedRuntime') if action=='recovery_evidence' else None)
+            saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'),startup=action=='startup_report',expected_sources=request.get('expectedSources'),recovery_expected=request.get('expectedRuntime') if action=='recovery_evidence' else None,timeline_window=request.get('timelineWindow'))
         if request.get('expectedWorkerImage'):require(model(base)['services']['worker']['image']==request['expectedWorkerImage'],'WORKER_IMAGE_NOT_EXPECTED_CORRECTION')
         stage='no_consumer_gate'
         running=[c for c in states('worker') if c['running']]
@@ -508,9 +508,57 @@ def recovery_runtime_evidence(directory,consumers,expected):
     result['hostAvailableMemoryBytes']=int(next((line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')),'0'))*1024
     return result
 
-def cutover_status(directory,start_requested,startup=False,expected_sources=None,recovery_expected=None):
+def existing_recovery_timeline(consumers,window):
+    require(isinstance(window,dict) and set(window)=={'fromUTC','toUTC'},'TIMELINE_WINDOW_UNVERIFIED')
+    for v in window.values():require(isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',v),'TIMELINE_TIMESTAMP_UNVERIFIED')
+    start=datetime.datetime.fromisoformat(window['fromUTC'].replace('Z','+00:00'));end=datetime.datetime.fromisoformat(window['toUTC'].replace('Z','+00:00'))
+    require(0<(end-start).total_seconds()<=3600,'TIMELINE_WINDOW_LIMIT')
+    records=[];reads=[]
+    for c in consumers:
+        require(re.fullmatch('[0-9a-f]{12,64}',c['id']) is not None,'TIMELINE_CONTAINER_UNVERIFIED')
+        # Temporary file bounds Python memory; only sanitized allowlisted records are returned.
+        with tempfile.TemporaryFile() as raw:
+            process=subprocess.Popen(['docker','logs','--since',window['fromUTC'],'--until',window['toUTC'],'--tail','5000','--timestamps',c['id']],stdout=raw,stderr=raw)
+            try:code=process.wait(timeout=20)
+            except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=5);code=-1
+            size=raw.tell();raw.seek(0);lines=0
+            if size>16*1024*1024:reads.append({'exitCode':code,'sizeLimitExceeded':True});continue
+            for line in raw:
+                lines+=1
+                if len(line)>256*1024:continue
+                match=re.match(rb'^(\d{4}-\d{2}-\d{2}T[0-9:.]+Z) (.*)$',line)
+                if not match:continue
+                try:row=json.loads(match[2])
+                except Exception:continue
+                if not isinstance(row,dict):continue
+                op=row.get('operation');record={'loggedAtUTC':match[1].decode()}
+                if row.get('lane') in ('prematch','inplay'):record['lane']=row['lane']
+                if op=='file.persist':
+                    record['operation']=op
+                    for k in ('writes','lastDurationMs','regularFixtures'):
+                        if type(row.get(k)) is int and 0<=row[k]<=10**12:record[k]=row[k]
+                elif op=='snapshot.events' and row.get('status')=='full_spool_progress':
+                    record.update(operation=op,status='full_spool_progress')
+                    for k in ('bytes','validatedRows','appliedRows'):
+                        if type(row.get(k)) is int and 0<=row[k]<=2**40:record[k]=row[k]
+                    if row.get('stage') in ('waiting_http','download','validate','apply','complete'):record['stage']=row['stage']
+                elif op=='feed.coverage':
+                    record.update(operation=op,lanes={})
+                    for lane in ('prematch','inplay'):
+                        coverage=(row.get('coverage') or {}).get(lane) or {}
+                        record['lanes'][lane]={'decodedMessagesByType':{k:v for k,v in (coverage.get('messagesByType') or {}).items() if re.fullmatch('[0-9]{1,5}',k) and type(v) is int and v>=0}}
+                elif op in FEED_OPERATIONS:
+                    record.update(safe_feed_diagnostic(row));record['operation']=op
+                    if not record.get('category') and not record.get('messageMetadata'):continue
+                else:continue
+                records.append(record)
+            reads.append({'exitCode':code,'linesRead':lines,'tailMayBeTruncated':lines>=5000,'rawLogPrinted':False})
+    return {'window':window,'records':sorted(records,key=lambda r:r['loggedAtUTC'])[-1500:],'reads':reads,'recordsMayBeTruncated':len(records)>1500,'eventLoopLagRecorded':False,'amqpWireHeartbeatRecorded':False,'absenceOfLogIsNotProofOfNoActivity':True}
+
+def cutover_status(directory,start_requested,startup=False,expected_sources=None,recovery_expected=None,timeline_window=None):
     consumers=states('worker');path=directory/'trade-feed.json';result={'operation':'cutover.aws','stage':'status','readOnly':True,'workers':consumers,'posnetChanged':False}
     result['evidence']=feed_evidence(directory,consumers)
+    if timeline_window is not None:result['timeline']=existing_recovery_timeline(consumers,timeline_window)
     if recovery_expected is not None:result['recoveryEvidence']=recovery_runtime_evidence(directory,consumers,recovery_expected)
     if startup:
         result['startupLogs']=startup_log_evidence(consumers)

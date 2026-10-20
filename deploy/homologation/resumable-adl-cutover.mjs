@@ -117,7 +117,9 @@ export async function run(args){
    }
    if(args[4]==='--snapshot-validation-report'){
     stage='snapshot_validation_report';
-    const current=await remote('status',{handoff,freshAuditAt:mac.capturedAt},true);
+    const fromUTC=process.env.ADL_LOG_FROM_UTC,toUTC=process.env.ADL_LOG_TO_UTC;
+    if(!!fromUTC!==!!toUTC)throw Error('TIMELINE_BOTH_BOUNDARIES_REQUIRED');
+    const current=await remote('status',{handoff,freshAuditAt:mac.capturedAt,...(fromUTC?{timelineWindow:{fromUTC,toUTC}}:{})},true);
     const report=snapshotValidationReport(current,ledger);
     const {writeProtectedReport}=await import('./distribution-validation.mjs');
     const reportFile=path.join(folder,`snapshot-validation-${pid}-${parent}.json`);
