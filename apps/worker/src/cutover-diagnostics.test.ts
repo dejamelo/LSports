@@ -80,3 +80,15 @@ test('Git and worker references in arguments cannot hide real entrypoints, dynam
  const mismatched=processMatches('49460 1 T git show apps/worker/src/index.ts','49460 /usr/local/bin/node');assert.equal(mismatched[0].kind,'identity_inconclusive');
  const r=await diagnoseCutover({...options(state),executables:async()=>{throw Error('PRIVATE');}});assert.equal(r.status,'blocked');assert.ok(r.blockers.some(b=>b.reason==='PROCESS_EXECUTABLE_QUERY_FAILED'));assert.ok(!JSON.stringify(r).includes('PRIVATE'));
 }));
+
+test('reviewed API publisher outside checkout is not an AMQP consumer; basename-only and real child workers still block',()=>fixture(async(_dir,state)=>{
+ const parent='49384 49372 T node /var/folders/isolated/adl-panel-update/deploy/homologation/update-adl-api.mjs --repo /repo --commit b89f5df --preserve-local-changes';
+ const git='49460 49384 T /Library/Developer/CommandLineTools/usr/bin/git archive b89f5df apps/worker/src/index.ts';
+ const comm='49384 /usr/local/bin/node\n49372 /bin/bash\n49460 /Library/Developer/CommandLineTools/usr/bin/git\n49500 /usr/local/bin/node';
+ const ps=parent+'\n'+git+'\n49372 1 T bash';
+ const report=await diagnoseCutover({...options(state),ps:async()=>ps,executables:async()=>comm});assert.equal(report.status,'ok');assert.equal(report.matchingWorkerProcesses,0);
+ const unknown=processMatches(ps.replace('/var/folders/isolated/adl-panel-update/deploy/homologation/update-adl-api.mjs','/unknown/update-adl-api.mjs'),comm);assert.ok(unknown.some(p=>p.pid===49384&&p.kind==='identity_inconclusive'));
+ const real=await diagnoseCutover({...options(state),ps:async()=>ps+'\n49500 49384 S node /repo/apps/worker/src/index.ts',executables:async()=>comm});assert.equal(real.status,'blocked');assert.ok(real.blockers.some(b=>b.reason==='WORKER_PROCESS_PRESENT'));assert.ok((real.processes as any).matches.some((m:any)=>m.pid===49500&&m.kind==='worker_entrypoint'));
+ const loader=processMatches(ps.replace('T node /var/folders','T node --import /unknown/loader.mjs /var/folders'),comm);assert.ok(loader.some(p=>p.pid===49384&&p.kind==='identity_inconclusive'));
+ const noComm=processMatches(ps);assert.ok(noComm.some(p=>p.kind==='identity_inconclusive'));
+}));

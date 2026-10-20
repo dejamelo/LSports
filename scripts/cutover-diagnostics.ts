@@ -50,7 +50,10 @@ export function processMatches(text:string, executableText?:string){
   if(/(?:^|\/)(?:concurrently\/dist\/bin\/concurrently(?:\.[cm]?js)?|node_modules\/\.bin\/concurrently)$/.test(entry))return row.state?.startsWith('T')?[]:[{pid:row.pid,parentPid:row.parentPid,kind:'worker_supervisor'}];
   if((['npm','npx'].includes(runtime)||/npm-cli\.js$/.test(entry))&&tokens.some(t=>/^(?:dev|start):worker$/.test(t)))return [{pid:row.pid,parentPid:row.parentPid,kind:'worker_supervisor'}];
   const knownTool=/(?:^|\/)deploy\/homologation\/(?:complete-adl-cutover|resumable-adl-cutover)\.mjs$|(?:^|\/)scripts\/(?:audit-aws-cutover|diagnose-cutover)\.ts$/.test(entry);
-  if(knownTool)return [];
+  // This reviewed API-only publisher reads worker source for its production archive.
+  // Do not trust the basename alone or relax executable/loader checks above.
+  const apiPublisher=row.tokens[1]===entry&&['node','nodejs'].includes(row.exe||'')&&/(?:^|\/)deploy\/homologation\/update-adl-api\.mjs$/.test(entry);
+  if(knownTool||apiPublisher)return [];
   return uncertain();
  });
 }
