@@ -19,7 +19,7 @@ export async function validateFullRecovery(remote,handoff,ledger,save,progress,{
    if(result.newAMQP320.length>=2){result.reason='CURRENT_AMQP_320_AFTER_LOCAL_THROUGHPUT_FIX';}
    else if(result.reason==='CURRENT_LANE_ERROR_SEE_DIAGNOSTIC'&&Object.values(current.lanes||{}).filter(l=>l.phase==='error').every(l=>/^amqp\./.test(l.diagnostic?.operation||'')&&(['network','unexpected'].includes(l.diagnostic?.category))&&!l.diagnostic?.deliveryDisposition))result.reason='AUTOMATIC_SESSION_RECOVERY_PENDING';
   }
-  if(stableForMs>0&&result.reason==='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED'){
+  if(!requireIngress&&stableForMs>0&&result.reason==='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED'){
    const sessions=JSON.stringify(Object.values(current.lanes||{}).map(l=>l.session?.id||l.session?.startedAt));
    if(!stable||stable.sessions!==sessions)stable={since:now(),sessions,counts:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,l.consumerProgress?.acknowledgedMessages||0])),markets:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,Date.parse(l.updates?.lastMarketDecodedAt)||0]))};
    result.stabilityElapsedMs=now()-stable.since;result.stabilityRequiredMs=stableForMs;
@@ -31,9 +31,15 @@ export async function validateFullRecovery(remote,handoff,ledger,save,progress,{
   if(!requireIngress&&allowTransientReconnect&&result.newAMQP320.length<2&&result.snapshotsVerified&&result.consumerRegistrationObserved&&current.selectableSelections===0){zeroSince??=now();if(now()-zeroSince>=120000)result.reason='SNAPSHOTS_READY_NO_CURRENT_SELECTABLE_MARKETS';}else zeroSince=undefined;
   if(requireIngress){
     ledger.ingressStability=ingressStability(current,ledger.ingressStability,now(),stableForMs);
+    ledger.inplayIngressStability=ingressStability(current,ledger.inplayIngressStability,now(),stableForMs,'inplay');
     result.prematchStability=ledger.ingressStability;
+    result.inplayStability={...ledger.inplayIngressStability,reason:ledger.inplayIngressStability.reason?.replaceAll('PREMATCH','INPLAY')};
     result.ingressProgress=Object.fromEntries(Object.entries(current.lanes||{}).map(([k,l])=>[k,l.ingressProgress]));
-    if(result.reason==='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED'&&!ledger.ingressStability.verified)result.reason='INGRESS_STABILITY_PENDING';
+    if(result.reason==='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED'){
+      if(!ledger.ingressStability.verified)result.reason='INGRESS_STABILITY_PENDING';
+      else if(!ledger.inplayIngressStability.verified)result.reason='INPLAY_STABILITY_PENDING';
+      else result.stableConsumptionVerified=true;
+    }
     if(ledger.ingressStability.queueAlert)result.queueAlertThreshold=500;
   }
   ledger.fullRecoveryValidation={at:new Date().toISOString(),...result};await save();
@@ -41,7 +47,7 @@ export async function validateFullRecovery(remote,handoff,ledger,save,progress,{
   if(current.workers?.length!==1||!current.workers[0].running||current.workers[0].oomKilled)throw Error('AWS_WORKER_EXITED_NO_BLIND_RESTART');
   if(['CURRENT_LANE_ERROR_SEE_DIAGNOSTIC','CURRENT_AMQP_320_AFTER_LOCAL_THROUGHPUT_FIX','NO_ACK_ADVANCE_DURING_STABILITY_WINDOW','NO_MARKET_UPDATE_DURING_STABILITY_WINDOW','SNAPSHOTS_READY_NO_CURRENT_SELECTABLE_MARKETS'].includes(result.reason))break;
   if(result.reason==='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED')break;
-  if(requireIngress&&ledger.ingressStability?.verified){if(!result.marketUpdatesVerified)result.reason='PREMATCH_STABLE_INPLAY_MARKET_UPDATES_PENDING';break;}
+  if(requireIngress&&ledger.ingressStability?.verified&&!result.marketUpdatesVerified){result.reason='PREMATCH_STABLE_INPLAY_MARKET_UPDATES_PENDING';break;}
   if(current.lanes?.prematch?.phase==='error'&&result.newAMQP320.length>=2){result.reason='CURRENT_AMQP_320_AFTER_CONTINUOUS_CONSUMER_FIX';break;}
   const pm=current.lanes?.prematch,d=pm?.lastSnapshotDiagnostic;
   if(Date.parse(pm?.lastSnapshotErrorAt)>=Date.parse(pm?.session?.startedAt)&&d?.category&&d.category!=='rate_limited'&&d.reason!=='memory_budget_exceeded'){result.reason='CURRENT_SNAPSHOT_REJECTED_SEE_SANITIZED_DIAGNOSTIC';break;}

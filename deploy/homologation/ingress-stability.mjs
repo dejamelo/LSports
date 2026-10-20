@@ -1,6 +1,6 @@
 // Current-session evidence only; a quiet broker alone is never sufficient.
-export function ingressStability(status,previous,now,requiredMs=1800000){
- const lane=status.lanes?.prematch,m=lane?.ingressProgress,session=lane?.session?.id||lane?.session?.startedAt;
+export function ingressStability(status,previous,now,requiredMs=1800000,laneName='prematch'){
+ const lane=status.lanes?.[laneName],m=lane?.ingressProgress,session=lane?.session?.id||lane?.session?.startedAt;
  const latest=(lane?.distributionObservations||[]).filter(o=>Date.parse(o.observedAtUTC)>=Date.parse(lane?.session?.startedAt)).at(-1);
  const queueAvailable=typeof latest?.queueDepth==='number'&&now-Date.parse(latest.observedAtUTC)<90000;
  const snapshot=Date.parse(lane?.lastSnapshotAt)>=Date.parse(lane?.session?.startedAt);
