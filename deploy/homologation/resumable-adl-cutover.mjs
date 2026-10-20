@@ -44,7 +44,7 @@ async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFi
 export async function run(args){
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   if(args[4]==='--helper-preflight-report'){stage='remote_consumer_gate';await helperPreflightReport(stage);return;}
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
@@ -63,6 +63,32 @@ export async function run(args){
    const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,360000,false,quiet,{stage,action});
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
+  if(args[4]==='--api-validation-resume'){
+   stage='api_health';
+   if(!['local_exit','journal_export','journal_import','aws_start','throughput_upgrade'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_THROUGHPUT_UPGRADE');
+   const {writeProtectedReport}=await import('./distribution-validation.mjs');
+   const reportFile=path.join(folder,`api-health-${pid}-${parent}.json`);
+   let health;
+   for(let attempt=0;attempt<4;attempt++){
+    health=await remote('api_health');
+    ledger.apiHealth={at:new Date().toISOString(),reportFile,result:health};await save();
+    await writeProtectedReport(reportFile,JSON.stringify(health,null,2));
+    if(health.ready)break;
+    // Observe only a possible Docker health transition; never restart either service.
+    if(health.apis?.length!==1||!health.apis[0].running||health.apis[0].oomKilled||health.apis[0].probes?.validator?.status!==200||health.apis[0].probes?.container?.status!==200)break;
+    if(attempt<3)await delay(30000);
+   }
+   if(!health.ready)throw Error('API_HEALTH_UNRESOLVED_SEE_PROTECTED_REPORT_NO_RESTART');
+   if(!health.workerInstallation?.verified)throw Error('INSTALLED_WORKER_CORRECTIONS_UNVERIFIED_NO_RESTART');
+   stage='validation_resume_gate';
+   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
+   const mac=rows.find(r=>r.operation==='cutover.audit');
+   if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+   const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
+   stage='full_feed_validation';
+   await validateFullRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,{requireSupplierOrder:true,allowTransientReconnect:true,stableForMs:120000});
+   return;
+  }
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
   stage='remote_consumer_gate';const pre=await remote('preflight');
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!(args[4]==='--repair-snapshot'?['2147483648','4294967296']:['4294967296']).includes(String(pre.workerModel?.memoryLimitBytes))||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');

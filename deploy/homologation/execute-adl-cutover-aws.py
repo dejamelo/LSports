@@ -57,6 +57,59 @@ def inspect_worker_failure(consumers):
     report['records']=report['records'][-8:];report['privateLogSha256']=hashlib.sha256(raw).hexdigest()
     return report,raw
 
+def api_worker_installation():
+    workers=states('worker')
+    if len(workers)!=1:return {'verified':False,'reason':'WORKER_COUNT_UNEXPECTED'}
+    container=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
+    image=json.loads(run(['docker','image','inspect',container['Image']]))[0]
+    digest=((image.get('Config') or {}).get('Labels') or {}).get('eu.adl.partitioned.patch','')
+    if not re.fullmatch('[0-9a-f]{64}',digest):return {'verified':False,'reason':'PATCH_LABEL_UNVERIFIED'}
+    receipt=SECURE/('partitioned-upgrade-'+digest[:24]+'.json')
+    if not receipt.is_file() or receipt.is_symlink():return {'verified':False,'reason':'PATCH_RECEIPT_UNVERIFIED'}
+    record=json.loads(receipt.read_bytes())
+    intended=json.loads(run(['docker','image','inspect',record['image']]))[0]['Id']
+    return {'verified':intended==container['Image'] and record.get('nullableMarketsVerified') is True and record.get('throughputVerified') is True,
+        'imageId':container['Image'],'nullableMarketsVerified':record.get('nullableMarketsVerified',False),
+        'throughputVerified':record.get('throughputVerified',False),'supplierOrderVerified':record.get('supplierOrderVerified',False)}
+
+def api_private_log_summary(container):
+    result=subprocess.run(['docker','logs','--tail','200',container],capture_output=True,timeout=10,check=False)
+    raw=result.stdout+b'\n'+result.stderr
+    text=raw.decode(errors='replace').lower()
+    signals=classify(raw)
+    for token,name in [('heap out of memory','javascript_heap_exhausted'),('unexpected token','parse_or_syntax_error'),('eaddrinuse','listen_address_in_use'),('enoent','missing_file'),('enospc','disk_full'),('database is locked','sqlite_busy')]:
+        if token in text:signals.append(name)
+    return {'exitCode':result.returncode,'signals':sorted(set(signals)),'sha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
+
+def api_health_report():
+    containers=states('api'); reports=[]
+    for c in containers:
+        item=json.loads(run(['docker','inspect',c['id']]))[0]
+        health=item.get('State',{}).get('Health') or {}
+        check=item.get('Config',{}).get('Healthcheck') or {}
+        expected="fetch('http://127.0.0.1:3001/control')"
+        probes={}
+        for name,url in [('validator','http://127.0.0.1:13001/control')]:
+            start=time.monotonic()
+            try:
+                with urllib.request.urlopen(url,timeout=5) as response: probes[name]={'status':response.status}
+            except urllib.error.HTTPError as error: probes[name]={'status':error.code}
+            except Exception as error: probes[name]={'status':None,'errorType':type(error).__name__}
+            probes[name]['elapsedMs']=round((time.monotonic()-start)*1000)
+        probe=subprocess.run(['docker','exec',c['id'],'node','-e',"fetch('http://127.0.0.1:3001/control',{signal:AbortSignal.timeout(5000)}).then(r=>console.log(JSON.stringify({status:r.status}))).catch(()=>console.log(JSON.stringify({status:null})))"],capture_output=True,timeout=10,check=False)
+        try: probes['container']=json.loads(probe.stdout)
+        except Exception: probes['container']={'status':None}
+        reports.append({**c,'imageId':item.get('Image'),'restartCount':item.get('RestartCount'),
+            'healthcheckMatchesControl':expected in str(check.get('Test',[])),
+            'healthTimeoutNs':check.get('Timeout'),'healthIntervalNs':check.get('Interval'),
+            'failingStreak':health.get('FailingStreak'),
+            'healthHistory':[{'start':r.get('Start'),'end':r.get('End'),'exitCode':r.get('ExitCode'),'signals':classify(str(r.get('Output','')).encode())} for r in health.get('Log',[])[-5:]],
+            'logs':api_private_log_summary(c['id']),'probes':probes})
+    ready=len(reports)==1 and reports[0]['running'] and reports[0]['health']=='healthy' and all(p.get('status')==200 for p in reports[0]['probes'].values())
+    emit(operation='cutover.aws',stage='api_health',status='collected',ready=bool(ready),apis=reports,
+        workers=states('worker'),workerInstallation=api_worker_installation(),endpoint='/control',providerRequests=0,workerRestarted=False,posnetChanged=False,supplierFaultProven=False)
+    return 0
+
 def cutover_main():
     stage='input';backup=None;written=[];worker_requested=False
     try:
@@ -68,6 +121,7 @@ def cutover_main():
         if action=='repair_snapshot':return repair_snapshot(request)
         if action=='upgrade_partitioned':return upgrade_partitioned(request)
         if action=='preflight':return inspect_aws()
+        if action=='api_health':return api_health_report()
         handoff=request['handoff'];audit=handoff['audit']
         require(action in ('import','start','status','startup_report','recover_start','recovery_evidence'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
