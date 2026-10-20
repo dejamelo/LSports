@@ -66,3 +66,15 @@ The previous gate searched the whole command line for worker paths. A suspended 
 Nonzero audit exits now carry allowlisted blocker reason, `audit.<stage>` and exit code through the executor. Raw command lines and stderr remain private. The executor invokes the audit entrypoint from its pinned runtime archive, not the potentially older Mac checkout; the Mac command must archive `scripts`, `package.json` and `tsconfig.json` alongside `deploy/homologation` and link the existing local `node_modules`. Tests cover Git PID 49460 + Node parent 49384, verified tool versus unknown parent, true suspended consumers, executable-query failure, real child exit propagation and audit CLI execution from a temporary pinned tree. AWS/Mac runtime state has not been asserted by these offline tests. The worker-image source manifest is unchanged by this follow-up, so an already prepared image/backup can be reused.
 
 The targeted Mac collection then identified PID 49384 as `update-adl-api.mjs`, with Node executable, no dynamic execution and seven arguments; its parent 49372 was a suspended Bash. The API publisher source was reviewed: it archives Git source and invokes the API-only remote updater, not a local AMQP consumer. The gate now recognizes its exact `deploy/homologation/update-adl-api.mjs` entrypoint only after independent Node executable verification and the same loader/eval checks. A matching basename at an unrelated path remains inconclusive. Regression tests cover the suspended API publisher + Git child + Bash parent, and still block a genuine worker child. No old updater/shell/Git process is resumed or terminated. This changes only the Mac gate; prepared worker-image sources/backup digest remain unchanged.
+
+## Offline deployment gate correction
+
+The Docker gate previously launched an eval module with `--input-type=module`.
+The transport Worker inherited that flag and failed with `ERR_INPUT_TYPE_NOT_ALLOWED`.
+Independently, the 64 MiB test tmpfs could never satisfy the inbox 128 MiB free-space reserve.
+The gate now uses a read-only, verified real module file in the existing protected backup,
+with a bounded 256 MiB tmpfs and unchanged 512 MiB helper memory cap, no network.
+No worker-image source or digest changes: the existing prepared image/receipt is reused.
+Local Docker reproduction verifies both prior failures and successful durable ACK/replay
+with the corrected invocation. This is an offline gate result, not AWS feed validation.
+Opt-in reproduction: `ADL_OFFLINE_PROOF_IMAGE=adl-full-recovery-offline-reviewed python3 deploy/homologation/test-upgrade-partitioned-worker.py`.

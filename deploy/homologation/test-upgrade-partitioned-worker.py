@@ -1,9 +1,32 @@
-import contextlib,copy,datetime,hashlib,io,json,os,tempfile,types,unittest
+import ast,contextlib,copy,datetime,hashlib,io,json,os,subprocess,tempfile,types,unittest
 from pathlib import Path
 HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ @unittest.skipUnless(os.environ.get('ADL_OFFLINE_PROOF_IMAGE'),'opt-in isolated Docker proof')
+ def test_real_docker_proof_and_both_previous_harness_failures(self):
+  image=os.environ['ADL_OFFLINE_PROOF_IMAGE'];repo=HERE.resolve().parents[1]
+  check=next(n.value.value for n in ast.walk(ast.parse((HERE/'upgrade-partitioned-worker.py').read_text())) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and isinstance(n.value.value,str) and 'durable-ingress-offline-ok' in n.value.value)
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);backup.chmod(0o700);args=NS['durable_ingress_proof_command'](backup,image,check)
+   args[2:2]=['--mount','type=bind,source='+str(repo)+',target=/app,readonly']
+   result=subprocess.run(args,capture_output=True,timeout=45);self.assertEqual(result.returncode,0);self.assertIn(b'durable-ingress-offline-ok',result.stdout)
+   small=[v.replace('268435456','67108864') for v in args]
+   result=subprocess.run(small,capture_output=True,timeout=45);self.assertNotEqual(result.returncode,0);self.assertIn(b'not durable ahead of processing',result.stderr)
+   inherited=args[:-1]+['--input-type=module','-e',check]
+   result=subprocess.run(inherited,capture_output=True,timeout=45);self.assertNotEqual(result.returncode,0);self.assertIn(b'ERR_INPUT_TYPE_NOT_ALLOWED',result.stderr)
+ def test_durable_proof_uses_file_entry_and_sufficient_bounded_disk(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);backup.chmod(0o700)
+   args=NS['durable_ingress_proof_command'](backup,'existing-image','console.log(1)')
+   self.assertNotIn('--input-type=module',args);self.assertEqual(args[-2:],['existing-image','/offline-proof.mjs'])
+   self.assertIn('/tmp:size=268435456,mode=1777',args);self.assertIn('none',args);self.assertIn('512m',args)
+   self.assertEqual(args,NS['durable_ingress_proof_command'](backup,'existing-image','console.log(1)'))
+   with self.assertRaises(Exception):NS['durable_ingress_proof_command'](backup,'existing-image','changed')
+   log=backup/'durable-ingress-test.private.log';log.write_bytes(b'PRIVATE_SECRET ERR_INPUT_TYPE_NOT_ALLOWED INBOX_CAPACITY_EXCEEDED')
+   summary=NS['durable_ingress_log_summary'](backup)
+   self.assertEqual(summary['signals'],['worker_inherited_input_type','inbox_disk_reserve_unavailable']);self.assertNotIn('PRIVATE_SECRET',json.dumps(summary))
  def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False,distribution=False,full=False,supplier=False,nullable=False,throughput=False,spool=False,parser=False,durable=False):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();releases=root/'releases';release=releases/('a'*40);release.mkdir(parents=True);volume=root/'volume';volume.mkdir()
@@ -24,7 +47,7 @@ class Upgrade(unittest.TestCase):
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([images[args[3]]]).encode()
     if args[:2]==['docker','tag']:images[args[3]]=images['base'];return b''
-    if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok throughput-offline-ok spool-memory-offline-ok snapshot-throughput-offline-ok planned-distribution-stop-ok durable-ingress-offline-ok' if '--input-type=module' in args else json.dumps(hashes).encode()
+    if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok throughput-offline-ok spool-memory-offline-ok snapshot-throughput-offline-ok planned-distribution-stop-ok durable-ingress-offline-ok' if '--input-type=module' in args or '/offline-proof.mjs' in args else json.dumps(hashes).encode()
     if args[:2]==['docker','build']:images[image]={'Id':'sha256:'+('c'*64),'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}};return b''
     if args[:2]==['docker','inspect']:
      return json.dumps([{'Image':images[selected]['Id'],'HostConfig':{'Memory':4294967296},'Config':{'Env':['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true']},'Mounts':[{'Destination':'/app/.runtime/feed','Type':'volume','RW':False,'Name':'feed'}]}]).encode()

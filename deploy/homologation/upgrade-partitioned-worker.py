@@ -33,6 +33,25 @@ def distribution_stop_log_summary(backup):
         records.append(row)
     return {'present':True,'signals':sorted(set(signals)),'records':records[-12:],'httpStatusCodes':sorted(set(int(v) for v in re.findall(r'httpStatus[\"\']?\s*[:=]\s*([1-5][0-9]{2})',raw.decode(errors='replace')))),'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
 
+def durable_ingress_proof_command(backup,image,check):
+    # A file entrypoint keeps --input-type out of the transport Worker's execArgv.
+    proof=backup/'durable-ingress-proof.mjs'
+    require(not backup.is_symlink() and backup.stat().st_mode&0o077==0,'OFFLINE_PROOF_BACKUP_NOT_PRIVATE')
+    if proof.exists():
+        require(proof.is_file() and not proof.is_symlink() and proof.stat().st_uid==os.geteuid() and proof.read_bytes()==check.encode(),'OFFLINE_PROOF_CHANGED')
+    else:private(proof,check.encode())
+    # Direct file bind: readable by container node, protected on host by parent 0700.
+    os.chmod(proof,0o644)
+    return ['docker','run','--rm','--network','none','--memory','512m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=268435456,mode=1777','--mount','type=bind,source='+str(proof)+',target=/offline-proof.mjs,readonly','--entrypoint','node',image,'/offline-proof.mjs']
+
+def durable_ingress_log_summary(backup):
+    path=backup/'durable-ingress-test.private.log'
+    if not path.exists():return {'present':False}
+    require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and not backup.is_symlink() and backup.stat().st_mode&0o077==0,'OFFLINE_LOG_NOT_PROTECTED')
+    raw=read_tail(path)
+    signals=[label for token,label in [(b'ERR_INPUT_TYPE_NOT_ALLOWED','worker_inherited_input_type'),(b'INBOX_CAPACITY_EXCEEDED','inbox_disk_reserve_unavailable'),(b'not durable ahead of processing','durable_ack_proof_failed'),(b'missing replay','durable_replay_proof_failed')] if token in raw]
+    return {'present':True,'signals':signals,'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
+
 def upgrade_partitioned(request):
     stage='partitioned_upgrade.input';backup=None
     try:
@@ -124,7 +143,7 @@ def upgrade_partitioned(request):
         if request.get('durableIngress') and not progress.get('durableIngressVerified'):
             stage='partitioned_upgrade.offline_durable_ingress'
             check="import{connectDurableMq,openInbox}from'/app/apps/worker/src/durable-ingress.mjs';import{mkdtemp,rm}from'node:fs/promises';const d=await mkdtemp('/tmp/inbox-'),p=d+'/raw.sqlite';let latest;const c=await connectDurableMq({},p,m=>latest=m,{offline:true});c.offline([{content:Buffer.from('payload'),properties:{headers:{MessageType:3}},fields:{}}]);for(let i=0;i<100&&latest?.acknowledged!==1;i++)await new Promise(r=>setTimeout(r,10));if(latest?.acknowledged!==1||latest?.processed!==0)throw Error('not durable ahead of processing');await c.close();const db=openInbox(p);if(db.stats().backlog!==1)throw Error('missing replay');db.close();await rm(d,{recursive:true,force:true});console.log('durable-ingress-offline-ok');"
-            output=run(['docker','run','--rm','--network','none','--memory','512m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=67108864,mode=1777','--entrypoint','node',progress['image'],'--input-type=module','-e',check],timeout=45,log=backup/'durable-ingress-test.private.log')
+            output=run(durable_ingress_proof_command(backup,progress['image'],check),timeout=45,log=backup/'durable-ingress-test.private.log')
             require(b'durable-ingress-offline-ok' in output,'DURABLE_INGRESS_OFFLINE_FAILED');progress['durableIngressVerified']=True;save(progress)
         if phase=='prepare':
             if request.get('spoolMemoryFix') and not progress.get('spoolMemoryVerified'):
@@ -258,6 +277,8 @@ def upgrade_partitioned(request):
         if stage=='partitioned_upgrade.distribution_stop' and isinstance(error,subprocess.CalledProcessError):reason='DISTRIBUTION_STOP_HELPER_EXIT_NONZERO'
         if stage=='partitioned_upgrade.distribution_stop' and isinstance(error,subprocess.TimeoutExpired):reason='DISTRIBUTION_STOP_HELPER_TIMEOUT'
         detail=safe_helper_error(error)
+        if stage=='partitioned_upgrade.offline_durable_ingress' and backup:
+            detail['offlineDurableIngress']=durable_ingress_log_summary(backup)
         if stage=='partitioned_upgrade.distribution_stop' and backup:
             detail['distributionStop']=distribution_stop_log_summary(backup);detail['workerStates']=states('worker')
         emit(operation='cutover.aws',stage=stage,status='blocked',reason=reason,backup=str(backup) if backup else None,posnetChanged=False,rawExceptionPrinted=False,**detail);return 2
