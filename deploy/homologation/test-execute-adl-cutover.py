@@ -205,4 +205,22 @@ class NullableShapeSafety(unittest.TestCase):
   safe=NS['safe_feed_diagnostic'](d)['snapshotValidation'];self.assertEqual(safe['fieldPath'],'Markets[12].Bets[0]');self.assertEqual(safe['actualType'],'null');self.assertEqual(safe['fixtureId'],20563979);self.assertNotIn('MUST_NEVER_PRINT',json.dumps(safe))
   d['snapshotValidation'].update(fieldPath='MUST_NEVER_PRINT',actualType={'secret':'MUST_NEVER_PRINT'},fixtureId='MUST_NEVER_PRINT');safe=NS['safe_feed_diagnostic'](d)['snapshotValidation'];self.assertNotIn('fieldPath',safe);self.assertNotIn('actualType',safe);self.assertNotIn('fixtureId',safe)
 
+class RecoveryRuntimeEvidence(unittest.TestCase):
+ def test_proof_is_read_only_confirms_nullable_source_and_does_not_read_private_snapshot(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);secure=root/'secure';secure.mkdir();feed=root/'feed';feed.mkdir();spool=feed/'.full-snapshot-test';spool.mkdir();(spool/'response.private.json').write_text('PRIVATE_BODY_NOT_TO_PRINT');(feed/'trade-feed.json.snapshot-example.lock').write_text('7')
+   digest='a'*64;(secure/('partitioned-upgrade-'+digest[:24]+'.json')).write_text(json.dumps({'digest':digest,'nullableMarketsVerified':True}))
+   names=['apps/worker/src/connected.ts','apps/worker/src/provider.ts','apps/worker/src/full-snapshot.ts'];before={n:'b'*64 for n in names};candidate={n:'c'*64 for n in names};calls=[]
+   def run(args,**kw):
+    calls.append(args)
+    if args[:2]==['docker','inspect']:return json.dumps([{'Image':'sha256:'+'d'*64,'HostConfig':{'ReadonlyRootfs':True},'Mounts':[]}]).encode()
+    if args[:3]==['docker','image','inspect']:return json.dumps([{'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}}]).encode()
+    if args[:2]==['docker','run']:return json.dumps(before).encode()
+    if args[:2]==['docker','exec']:return b'7\n'
+    raise AssertionError('unexpected mutation or provider call')
+   old={k:NS.get(k) for k in ('SECURE','run','subprocess')};NS.update(SECURE=secure,run=run,subprocess=types.SimpleNamespace(run=lambda *a,**kw:types.SimpleNamespace(returncode=0,stdout=b'{"CPUPerc":"90.00%","MemPerc":"50.0%"}')))
+   try:
+    result=NS['recovery_runtime_evidence'](feed,[{'id':'worker','running':True}],{'before':before,'candidate':candidate});self.assertTrue(result['nullableCollectionsInstalled']);self.assertTrue(result['capturedRowPreviouslyVerified']);self.assertTrue(result['matchesBefore']);self.assertFalse(result['brokerCloseCauseProven']);self.assertEqual(result['coordinatorLocks'][0]['action'],'preserved');self.assertEqual(result['snapshotSpools'][0]['bytes'],len('PRIVATE_BODY_NOT_TO_PRINT'));self.assertNotIn('PRIVATE_BODY',json.dumps(result));self.assertTrue(all('--network' in c and 'none' in c and '--memory' in c and '128m' in c for c in calls if c[:2]==['docker','run']));self.assertTrue((feed/'trade-feed.json.snapshot-example.lock').exists())
+   finally:NS.update(old)
+
 if __name__=='__main__':unittest.main()

@@ -69,3 +69,13 @@ test('null collections preserve stored settlement evidence but never refresh old
  state.apply('prematch',[{...convertSnapshotRow({...seed,Markets:null}),marketRecovery:true}],now+1,{source:'snapshot',receivedAt:now+12});state.finishPartitionedSnapshot('prematch',new Set([20563979]));assert.equal(state.feed(now+12).events[0].selections.filter(s=>s.available).length,1);assert.equal(state.feed(now+12).events[0].selections.find(s=>s.available)!.odds,2.2);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('HTTP coordinator is released before local snapshot validation/application; InPlay respects spacing without waiting for PreMatch apply',async()=>{
+ const {SnapshotScheduler}=await import('./snapshot-scheduler.js');const dir=await mkdtemp(join(tmpdir(),'adl-http-scope-'));let now=Date.now(),otherRequests=0;
+ const pm=new SnapshotScheduler('http://isolated',4511,{root:join(dir,'feed'),now:()=>now}),ip=new SnapshotScheduler('http://isolated',4510,{root:join(dir,'feed'),now:()=>now});
+ const server=createServer((_req,res)=>res.end(JSON.stringify({Body:[{...row(20563979),Markets:null},row(2)],Header:{HttpStatusCode:200}})));await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const stages:string[]=[];
+ try{await fullSnapshot({url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},downloadGate:download=>pm.run('snapshot.events',download),progress:p=>stages.push(p.stage),limits:{responseBytes:1024*1024},async apply(){
+  if(!otherRequests){await assert.rejects(ip.run('snapshot.events',async()=>assert.fail('spacing cannot be bypassed')),(e:any)=>e.diagnostic.rateLimitSource==='local_host_cooldown'&&e.diagnostic.httpStatus===undefined);now+=15000;await ip.run('snapshot.events',async()=>{otherRequests++;});}
+ }});assert.equal(otherRequests,1);assert.ok(stages.indexOf('validate')<stages.indexOf('apply'));assert.equal(stages.at(-1),'complete');}
+ finally{server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
+});

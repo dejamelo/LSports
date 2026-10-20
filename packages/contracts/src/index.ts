@@ -213,7 +213,7 @@ export interface SnapshotValidationInspection {
 }
 export interface DistributionObservation {
   stage:'before_start'|'start_response'|'after_propagation';observedAtUTC:string;
-  bodyIsDistributionOn?:boolean;sdkIsDistributionOn?:boolean;
+  bodyIsDistributionOn?:boolean;sdkIsDistributionOn?:boolean;queueDepth?:number;consumerCount?:number;messagesPerSecond?:number;
   startReturnedAtUTC?:string;elapsedSinceStartMs?:number;propagationDelayMs?:number;
   startMessage?:'activated'|'already_active'|'missing'|'unrecognized';
 }
@@ -377,7 +377,8 @@ export interface FeedMessageMetadata {
 }
 export interface ConnectionState {
   consumerProgress?:{acknowledgedMessages:number;lastAckAt?:string;registeredAt?:string;active?:boolean};
-  fullSnapshot?:{method:'disk_spool_two_pass';startedAt:string;completedAt?:string;rows?:number;bytes?:number;ackedDuringRecovery?:number};
+  persistenceProgress?:{writes:number;lastDurationMs:number;lastCompletedAt:string};
+  fullSnapshot?:{stage?:'waiting_http'|'download'|'validate'|'apply'|'complete';validatedRows?:number;appliedRows?:number;lastProgressAt?:string;method:'disk_spool_two_pass';startedAt:string;completedAt?:string;rows?:number;bytes?:number;ackedDuringRecovery?:number};
   distributionObservations?:DistributionObservation[];
   session?: {id:string;startedAt:string};
   sessionEnds?: {id:string;startedAt:string;endedAt:string;diagnostic:IntegrationDiagnostic}[];

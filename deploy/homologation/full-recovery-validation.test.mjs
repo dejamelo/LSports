@@ -25,3 +25,25 @@ test('supplier confirmation requires distribution, registered consumers and curr
  assert.equal(fullRecoveryResult(s,options).reason,'FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED');
  s.lanes.inplay.consumerProgress.active=false;assert.equal(fullRecoveryResult(s,options).consumerRegistrationObserved,false);
 });
+
+test('one transient forced close uses runtime reconnect, two post-fix closes stop with concrete reason without restart',async()=>{
+ const first=status();first.status='recovering';first.lanes.prematch.phase='error';first.lanes.prematch.diagnostic={operation:'amqp.connection',category:'unexpected',amqpCode:320};first.lanes.prematch.sessionEnds=[{endedAt:end,diagnostic:{amqpCode:320}}];let calls=0;const ledger={steps:{}};
+ await validateFullRecovery(async()=>++calls===1?first:status(),{},ledger,async()=>{},'/private/progress',{durationMs:1000,allowTransientReconnect:true,wait:async()=>{}});assert.equal(calls,2);assert.equal(ledger.steps.full_validation.status,'ok');
+ first.lanes.prematch.sessionEnds.push({endedAt:'2026-10-19T17:02:00Z',diagnostic:{amqpCode:320}});const next={steps:{}};const previous=process.exitCode;
+ try{await validateFullRecovery(async()=>first,{},next,async()=>{},'/private/progress',{durationMs:1000,allowTransientReconnect:true,wait:async()=>assert.fail('do not blindly wait after repeated 320')});assert.equal(next.fullRecoveryValidation.reason,'CURRENT_AMQP_320_AFTER_LOCAL_THROUGHPUT_FIX');}finally{process.exitCode=previous;}
+});
+
+test('stable recovery requires new ACK and market updates in BOTH lanes during the observation window',async()=>{
+ for(const changes of [true,false]){
+  let clock=0,calls=0;const ledger={steps:{}},previous=process.exitCode;
+  try{await validateFullRecovery(async()=>{const s=status();calls++;for(const l of Object.values(s.lanes)){l.consumerProgress.acknowledgedMessages+=calls;l.updates={lastMarketDecodedAt:changes?new Date(Date.parse(end)+clock).toISOString():end};}return s;},{},ledger,async()=>{},'/private/progress',{durationMs:200000,stableForMs:120000,now:()=>clock,wait:async()=>{clock+=60000;}});assert.equal(calls,3);assert.equal(ledger.fullRecoveryValidation.stableConsumptionVerified===true,changes);assert.equal(ledger.fullRecoveryValidation.reason,changes?'FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED':'NO_MARKET_UPDATE_DURING_STABILITY_WINDOW');}
+  finally{process.exitCode=previous;}
+ }
+});
+
+test('completed snapshots but no selectable markets finish with evidence instead of another long wait',async()=>{
+ let clock=0,calls=0;const ledger={steps:{}},previous=process.exitCode;
+ try{await validateFullRecovery(async()=>{calls++;const s=status();s.selectableSelections=0;for(const l of Object.values(s.lanes))l.consumerProgress={...l.consumerProgress,active:true,registeredAt:end};return s;},{},ledger,async()=>{},'/private/progress',{durationMs:45*60000,allowTransientReconnect:true,now:()=>clock,wait:async()=>{clock+=60000;}});assert.equal(calls,3);assert.equal(ledger.fullRecoveryValidation.reason,'SNAPSHOTS_READY_NO_CURRENT_SELECTABLE_MARKETS');assert.equal(ledger.fullRecoveryValidation.snapshotsVerified,true);}finally{process.exitCode=previous;}
+});
+
+test('historical ACKs never label an inactive or stopped consumer active',()=>{const s=status();s.lanes.prematch.consumerProgress={...s.lanes.prematch.consumerProgress,active:false,registeredAt:end};s.lanes.inplay.consumerProgress={...s.lanes.inplay.consumerProgress,active:true,registeredAt:end};s.lanes.inplay.phase='stopped';const r=fullRecoveryResult(s);assert.equal(r.ackObserved.prematch,true);assert.equal(r.consumerActiveObserved,false);assert.equal(r.inplayConsumerActiveObserved,false);assert.equal(r.continuousConsumptionObserved,false);assert.equal(r.consumerRegistrationObserved,false);});

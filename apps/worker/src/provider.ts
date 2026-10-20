@@ -68,7 +68,7 @@ export interface ProviderClients {
   }>;
   startDistribution(): Promise<void>;
   stopDistribution?(): Promise<void>;
-  snapshotFull?:(sink:{assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal})=>Promise<{ids:Set<number>;rows:number;bytes:number}>;
+  snapshotFull?:(sink:{assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal;progress?:(progress:import('./full-snapshot.js').FullSnapshotProgress)=>void})=>Promise<{ids:Set<number>;rows:number;bytes:number}>;
   snapshotAudit?: () => SnapshotAudit | undefined;
   outrightResponseInspections?: () => NonNullable<import("@lsports/contracts").ConnectionState["outrightRecovery"]>["responseInspections"];
   subscriptions?: () => Promise<{ fixtures: number }>;
@@ -260,8 +260,9 @@ export function clients(
         return result;
       },
     }:{}),
-    ...(config.lane==='prematch'?{async snapshotFull(sink:{assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal}){
-      const result=await scheduler.run('snapshot.events',()=>operation('snapshot.events','http',()=>fullSnapshot({url:urls.snapshotUrl,credentials,directory:dirname(statePath()),...sink})));
+    ...(config.lane==='prematch'?{async snapshotFull(sink:{assertOpen():void;apply:(row:TradeEvent,at:number)=>Promise<void>;signal:AbortSignal;progress?:(progress:import('./full-snapshot.js').FullSnapshotProgress)=>void}){
+      // HTTP reservation ends when download completes, not after local parsing/apply.
+      const result=await operation('snapshot.events','http',()=>fullSnapshot({url:urls.snapshotUrl,credentials,directory:dirname(statePath()),...sink,downloadGate:download=>scheduler.run('snapshot.events',download)}));
       audit={transport:{receivedBytes:result.bytes,responseLimitBytes:2147483648,timeoutMs:120000},bodyShape:'array',providerRows:result.rows,sdkRows:result.rows,acceptedRows:result.rows,filters:'none'};
       console.info(JSON.stringify({lane:config.lane,operation:'snapshot.events',status:'full_spool_complete',rows:result.rows,decodedBytes:result.bytes,startedAt:result.startedAt,completedAt:result.completedAt}));
       return result;
@@ -308,6 +309,7 @@ export function clients(
         const raw=(snapshotResponsePayload() as {Body?:{IsDistributionOn?:unknown}}|undefined)?.Body?.IsDistributionOn;
         const now=Date.now();
         recordDistribution({stage:startReturnedAt===undefined?'before_start':'after_propagation',observedAtUTC:new Date(now).toISOString(),...(typeof raw==='boolean'?{bodyIsDistributionOn:raw}:{}),sdkIsDistributionOn:status.isDistributionOn,
+          ...(Number.isSafeInteger(status.numberMessagesInQueue)&&status.numberMessagesInQueue>=0?{queueDepth:status.numberMessagesInQueue}:{}),...(Array.isArray(status.consumers)?{consumerCount:status.consumers.length}:{}),...(Number.isFinite(status.messagesPerSecond)&&status.messagesPerSecond>=0?{messagesPerSecond:status.messagesPerSecond}:{}),
           ...(startReturnedAt!==undefined?{startReturnedAtUTC:new Date(startReturnedAt).toISOString(),elapsedSinceStartMs:Math.max(0,Math.round(performance.now()-startReturnedMonotonic!)),propagationDelayMs:DEFUALT_DISTRIBUTION_PROPAGATION_DELAY_MS}:{})});
         return status;
       });

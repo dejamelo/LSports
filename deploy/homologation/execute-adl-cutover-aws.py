@@ -63,13 +63,13 @@ def cutover_main():
         require(os.geteuid()==0,'ROOT_REQUIRED')
         raw=sys.stdin.buffer.read(1024*1024+1);require(len(raw)<=1024*1024,'HANDOFF_SIZE_LIMIT')
         request=json.loads(raw);action=request.get('action')
-        if action in ('patch_worker','repair_snapshot','upgrade_partitioned','preflight','import','start','status','startup_report','recover_start'):stage=action
+        if action in ('patch_worker','repair_snapshot','upgrade_partitioned','preflight','import','start','status','startup_report','recover_start','recovery_evidence'):stage=action
         if action=='patch_worker':return patch_worker(request)
         if action=='repair_snapshot':return repair_snapshot(request)
         if action=='upgrade_partitioned':return upgrade_partitioned(request)
         if action=='preflight':return inspect_aws()
         handoff=request['handoff'];audit=handoff['audit']
-        require(action in ('import','start','status','startup_report','recover_start'),'INVALID_ACTION')
+        require(action in ('import','start','status','startup_report','recover_start','recovery_evidence'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(audit['operation']=='cutover.audit' and audit['readOnly'] is True,'INVALID_AUDIT')
         deadline=datetime.datetime.fromisoformat(audit['notBeforeUTC'].replace('Z','+00:00')).timestamp()
@@ -89,8 +89,8 @@ def cutover_main():
         require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','VOLUME_PROJECT_UNVERIFIED')
         directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'VOLUME_SYMLINK')
         receipt=SECURE/('cutover-'+digest+'.json')
-        if action in ('status','startup_report'):
-            saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'),startup=action=='startup_report',expected_sources=request.get('expectedSources'))
+        if action in ('status','startup_report','recovery_evidence'):
+            saved=json.loads(receipt.read_bytes());return cutover_status(directory,saved.get('startRequestedAtUTC'),startup=action=='startup_report',expected_sources=request.get('expectedSources'),recovery_expected=request.get('expectedRuntime') if action=='recovery_evidence' else None)
         if request.get('expectedWorkerImage'):require(model(base)['services']['worker']['image']==request['expectedWorkerImage'],'WORKER_IMAGE_NOT_EXPECTED_CORRECTION')
         stage='no_consumer_gate'
         running=[c for c in states('worker') if c['running']]
@@ -218,6 +218,8 @@ def safe_distribution_observation(value):
         if type(value.get(key)) is bool:out[key]=value[key]
     for key in ('elapsedSinceStartMs','propagationDelayMs'):
         if type(value.get(key)) is int and 0<=value[key]<=3600000:out[key]=value[key]
+    for key in ('queueDepth','consumerCount','messagesPerSecond'):
+        if type(value.get(key)) in (int,float) and 0<=value[key]<=10**12:out[key]=value[key]
     if value.get('startMessage') in ('activated','already_active','missing','unrecognized'):out['startMessage']=value['startMessage']
     return out
 
@@ -402,9 +404,48 @@ def amqp_configuration_evidence(consumers,expected_sources):
     report['installedSourceMatchesRepository']={name:hashes.get(name)==expected_sources[name] for name in names}
     return report
 
-def cutover_status(directory,start_requested,startup=False,expected_sources=None):
+def recovery_runtime_evidence(directory,consumers,expected):
+    require(len(consumers)==1 and consumers[0]['running'],'RECOVERY_EVIDENCE_REQUIRES_ONE_RUNNING_WORKER')
+    names=['apps/worker/src/connected.ts','apps/worker/src/provider.ts','apps/worker/src/full-snapshot.ts']
+    require(isinstance(expected,dict) and set(expected)=={'before','candidate'} and all(isinstance(expected[k],dict) and set(expected[k])==set(names) and all(isinstance(v,str) and re.fullmatch('[0-9a-f]{64}',v) for v in expected[k].values()) for k in expected),'RECOVERY_SOURCE_EXPECTATIONS_UNVERIFIED')
+    info=json.loads(run(['docker','inspect',consumers[0]['id']]))[0];image=json.loads(run(['docker','image','inspect',info['Image']]))[0]
+    digest=(image.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch');require(isinstance(digest,str) and re.fullmatch('[0-9a-f]{64}',digest),'RECOVERY_IMAGE_RECEIPT_UNVERIFIED')
+    receipt=SECURE/('partitioned-upgrade-'+digest[:24]+'.json');require(receipt.is_file() and not receipt.is_symlink() and receipt.stat().st_size<1024*1024,'RECOVERY_RECEIPT_UNVERIFIED')
+    progress=json.loads(receipt.read_bytes());require(progress.get('digest')==digest,'RECOVERY_RECEIPT_DIGEST_MISMATCH')
+    probe="const f=require('node:fs'),h=require('node:crypto');console.log(JSON.stringify(Object.fromEntries("+json.dumps(names)+".map(n=>[n,h.createHash('sha256').update(f.readFileSync('/app/'+n)).digest('hex')]))));"
+    require(info.get('HostConfig',{}).get('ReadonlyRootfs') is True,'RECOVERY_CODE_FILESYSTEM_NOT_READ_ONLY')
+    require(not any('/app/'+name==m.get('Destination','') or ('/app/'+name).startswith(m.get('Destination','').rstrip('/')+'/') for name in names for m in info.get('Mounts',[])),'RECOVERY_CODE_MOUNTED_OVER_IMAGE')
+    hashes=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',info['Image'],'-e',probe],timeout=20))
+    result={'readOnly':True,'providerRequests':0,'capturedAtUTC':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z'),'nullableCollectionsInstalled':hashes==expected['before'] or hashes==expected['candidate'],'capturedRowPreviouslyVerified':progress.get('nullableMarketsVerified') is True,'matchesBefore':hashes==expected['before'],'matchesCandidate':hashes==expected['candidate'],'candidateOfflineVerified':progress.get('throughputVerified') is True,'snapshotSpools':[],'coordinatorLocks':[],'brokerCloseCauseProven':False}
+    owners=[]
+    for target in sorted(directory.glob('trade-feed.json.snapshot-*.lock')):
+
+        try:
+            if not target.exists():continue
+            require(target.is_file() and not target.is_symlink() and target.stat().st_size<=32,'RECOVERY_LOCK_UNVERIFIED');owner=target.read_text().strip()
+        except FileNotFoundError:continue
+        if owner.isdigit() and 1<int(owner)<2**31:owners.append(int(owner))
+    if owners:
+        probe='for pid in '+' '.join(map(str,sorted(set(owners))))+'; do if test -d /proc/$pid; then printf "%s\\n" "$pid"; fi; done'
+        present={int(line) for line in run(['docker','exec',consumers[0]['id'],'sh','-c',probe],timeout=20).decode().splitlines() if line.isdigit()}
+        result['coordinatorLocks']=[{'ownerPid':pid,'present':pid in present,'action':'preserved'} for pid in sorted(set(owners))]
+    for folder in list(directory.glob('.full-snapshot-*'))[:8]:
+        target=folder/'response.private.json'
+        if folder.is_dir() and not folder.is_symlink() and target.is_file() and not target.is_symlink():
+            try:data=target.stat()
+            except FileNotFoundError:continue
+            result['snapshotSpools'].append({'bytes':data.st_size,'modifiedAtUTC':datetime.datetime.fromtimestamp(data.st_mtime,datetime.timezone.utc).isoformat().replace('+00:00','Z')})
+    stats=subprocess.run(['docker','stats','--no-stream','--format','{{json .}}',consumers[0]['id']],capture_output=True,timeout=20,check=False)
+    if stats.returncode==0:
+        try:
+            row=json.loads(stats.stdout);result['resources']={k:float(str(row[key]).rstrip('%')) for k,key in (('cpuPercent','CPUPerc'),('memoryPercent','MemPerc')) if re.fullmatch(r'[0-9]+(?:\.[0-9]+)?%',str(row.get(key,'')))}
+        except Exception:result['resourceStatsUnavailable']=True
+    return result
+
+def cutover_status(directory,start_requested,startup=False,expected_sources=None,recovery_expected=None):
     consumers=states('worker');path=directory/'trade-feed.json';result={'operation':'cutover.aws','stage':'status','readOnly':True,'workers':consumers,'posnetChanged':False}
     result['evidence']=feed_evidence(directory,consumers)
+    if recovery_expected is not None:result['recoveryEvidence']=recovery_runtime_evidence(directory,consumers,recovery_expected)
     if startup:
         result['startupLogs']=startup_log_evidence(consumers)
         result['amqpComparison']=amqp_configuration_evidence(consumers,expected_sources)
@@ -423,7 +464,8 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
         lanes[lane]={k:source.get(k) for k in fields}
         progress=source.get('consumerProgress') or {};full=source.get('fullSnapshot') or {}
         lanes[lane]['consumerProgress']={k:v for k,v in progress.items() if k=='active' and type(v) is bool or k=='acknowledgedMessages' and type(v) is int and 0<=v<=10**12 or k in ('lastAckAt','registeredAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
-        lanes[lane]['fullSnapshot']={k:v for k,v in full.items() if k=='method' and v=='disk_spool_two_pass' or k in ('rows','bytes','ackedDuringRecovery') and type(v) is int and 0<=v<=2**40 or k in ('startedAt','completedAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
+        lanes[lane]['fullSnapshot']={k:v for k,v in full.items() if k=='method' and v=='disk_spool_two_pass' or k=='stage' and v in ('waiting_http','download','validate','apply','complete') or k in ('rows','bytes','ackedDuringRecovery','validatedRows','appliedRows') and type(v) is int and 0<=v<=2**40 or k in ('startedAt','completedAt','lastProgressAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
+        persistence=source.get('persistenceProgress') or {};lanes[lane]['persistenceProgress']={k:v for k,v in persistence.items() if k in ('writes','lastDurationMs') and type(v) is int and 0<=v<=10**12 or k=='lastCompletedAt' and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
         lanes[lane]['distributionObservations']=[safe_distribution_observation(o) for o in source.get('distributionObservations',[])[-3:] if isinstance(o,dict)]
         lane_coverage=feed.get('coverage',{}).get(lane,{}) or {}
         coverage=lane_coverage.get('activity',{})

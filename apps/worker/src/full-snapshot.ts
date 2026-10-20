@@ -73,16 +73,17 @@ export function convertSnapshotRow(raw:unknown):TradeEvent{
  const row=TransformerUtil.transform(normalizeSdkTimestamps(raw),GetEventsResultElement) as TradeEvent;attachTimestampPrecision(raw,row);
  if(row.fixtureId!==r.FixtureId||!row.fixture||row.markets?.some(m=>!Number.isSafeInteger(m.id)||!m.id||m.bets?.some(b=>b.id===undefined||b.id===null||String(b.id).trim()==='')))return fail('sdk_row_mismatch');return row;
 }
-export async function fullSnapshot(options:{url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;signal?:AbortSignal;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
+export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string};
+export async function fullSnapshot(options:{url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
  const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};fullSnapshotMemory();options.assertOpen();
  const space=await statfs(options.directory);if(Number(space.bavail)*Number(space.bsize)<limits.responseBytes+512*MiB)fail('disk_headroom');
  const dir=await mkdtemp(join(options.directory,'.full-snapshot-'));const file=join(dir,'response.private.json');
- let bytes=0,timedOut=false,httpStatus:number|undefined;const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
+ let bytes=0,timedOut=false,httpStatus:number|undefined,validatedRows=0,appliedRows=0;const progress=(stage:FullSnapshotProgress['stage'])=>options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString()});const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
  const timer=setTimeout(()=>{timedOut=true;abort.abort();},limits.totalMs);timer.unref();
  try{
   const url=new URL('/Prematch/GetEvents',options.url);if(url.username||url.password||!['http:','https:'].includes(url.protocol))fail('invalid_endpoint');
   const body=JSON.stringify(new Mapper(options.credentials).map(new GetEventRequestDto({}),GetEventRequest));
-  await new Promise<void>((resolve,reject)=>{
+  progress('waiting_http');const download=()=>{progress('download');return new Promise<void>((resolve,reject)=>{
    const req=(url.protocol==='https:'?httpsRequest:httpRequest)(url,{method:'POST',signal,headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body),'Accept-Encoding':'gzip, deflate, br'}},res=>{
     httpStatus=res.statusCode;
     if(res.statusCode!==200){res.resume();const status=res.statusCode||0;const retry=res.headers['retry-after'];const seconds=typeof retry==='string'?Number(retry):NaN;const at=typeof retry==='string'?Date.parse(retry):NaN;reject(new OperationError({operation:'snapshot.events',protocol:'http',httpStatus:status,category:status===429?'rate_limited':status===401?'authentication_rejected':'supplier_error',...(status===429?{retryAfterMs:Number.isFinite(seconds)?Math.max(1000,seconds*1000):Number.isFinite(at)?Math.max(1000,at-Date.now()):60000}:{}),message:'HTTP snapshot completo rechazado; cuerpo omitido.'}));return;}
@@ -93,12 +94,15 @@ export async function fullSnapshot(options:{url:string;credentials:{packageId:nu
     const streams=decompressor?[res,decompressor,bound,dest]:[res,bound,dest];
     pipeline(streams,{signal}).then(resolve,reject);
    });req.setTimeout(limits.idleMs,()=>req.destroy(new Error('Snapshot idle timeout')));req.on('error',reject);req.end(body);
-  });clearTimeout(timer);options.assertOpen();
+  });};
+  await (options.downloadGate?options.downloadGate(download):download());clearTimeout(timer);options.assertOpen();progress('validate');
   const ids=new Set<number>();let rows=0;
-  await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);if(rows%10===0){fullSnapshotMemory();await yieldTurn();}},limits.itemBytes);
+  await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){fullSnapshotMemory();await yieldTurn();}},limits.itemBytes);
   fullSnapshotMemory(bytes*4+128*MiB);
+  progress('apply');
   // Envelope (including trailing Header/errors) and ALL rows verified before first application.
-  await walkSnapshot(file,async raw=>{options.assertOpen();fullSnapshotMemory();await options.apply(convertSnapshotRow(raw),started);},limits.itemBytes);
+  await walkSnapshot(file,async raw=>{options.assertOpen();fullSnapshotMemory();await options.apply(convertSnapshotRow(raw),started);appliedRows++;if(appliedRows%100===0)progress('apply');},limits.itemBytes);
+  progress('complete');
   return {ids,rows,bytes,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString()};
  }catch(error){if(timedOut)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',timeoutMs:limits.totalMs,message:'Tiempo máximo de descarga snapshot excedido; baseline bloqueado.'});if(error instanceof OperationError&&httpStatus!==undefined&&error.diagnostic.httpStatus===undefined)throw new OperationError({...error.diagnostic,httpStatus});throw error;}finally{clearTimeout(timer);abort.abort();await rm(dir,{recursive:true,force:true});}
 }

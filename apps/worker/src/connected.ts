@@ -34,6 +34,12 @@ const transportEnd=(reason:"connection_closed"|"channel_closed"|"consumer_cancel
  message:reason==="worker_stopped"?"Worker detenido por señal local.":"Transporte AMQP finalizado; el evento de cierre no informa la causa del broker.",
 });
 
+// Join only a not-yet-started save. Joining an active write could ACK changes
+// made after its capture; every caller must await a capture after its request.
+export function coalescedPersistence(persist:()=>Promise<void>){
+ let tail:Promise<void>=Promise.resolve(),queued:Promise<void>|undefined;
+ return()=>{if(queued)return queued;let job:Promise<void>;job=tail.then(()=>{if(queued===job)queued=undefined;return persist();});queued=job;tail=job.catch(()=>{});return job;};
+}
 export async function runConnected(signal: AbortSignal, dependencies: {
   config?: ReturnType<typeof loadConfig>;
   path?: string;
@@ -66,18 +72,18 @@ export async function runConnected(signal: AbortSignal, dependencies: {
       tenantTickets = new TenantTickets(platform);
     }
     const publish = createPublisher(path);
-    let saveTail:Promise<void>=Promise.resolve();
-    const save = () => {
-      const pending=saveTail.then(()=>operation("file.persist", "local", async () => {
-        const feed = state.feed();
+    let writes=0,lastPersistLog=0;
+    const save = coalescedPersistence(()=>operation("file.persist", "local", async () => {
+        const started=performance.now();const feed = state.feed();
         tenantTickets?.reconcile(feed);
-      ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
+        ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
         const {regular,...saved}=checkpoint(state);
         await persistRegularCheckpoint(path,regular);
         await publish(feed,{...saved,regularExternal:true});
-      }));
-      saveTail=pending.catch(()=>{});return pending;
-    };
+        const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString()};
+        for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
+        if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:regular.length}));}
+    }));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
     const heartbeat = setInterval(() => {
@@ -417,10 +423,10 @@ export async function session(
         state.set(lane,{lastSnapshotAttemptAt:new Date(started).toISOString()});
         try {
           if(lane==='prematch'&&api.snapshotFull){
-            const ackedAtStart=acknowledgedMessages;let appliedRows=0;const fullStarted=Date.now();
+            const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();let lastProgressLog=0;
             regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});state.beginPartitionedSnapshot(lane);await save();
-            const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,apply:async(row,at)=>{
-              const applied=processing.then(async()=>{requireOpen();state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});if(++appliedRows%10===0)await save();});
+            const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>{
+              const applied=processing.then(async()=>{requireOpen();state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});});
               processing=applied;await applied;
             }});
             requireOpen();await processing;requireOpen();state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted);partitionCompleted=true;fullCompleted=true;
@@ -465,7 +471,8 @@ export async function session(
           if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded" && !rejectedPartition) throw error;
           // Invalid partition HTTP is not AMQP failure. Keep persist-before-ACK and
           // baseline false, without changing the independent InPlay recovery policy.
-          nextDue["snapshot.events"] = rejectedPartition?Math.max(retryTime(diagnostic),Date.now()+Math.max(300000,config.recoveryMs)):retryTime(diagnostic);
+          const localDeferral=diagnostic.deferred===true&&['local_in_flight','local_host_cooldown','local_operation_cooldown'].includes(diagnostic.rateLimitSource||'');
+          nextDue["snapshot.events"] = localDeferral?retryTime(diagnostic):rejectedPartition?Math.max(retryTime(diagnostic),Date.now()+Math.max(300000,config.recoveryMs)):retryTime(diagnostic);
           console.warn(JSON.stringify({ lane, status: "deferred", ...diagnostic }));
         }
       }
@@ -586,6 +593,7 @@ export async function session(
   } finally {
     signal.removeEventListener("abort", abort);
     state.set(lane, {
+      consumerProgress:{...state.connections[lane].consumerProgress!,active:false},
       phase: signal.aborted ? "stopped" : "error",
       message: signal.aborted
         ? "Worker detenido."

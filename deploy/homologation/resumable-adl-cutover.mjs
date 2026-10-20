@@ -1,3 +1,4 @@
+import {writeRecoverySupport} from './recovery-support.mjs';
 import {assembleRemoteHelper,helperInvocation,sanitizedHelperExit} from './remote-helper-transport.mjs';
 import {validateFullRecovery} from './full-recovery-validation.mjs';
 // Authorized protected recovery + resumable migration. No credentials are copied or printed.
@@ -43,7 +44,7 @@ async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFi
 export async function run(args){
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   if(args[4]==='--helper-preflight-report'){stage='remote_consumer_gate';await helperPreflightReport(stage);return;}
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
@@ -66,10 +67,10 @@ export async function run(args){
   stage='remote_consumer_gate';const pre=await remote('preflight');
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!(args[4]==='--repair-snapshot'?['2147483648','4294967296']:['4294967296']).includes(String(pre.workerModel?.memoryLimitBytes))||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
-  if(['--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
+  if(['--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
    stage='validation_resume_gate';
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
-   if(!['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--full-recovery'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
+   if(!['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);
    const mac=rows.find(r=>r.operation==='cutover.audit');if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
@@ -110,10 +111,12 @@ export async function run(args){
     }
     ledger.steps.snapshot_capacity_repair={status:'ok',at:new Date().toISOString(),result};await save();
    }
-   if(['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--full-recovery'].includes(args[4])){
+   if(['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery'].includes(args[4])){
     stage='partitioned_upgrade';
-    const nullableMode=['--nullable-markets-repair','--nullable-markets-rollback'].includes(args[4]);
-    const supplierMode=['--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback'].includes(args[4]),distributionMode=args[4]==='--distribution-repair',fullMode=['--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--full-recovery'].includes(args[4]);
+    const throughputMode=['--recovery-throughput-repair','--recovery-throughput-rollback'].includes(args[4]);
+    const nullableMode=['--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback'].includes(args[4]);
+    const supplierMode=['--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback'].includes(args[4]),distributionMode=args[4]==='--distribution-repair',fullMode=['--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery'].includes(args[4]);
+    if(throughputMode&&ledger.steps.nullable_markets_upgrade?.status!=='ok')throw Error('THROUGHPUT_FIX_REQUIRES_APPLIED_NULLABLE_MARKETS');
     if(nullableMode&&ledger.steps.supplier_order_upgrade?.status!=='ok')throw Error('NULLABLE_FIX_REQUIRES_COMPLETED_STARTUP_ORDER_UPGRADE');
     if(supplierMode){if(ledger.steps.full_upgrade?.status!=='ok')throw Error('SUPPLIER_ORDER_FIX_REQUIRES_COMPLETED_FULL_RECOVERY_UPGRADE');}
     if(fullMode){
@@ -136,21 +139,40 @@ export async function run(args){
     }
     const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts'].map(name=>'apps/worker/src/'+name);names.push('packages/contracts/src/index.ts','packages/feed-store/src/index.ts');
     const {createHash}=await import('node:crypto'),files={},baseHashes={};
-    const baseRef=nullableMode?'db4c193':supplierMode?'3425f72':fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
+    const baseRef=throughputMode?'b63e735':nullableMode?'db4c193':supplierMode?'3425f72':fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
     for(const name of names){files[name]=await command('git',['show',runtimeRef+':'+name],undefined,10000,true);baseHashes[name]=existing.includes(name)?createHash('sha256').update(await command('git',['show',baseRef+':'+name],undefined,10000,true)).digest('hex'):null;}
-    const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true}:distributionMode?{fixCommit:'2aa06f7'}:{};
+    if(args[4]==='--recovery-throughput-rollback'&&ledger.steps.throughput_rollback?.status==='ok'){emit({stage:'throughput_rollback',status:'reused',workerStarted:false,posnetChanged:false});return;}
+    if(args[4]==='--recovery-throughput-rollback'&&ledger.steps.throughput_image?.status!=='ok')throw Error('THROUGHPUT_ROLLBACK_NOT_PREPARED');
+    if(throughputMode&&args[4]!=='--recovery-throughput-rollback'){
+     stage='recovery_runtime_evidence';
+     const proofNames=['apps/worker/src/connected.ts','apps/worker/src/provider.ts','apps/worker/src/full-snapshot.ts'];
+     const expectedRuntime={before:Object.fromEntries(proofNames.map(n=>[n,baseHashes[n]])),candidate:Object.fromEntries(proofNames.map(n=>[n,createHash('sha256').update(files[n]).digest('hex')]))};
+     const sourceDigest=createHash('sha256').update(JSON.stringify(expectedRuntime)).digest('hex');
+     let evidence=ledger.recoveryThroughputLatestEvidence;
+     const prior=evidence?.recoveryEvidence;
+     if(ledger.recoveryThroughputEvidenceSourceDigest!==sourceDigest||!prior?.nullableCollectionsInstalled||!prior.capturedRowPreviouslyVerified||(!prior.matchesBefore&&!(prior.matchesCandidate&&prior.candidateOfflineVerified))){
+      evidence=await remote('recovery_evidence',{handoff,expectedRuntime});
+      ledger.recoveryThroughputPreviousValidation??=ledger.lastValidation;ledger.recoveryThroughputPreFix??=evidence;ledger.recoveryThroughputLatestEvidence=evidence;ledger.recoveryThroughputEvidenceSourceDigest=sourceDigest;await save();
+     }else emit({stage:'recovery_runtime_evidence',status:'reused',reason:'SAME_IMMUTABLE_SOURCES_PREVIOUSLY_VERIFIED',providerRequests:0,workerRestarted:false});
+     const proof=evidence.recoveryEvidence;
+     if(!proof?.nullableCollectionsInstalled||!proof.capturedRowPreviouslyVerified||(!proof.matchesBefore&&!(proof.matchesCandidate&&proof.candidateOfflineVerified)))throw Error('RECOVERY_RUNTIME_NOT_KNOWN_NO_BLIND_PATCH');
+     emit({stage:'recovery_runtime_evidence',status:'verified',nullableCollectionsInstalled:true,capturedRowPreviouslyVerified:true,appliedCandidateAlready:proof.matchesCandidate,providerRequests:0,workerRestarted:false,brokerCloseCauseProven:false});
+     stage='throughput_upgrade';
+    }
+    const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true}:distributionMode?{fixCommit:'2aa06f7'}:{};
     const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
+    if(throughputMode&&prepared.offlineThroughputVerified!==true)throw Error('THROUGHPUT_FIX_OFFLINE_UNVERIFIED');
     if(nullableMode&&prepared.offlineNullableMarketsVerified!==true)throw Error('CAPTURED_NULLABLE_ROW_OFFLINE_UNVERIFIED');
     if(supplierMode&&prepared.offlineSupplierOrderVerified!==true)throw Error('SUPPLIER_STARTUP_ORDER_OFFLINE_UNVERIFIED');
     if(fullMode&&prepared.offlineFullRecoveryVerified!==true)throw Error('FULL_RECOVERY_OFFLINE_UNVERIFIED');
     if(distributionMode&&prepared.offlinePropagationVerified!==true)throw Error('DISTRIBUTION_PROPAGATION_TEST_UNVERIFIED');
-    ledger.steps[nullableMode?'nullable_markets_image':supplierMode?'supplier_order_image':fullMode?'full_image':distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
+    ledger.steps[throughputMode?'throughput_image':nullableMode?'nullable_markets_image':supplierMode?'supplier_order_image':fullMode?'full_image':distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
     const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env','scripts/audit-aws-cutover.ts'],undefined,45000);const fresh=freshRows.find(r=>r.operation==='cutover.audit');
     if(fresh?.status!=='ok'||fresh.matchingWorkerProcesses!==0||fresh.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
-    if(['--supplier-order-rollback','--nullable-markets-rollback'].includes(args[4])){const result=await remote('upgrade_partitioned',{phase:'rollback',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});ledger.steps[nullableMode?'nullable_markets_rollback':'supplier_order_rollback']={status:'ok',result};await save();return;}
+    if(['--supplier-order-rollback','--nullable-markets-rollback','--recovery-throughput-rollback'].includes(args[4])){const result=await remote('upgrade_partitioned',{phase:'rollback',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});ledger.steps[throughputMode?'throughput_rollback':nullableMode?'nullable_markets_rollback':'supplier_order_rollback']={status:'ok',result};await save();return;}
     const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});
-    ledger.steps[nullableMode?'nullable_markets_upgrade':supplierMode?'supplier_order_upgrade':fullMode?'full_upgrade':distributionMode?'distribution_upgrade':'partitioned_upgrade']={status:'ok',at:new Date().toISOString(),result:activated};await save();
-    if(fullMode){stage='full_feed_validation';await validateFullRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,{requireSupplierOrder:supplierMode});return;}
+    ledger.steps[throughputMode?'throughput_upgrade':nullableMode?'nullable_markets_upgrade':supplierMode?'supplier_order_upgrade':fullMode?'full_upgrade':distributionMode?'distribution_upgrade':'partitioned_upgrade']={status:'ok',at:new Date().toISOString(),result:activated};await save();
+    if(fullMode){stage='full_feed_validation';try{await validateFullRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,{requireSupplierOrder:supplierMode,allowTransientReconnect:throughputMode,stableForMs:throughputMode?120000:0});}finally{if(throughputMode)await writeRecoverySupport(ledger,path.join(folder,`support-217525-recovery-${pid}-${parent}.md`));}return;}
     if(distributionMode){stage='distribution_validation';await validateDistribution((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,path.join(folder,`support-217525-post-2aa06f7-${pid}-${parent}.md`));return;}
     stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress,45*60000,args[4]==='--inventory-repair');return;
    }
