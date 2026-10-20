@@ -1,0 +1,8 @@
+# Use a locally cached worker image with the runtime under review and SDK already installed.
+# Build with --network none. This test image never starts the production entrypoint.
+ARG ADL_OFFLINE_BASE_IMAGE=adl-parser-offline
+FROM ${ADL_OFFLINE_BASE_IMAGE}
+USER root
+COPY --chown=node:node apps/worker/src/full-recovery-offline.test.ts /app/apps/worker/src/full-recovery-offline.test.ts
+USER node
+ENTRYPOINT ["node", "--import", "tsx", "--test", "apps/worker/src/full-recovery-offline.test.ts"]

@@ -1,0 +1,58 @@
+{
+  "operation": "offline.prematch_recovery",
+  "memoryPeakBytes": 2194038784,
+  "maxRSSBytes": 1661124608,
+  "unackedRedeliveryVerified": true,
+  "snapshotBytes": 516000000,
+  "fixtures": 6000,
+  "downloads": 3,
+  "phases": [
+    {
+      "mode": "cancel_validate",
+      "cancelled": true,
+      "baselineVerified": false,
+      "acks": 2,
+      "writes": 7,
+      "storedFixtures": 3
+    },
+    {
+      "mode": "cancel_apply",
+      "cancelled": true,
+      "baselineVerified": false,
+      "acks": 4,
+      "writes": 14,
+      "storedFixtures": 100
+    },
+    {
+      "mode": "stable",
+      "cancelled": false,
+      "baselineVerified": true,
+      "acks": 8,
+      "writes": 26,
+      "storedFixtures": 6000
+    }
+  ],
+  "persistBeforeAckVerified": true,
+  "eligibleSelectionsBeforePlannedStop": 95887,
+  "restoredOddsBlocked": true,
+  "supplierRequests": 0,
+  "realAmqpConnection": false,
+  "environment": {
+    "networkMode": "none",
+    "memoryLimitBytes": 4294967296,
+    "memorySwapLimitBytes": 4294967296,
+    "cpus": 2.0,
+    "exitCode": 0,
+    "oomKilled": false,
+    "readOnlyRootfs": true,
+    "testImageId": "sha256:0357cbcc234a6f517526adb4177b42aec2894467243c6cde52aeedeeb29b9675"
+  },
+  "elapsedMs": 38347.128105,
+  "limitations": [
+    "Synthetic 6000 fixtures with 4 markets and 4 selections per fixture before negative-case variations; padding brings the HTTP document to 516 MB. This is not an actual provider snapshot.",
+    "AMQP transport and distribution calls are stubs. Real SDK conversion, recovery session, disk spool, state application, checkpoint, fsync, atomic publication and restoration execute.",
+    "Small deterministic delivery bursts, not a production-rate soak test or broker heartbeat/queue-limit reproduction.",
+    "Tenant financial reconciliation, authentication, iframe and real betting are outside this recovery-session test.",
+    "No provider calls, AWS access, existing worker restart or production data change. Offline success does not establish AWS recovery or AMQP 320 root cause."
+  ]
+}
