@@ -18,7 +18,7 @@ import {inspectResponse} from './response-inspection.js';
 import type {TradeEvent} from './state.js';
 const MiB=1024*1024;
 export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:20000,totalMs:120000};
-const fail=(reason:string):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven'},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
+const fail=(reason:string,shape:Partial<NonNullable<import('@lsports/contracts').IntegrationDiagnostic['snapshotValidation']>>={}):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven',...shape},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
 export function fullSnapshotMemory(retainedBudget=0){const c=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'},undefined,'prematch');if(!c.allowed||c.headroomBytes<retainedBudget)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:Math.max(c.budgetBytes,retainedBudget),memoryHeadroomBytes:c.headroomBytes,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.
 async function* tokens(file:string,max:number){let primitive='',quoted=false,escape=false,parts:string[]=[],size=0;
@@ -55,7 +55,20 @@ export function convertSnapshotRow(raw:unknown):TradeEvent{
  if(!raw||typeof raw!=='object'||Array.isArray(raw))return fail('row_not_object');
  const r=raw as Record<string,unknown>;
  if(!Number.isSafeInteger(r.FixtureId)||Number(r.FixtureId)<=0||!r.Fixture||typeof r.Fixture!=='object'||Array.isArray(r.Fixture))return fail('invalid_fixture');
- if(r.Markets!==undefined&&(!Array.isArray(r.Markets)||r.Markets.some(m=>!m||typeof m!=='object'||Array.isArray(m)||(m.Bets!==undefined&&!Array.isArray(m.Bets)))))return fail('invalid_markets_shape');
+ // #217525 captured fixture 20563979 has Markets:null; official SDK preserves
+ // null as no supplied market collection. Preserve it (not invented []/prices).
+ const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
+ const shapeFail=(fieldPath:string,value:unknown):never=>fail('invalid_markets_shape',{fieldPath,actualType:value===null?'null':Array.isArray(value)?'array':typeof value as NonNullable<import('@lsports/contracts').SnapshotValidationInspection['actualType']>,fixtureId:Number(r.FixtureId)});
+ if(r.Markets!==undefined&&r.Markets!==null){
+  if(!Array.isArray(r.Markets))return shapeFail('Markets',r.Markets);
+  for(let i=0;i<r.Markets.length;i++){
+   const m=r.Markets[i];if(!object(m))return shapeFail(`Markets[${i}]`,m);
+   if(m.Bets!==undefined&&m.Bets!==null){
+    if(!Array.isArray(m.Bets))return shapeFail(`Markets[${i}].Bets`,m.Bets);
+    for(let j=0;j<m.Bets.length;j++)if(!object(m.Bets[j]))return shapeFail(`Markets[${i}].Bets[${j}]`,m.Bets[j]);
+   }
+  }
+ }
  if(hasInvalidProviderTimestamp(raw))return fail('invalid_timestamp');
  const row=TransformerUtil.transform(normalizeSdkTimestamps(raw),GetEventsResultElement) as TradeEvent;attachTimestampPrecision(raw,row);
  if(row.fixtureId!==r.FixtureId||!row.fixture||row.markets?.some(m=>!Number.isSafeInteger(m.id)||!m.id||m.bets?.some(b=>b.id===undefined||b.id===null||String(b.id).trim()==='')))return fail('sdk_row_mismatch');return row;

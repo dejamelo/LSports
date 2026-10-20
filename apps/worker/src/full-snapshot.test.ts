@@ -37,3 +37,35 @@ test('compressed transport is bounded by decoded bytes, never ACKs/applies a dec
  const opts={url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},async apply(){applied++;},limits:{responseBytes:1024}};
  try{const result=await fullSnapshot(opts);assert.equal(result.rows,1);assert.equal(applied,1);large=true;await assert.rejects(fullSnapshot(opts),(e:{diagnostic:{reason:string}})=>e.diagnostic.reason==='response_size_limit');assert.equal(applied,1);assert.deepEqual(await readdir(dir),[]);}finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
 });
+
+test('captured fixture 20563979 Markets:null and equivalent Bets:null preserve absence, never invent quotes; other shapes reject',()=>{
+ const event=convertSnapshotRow({...row(20563979),Markets:null});assert.equal(event.fixtureId,20563979);assert.equal(event.markets,null);assert.ok(event.fixture);
+ const empty=convertSnapshotRow({...row(2),Markets:[{Id:1,Status:1,Bets:null}]});assert.equal(empty.markets![0].bets,null);
+ for(const [Markets,path,type] of [[{},'Markets','object'],['x','Markets','string'],[[null],'Markets[0]','null'],[[[]],'Markets[0]','array'],[[{Id:1,Bets:{}}],'Markets[0].Bets','object'],[[{Id:1,Bets:[null]}],'Markets[0].Bets[0]','null']] as const){
+  assert.throws(()=>convertSnapshotRow({...row(20563979),Markets}),(e:any)=>e.diagnostic.snapshotValidation.fieldPath===path&&e.diagnostic.snapshotValidation.actualType===type&&e.diagnostic.snapshotValidation.fixtureId===20563979);
+ }
+});
+
+test('whole document validates multiple null occurrences; invalid later market prevents ALL application',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-null-document-'));let invalid=false,applied=0;
+ const rows=()=>[{...row(20563979),Markets:null},{...row(2),Markets:[{Id:1,Bets:null}]},row(3),{...row(4),Markets:invalid?{}:null}];
+ const server=createServer((_req,res)=>res.end(JSON.stringify({Body:rows(),Header:{HttpStatusCode:200}})));await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+ const opts={url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},async apply(){applied++;},limits:{responseBytes:1024*1024}};
+ try{invalid=true;await assert.rejects(fullSnapshot(opts));assert.equal(applied,0);invalid=false;const result=await fullSnapshot(opts);assert.equal(result.rows,4);assert.deepEqual([...result.ids],[20563979,2,3,4]);assert.equal(applied,4);}finally{server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
+});
+
+test('null collections preserve stored settlement evidence but never refresh old odds; concurrent fresh AMQP survives reconciliation',async()=>{
+ const {TradeState}=await import('./state.js');const {checkpoint,restore}=await import('./persistence.js');const {createPublisher}=await import('@lsports/feed-store');
+ const dir=await mkdtemp(join(tmpdir(),'adl-null-prices-')),file=join(dir,'feed.json');
+ const now=Date.now(),state=new TradeState();state.set('prematch',{phase:'connected'});
+ const seed={FixtureId:20563979,Fixture:{Status:1,Sport:{Id:6046,Name:'Football'},Participants:[{Id:1,Name:'A',Position:'1'},{Id:2,Name:'B',Position:'2'}]},Markets:[{Id:1,Status:1,Bets:[{Id:'11',Name:'1',Price:'2.1',Status:1,LastUpdate:new Date(now-1000).toISOString()},{Id:'12',Name:'2',Price:'3.1',Status:1,Settlement:2,LastUpdate:new Date(now-1000).toISOString()}]}]};
+ state.apply('prematch',[convertSnapshotRow(seed)],now);assert.equal(state.feed(now).events[0].selections.filter(s=>s.available).length,1);
+ try{for(const Markets of [null,[{Id:1,Status:1,Bets:null}]]){
+  state.beginPartitionedSnapshot('prematch');state.apply('prematch',[{...convertSnapshotRow({...seed,Markets}),marketRecovery:true}],now+1,{source:'snapshot',receivedAt:now+1});state.finishPartitionedSnapshot('prematch',new Set([20563979]));
+  assert.equal(state.feed(now+1).events[0].selections.filter(s=>s.available).length,0);assert.equal(state.rows.prematch.get(20563979)!.markets.get('1')!.bets!.find(b=>b.id==='12')!.settlement,2);
+ }
+ await createPublisher(file)(state.feed(now+1),checkpoint(state));const restarted=new TradeState();await restore(restarted,file);restarted.set('prematch',{phase:'connected'});assert.equal(restarted.feed(now+1).events[0].selections.filter(s=>s.available).length,0);
+ state.beginPartitionedSnapshot('prematch');state.apply('prematch',[convertSnapshotRow({...seed,Markets:[{Id:1,Status:1,Bets:[{Id:'11',Price:'2.2',Status:1,LastUpdate:new Date(now+5).toISOString()}]}]})],now+10,{source:'amqp',receivedAt:now+10});
+ state.apply('prematch',[{...convertSnapshotRow({...seed,Markets:null}),marketRecovery:true}],now+1,{source:'snapshot',receivedAt:now+12});state.finishPartitionedSnapshot('prematch',new Set([20563979]));assert.equal(state.feed(now+12).events[0].selections.filter(s=>s.available).length,1);assert.equal(state.feed(now+12).events[0].selections.find(s=>s.available)!.odds,2.2);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

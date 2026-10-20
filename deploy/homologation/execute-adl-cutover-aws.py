@@ -248,6 +248,9 @@ def safe_feed_diagnostic(value):
             if type(validation.get(k)) is int and 0<=validation[k]<=1000000:v[k]=validation[k]
         if isinstance(validation.get('itemTypes'),dict):v['itemTypes']={k:x for k,x in validation['itemTypes'].items() if k in {'number','string','object','null','array','boolean','other'} and type(x) is int and 0<=x<=1000000}
         if validation.get('detail') in {'invalid_json','token_size_limit','truncated_string','truncated_json','item_size_limit','root_not_object','invalid_root_key','duplicate_or_invalid_root_key','invalid_root_colon','body_not_array','invalid_body_separator','invalid_root_separator','trailing_comma','trailing_json','invalid_header_or_application_error','header_status_rejected','row_not_object','invalid_fixture','invalid_markets_shape','invalid_timestamp','sdk_row_mismatch','disk_headroom','duplicate_or_excess_fixture','invalid_endpoint','unsupported_content_encoding','nesting_limit'}:v['detail']=validation['detail']
+        if isinstance(validation.get('fieldPath'),str) and re.fullmatch(r'Markets(?:\[\d{1,6}\])?(?:\.Bets(?:\[\d{1,6}\])?)?',validation['fieldPath']):v['fieldPath']=validation['fieldPath']
+        if isinstance(validation.get('actualType'),str) and validation['actualType'] in {'undefined','null','array','object','string','number','boolean'}:v['actualType']=validation['actualType']
+        if type(validation.get('fixtureId')) is int and 0<validation['fixtureId']<=9007199254740991:v['fixtureId']=validation['fixtureId']
         out['snapshotValidation']=v
     # Match only our exact historical constants, never echo arbitrary message text.
     legacy={'Inventario de suscripciones inválido o superior al límite local; no se usa la proyección como inventario.':'inventory_validation_after_http_success',

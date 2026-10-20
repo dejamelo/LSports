@@ -4,9 +4,10 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
- def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False,distribution=False,full=False,supplier=False):
+ def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False,distribution=False,full=False,supplier=False,nullable=False):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();releases=root/'releases';release=releases/('a'*40);release.mkdir(parents=True);volume=root/'volume';volume.mkdir()
+   evidence=backups/'adl-snapshot-shape-example';evidence.mkdir(mode=0o700);raw=json.dumps({'FixtureId':20563979,'Fixture':{'Status':1},'Markets':None}).encode();(evidence/'rejected-row.private.json').write_bytes(raw);(evidence/'rejected-row.private.json').chmod(0o600);(evidence/'report.json').write_text(json.dumps({'rawRowSha256':hashlib.sha256(raw).hexdigest(),'rawRowBytes':len(raw),'rejection':{'path':'Markets','actualType':'null'},'sdk':{'conversion':'succeeded','markets':{'type':'null'}}}));(evidence/'report.json').chmod(0o600)
    original=secure/'old.json';original.write_text('{}');meta={'release':str(release),'composeOverrides':[str(original)]};(secure/'deployment.json').write_text(json.dumps(meta))
    (volume/'trade-feed.json').write_text('{"preserved":"checkpoint"}');journal=volume/'trade-feed.json.snapshot-aaaaaaaaaaaaaaaa.json';journal.write_text('{"nextAt":9999999999999,"due":{},"failures":{}}');journal_before=journal.read_bytes();regular=volume/'trade-feed.json.regular-checkpoint.json';regular.write_text('PRIVATE_REGULAR_PRESERVED');regular_before=regular.read_bytes()
    handoff={'audit':{'status':'ok','workerLockAbsent':True,'matchingWorkerProcesses':0}};d=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();migration=secure/('cutover-'+d+'.json');migration.write_text(json.dumps({'digest':d,'startRequestedAtUTC':'2026-01-01T00:00:00Z','notBeforeUTC':'2026-01-01T00:00:00Z','journals':['preserved']}))
@@ -23,7 +24,7 @@ class Upgrade(unittest.TestCase):
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([images[args[3]]]).encode()
     if args[:2]==['docker','tag']:images[args[3]]=images['base'];return b''
-    if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok planned-distribution-stop-ok' if '--input-type=module' in args else json.dumps(hashes).encode()
+    if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok planned-distribution-stop-ok' if '--input-type=module' in args else json.dumps(hashes).encode()
     if args[:2]==['docker','build']:images[image]={'Id':'sha256:'+('c'*64),'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}};return b''
     if args[:2]==['docker','inspect']:
      return json.dumps([{'Image':images[selected]['Id'],'HostConfig':{'Memory':4294967296},'Config':{'Env':['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true']},'Mounts':[{'Destination':'/app/.runtime/feed','Type':'volume','RW':False,'Name':'feed'}]}]).encode()
@@ -39,11 +40,14 @@ class Upgrade(unittest.TestCase):
     if distribution:request['fixCommit']='2aa06f7'
     if full:request['fullRecovery']=True
     if supplier:request['supplierOrder']=True
+    if nullable:request['nullableEvidence']=str(evidence)
     with contextlib.redirect_stdout(out):code=NS['upgrade_partitioned'](request)
     self.assertNotIn('MUST_NEVER_PRINT',out.getvalue());return code,json.loads(out.getvalue().splitlines()[-1])
    try:
     code,result=invoke('prepare',{**hashes,next(iter(hashes)):'bad'});self.assertEqual(code,2);self.assertEqual(result['reason'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH');self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
-    code,result=invoke('prepare');self.assertEqual(code,0,result);self.assertTrue(result['offlineType38Verified']);self.assertEqual(result['offlineFullRecoveryVerified'],full);self.assertEqual(result['offlinePropagationVerified'],distribution);self.assertEqual(result['offlineSupplierOrderVerified'],supplier);self.assertTrue(running);self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
+    if nullable:
+     proof=(evidence/'report.json').read_bytes();bad=json.loads(proof);bad['rawRowSha256']='0'*64;(evidence/'report.json').write_text(json.dumps(bad));code,result=invoke('prepare');self.assertEqual(code,2);self.assertEqual(result['reason'],'CAPTURED_EVIDENCE_HASH_MISMATCH');self.assertTrue(running);self.assertFalse(any(c[:2]==['docker','kill'] for c in calls));(evidence/'report.json').write_bytes(proof)
+    code,result=invoke('prepare');self.assertEqual(code,0,result);self.assertTrue(result['offlineType38Verified']);self.assertEqual(result['offlineFullRecoveryVerified'],full);self.assertEqual(result['offlinePropagationVerified'],distribution);self.assertEqual(result['offlineSupplierOrderVerified'],supplier);self.assertEqual(result['offlineNullableMarketsVerified'],nullable);self.assertTrue(running);self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
     if supplier:
      rollback=Path(result['backup'])/'rollback.worker.private.json';self.assertEqual(rollback.stat().st_mode&0o777,0o600);self.assertEqual(set(json.loads(rollback.read_bytes())['services']),{'worker'})
     if resume_stopped:
@@ -60,6 +64,7 @@ class Upgrade(unittest.TestCase):
     if supplier:
      code,result=invoke('rollback');self.assertEqual(code,0,result);self.assertFalse(running);self.assertEqual(selected,'base');self.assertTrue(result['oldWorkerKeptStopped']);self.assertEqual(journal.read_bytes(),journal_before);self.assertTrue(all(c[-1]=='worker' and '--no-deps' in c for c in calls if 'create' in c));code,result=invoke('rollback');self.assertEqual(code,0,result);self.assertTrue(result['reused']);self.assertEqual(len([c for c in calls if 'create' in c]),1)
    finally:NS.update(old)
+ def test_captured_nullable_fixture_is_verified_before_stop_and_preserves_all_overrides(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True)
  def test_supplier_order_is_verified_and_worker_only_rollback_is_private(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True)
  def test_full_recovery_preflights_stop_before_consumer_and_preserves_migration(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True)
  def test_distribution_fix_is_tested_offline_before_single_worker_restart_and_reuses_result(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(distribution=True)

@@ -199,4 +199,10 @@ class Cutover(unittest.TestCase):
     env['ADL_SUPPLIER_NOT_BEFORE_UTC']=repaired['notBeforeUTC']
     code,result=call('recover_start');self.assertEqual(code,2);self.assertEqual(result['reason'],'COOLDOWN_FORMAT_DEFECT_NOT_PROVEN');self.assertEqual(len([c for c in commands if 'up' in c]),2)
    finally:ns.update(previous)
+class NullableShapeSafety(unittest.TestCase):
+ def test_exact_field_type_survive_without_values_or_arbitrary_paths(self):
+  d={'snapshotValidation':{'phase':'batch','code':'full_document_invalid','attribution':'not_proven','detail':'invalid_markets_shape','fieldPath':'Markets[12].Bets[0]','fixtureId':20563979,'actualType':'null','value':'MUST_NEVER_PRINT'}}
+  safe=NS['safe_feed_diagnostic'](d)['snapshotValidation'];self.assertEqual(safe['fieldPath'],'Markets[12].Bets[0]');self.assertEqual(safe['actualType'],'null');self.assertEqual(safe['fixtureId'],20563979);self.assertNotIn('MUST_NEVER_PRINT',json.dumps(safe))
+  d['snapshotValidation'].update(fieldPath='MUST_NEVER_PRINT',actualType={'secret':'MUST_NEVER_PRINT'},fixtureId='MUST_NEVER_PRINT');safe=NS['safe_feed_diagnostic'](d)['snapshotValidation'];self.assertNotIn('fieldPath',safe);self.assertNotIn('actualType',safe);self.assertNotIn('fixtureId',safe)
+
 if __name__=='__main__':unittest.main()

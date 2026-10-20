@@ -72,8 +72,25 @@ def upgrade_partitioned(request):
             if not rollback.exists():
                 old_worker=json.loads((backup/'model.before.private.json').read_bytes())['services']['worker']
                 private(rollback,json.dumps({'services':{'worker':old_worker}}).replace('$','$$').encode())
+        if request.get('nullableEvidence') and not progress.get('nullableMarketsVerified'):
+            stage='partitioned_upgrade.offline_nullable_markets'
+            evidence=Path(request['nullableEvidence'])
+            require(evidence.parent==BACKUPS and re.fullmatch('adl-snapshot-shape-[A-Za-z0-9_-]+',evidence.name) and evidence.is_dir() and not evidence.is_symlink() and evidence.stat().st_mode&0o077==0 and evidence.stat().st_uid==BACKUPS.stat().st_uid,'CAPTURED_EVIDENCE_DIRECTORY_UNVERIFIED')
+            source=evidence/'rejected-row.private.json';report=evidence/'report.json'
+            for path,limit in ((source,16*1024**2),(report,65536)):
+                require(path.is_file() and not path.is_symlink() and 0<path.stat().st_size<=limit and path.stat().st_mode&0o077==0 and path.stat().st_uid==evidence.stat().st_uid,'CAPTURED_EVIDENCE_FILE_UNVERIFIED')
+            row_bytes=source.read_bytes();row=json.loads(row_bytes);proof=json.loads(report.read_bytes())
+            require(proof.get('rawRowSha256')==hashlib.sha256(row_bytes).hexdigest() and proof.get('rawRowBytes')==len(row_bytes),'CAPTURED_EVIDENCE_HASH_MISMATCH')
+            require(row.get('FixtureId')==20563979 and 'Markets' in row and row['Markets'] is None and proof.get('rejection',{}).get('path')=='Markets' and proof['rejection'].get('actualType')=='null','CAPTURED_NULL_MARKETS_NOT_CONFIRMED')
+            require(proof.get('sdk',{}).get('conversion')=='succeeded' and proof['sdk'].get('markets',{}).get('type')=='null','CAPTURED_SDK_SEMANTICS_UNCONFIRMED')
+            copy_path=backup/'captured-row.private.json'
+            if copy_path.exists():require(copy_path.read_bytes()==row_bytes,'CAPTURED_BACKUP_CHANGED')
+            else:private(copy_path,row_bytes)
+            check="import{readFileSync}from'node:fs';import{convertSnapshotRow}from'/app/apps/worker/src/full-snapshot.ts';const raw=JSON.parse(readFileSync('/evidence/rejected-row.private.json','utf8')),row=convertSnapshotRow(raw);if(row.fixtureId!==20563979||row.markets!==null||!row.fixture)throw Error('captured row changed');const bets=convertSnapshotRow({FixtureId:1,Fixture:{Status:1},Markets:[{Id:1,Bets:null}]});if(bets.markets[0].bets!==null)throw Error('bets absence changed');for(const Markets of [{},'invalid',[null],[{Id:1,Bets:{}}],[{Id:1,Bets:[null]}]]){let rejected=false;try{convertSnapshotRow({FixtureId:1,Fixture:{Status:1},Markets})}catch{rejected=true}if(!rejected)throw Error('invalid shape accepted')}console.log('nullable-markets-offline-ok');"
+            output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--user','0','--mount','type=bind,source='+str(evidence)+',target=/evidence,readonly','--entrypoint','node',progress['image'],'--import','tsx','--input-type=module','-e',check],timeout=30)
+            require(b'nullable-markets-offline-ok' in output,'CAPTURED_NULLABLE_ROW_OFFLINE_FAILED');progress['nullableMarketsVerified']=True;progress['capturedRowSha256']=proof['rawRowSha256'];save(progress)
         if phase=='prepare':
-            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlineType38Verified=True,offlinePartitionsVerified=True,offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
+            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlineType38Verified=True,offlinePartitionsVerified=True,offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),offlineNullableMarketsVerified=progress.get('nullableMarketsVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
         stage='partitioned_upgrade.fresh_mac_gate'
         handoff=request['handoff'];audit=handoff['audit'];require(audit['status']=='ok' and audit['workerLockAbsent'] and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(request['freshAuditAt'].endswith('Z') and -5<=time.time()-datetime.datetime.fromisoformat(request['freshAuditAt'].replace('Z','+00:00')).timestamp()<60,'MAC_REAUDIT_EXPIRED')

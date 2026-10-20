@@ -206,6 +206,7 @@ export interface SnapshotValidationInspection {
   phase: 'inventory'|'batch'|'verify';
   code: 'inventory_not_array'|'inventory_limit'|'inventory_invalid_ids'|'inventory_envelope'|'inventory_sdk_mismatch'|'batch_invalid_fixture'|'batch_id_mismatch'|'inventory_changed'|'full_document_invalid';
   detail?:string;
+  fieldPath?:string;actualType?:'undefined'|'null'|'array'|'object'|'string'|'number'|'boolean';fixtureId?:number;
   attribution: 'local_bound'|'provider_contract'|'sdk_or_adapter'|'inventory_changed'|'not_proven';
   rawCount?:number;sdkCount?:number;invalidCount?:number;requested?:number;received?:number;missing?:number;unexpected?:number;
   itemTypes?:Partial<Record<'number'|'string'|'object'|'null'|'array'|'boolean'|'other',number>>;
