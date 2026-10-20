@@ -377,7 +377,7 @@ export interface FeedMessageMetadata {
 }
 export interface ConnectionState {
   consumerProgress?:{acknowledgedMessages:number;lastAckAt?:string;registeredAt?:string;active?:boolean};
-  persistenceProgress?:{writes:number;lastDurationMs:number;lastCompletedAt:string};
+  persistenceProgress?:{writes:number;lastDurationMs:number;lastCompletedAt:string;captureDurationMs?:number;regularDurationMs?:number;publishDurationMs?:number;maxEventLoopDelayMs?:number;rssBytes?:number};
   fullSnapshot?:{stage?:'waiting_http'|'download'|'validate'|'apply'|'complete';validatedRows?:number;appliedRows?:number;lastProgressAt?:string;method:'disk_spool_two_pass';startedAt:string;completedAt?:string;rows?:number;bytes?:number;ackedDuringRecovery?:number};
   distributionObservations?:DistributionObservation[];
   session?: {id:string;startedAt:string};

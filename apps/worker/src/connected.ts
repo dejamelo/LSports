@@ -1,5 +1,6 @@
 import {snapshotCapacity} from './snapshot-capacity.js';
 import { connectionCloser } from './connection-closer.js';
+import {monitorEventLoopDelay} from "node:perf_hooks";
 import {randomUUID} from "node:crypto";
 import { platformEnabled, PlatformStore } from "@lsports/feed-store/platform";
 import { TenantTickets } from "@lsports/feed-store/tenant-tickets";
@@ -72,17 +73,20 @@ export async function runConnected(signal: AbortSignal, dependencies: {
       tenantTickets = new TenantTickets(platform);
     }
     const publish = createPublisher(path);
+    const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0;
     const save = coalescedPersistence(()=>operation("file.persist", "local", async () => {
         const started=performance.now();const feed = state.feed();
         tenantTickets?.reconcile(feed);
         ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
         const {regular,...saved}=checkpoint(state);
+        const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
         await persistRegularCheckpoint(path,regular);
+        const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
         await publish(feed,{...saved,regularExternal:true});
-        const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString()};
+        const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
-        if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:regular.length}));}
+        if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:regular.length}));loopDelay.reset();}
     }));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
@@ -166,7 +170,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         throw error;
       }
     } finally {
-      clearInterval(heartbeat);
+      clearInterval(heartbeat);loopDelay.disable();
       if (writing) await writing;
       for (const lane of ["prematch", "inplay"] as const)
         state.set(lane, {

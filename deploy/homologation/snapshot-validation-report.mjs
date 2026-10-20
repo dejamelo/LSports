@@ -37,7 +37,7 @@ function observation(l={},previous={},projection={},since){
   lastMarketDecodedAtUTC:utc(l.updates?.lastMarketDecodedAt),marketUpdateBelongsToCurrentSession:isCurrent(l.updates?.lastMarketDecodedAt),
   diagnostic:diagnostic(l.diagnostic),lastSnapshotDiagnostic:diagnostic(d),lastSnapshotDiagnosticScope:when?(isCurrent(when)?'current_session':'historical_before_session'):'timestamp_unknown',
   decodedMessagesByType:Object.fromEntries(Object.entries(l.decodedMessagesByType||{}).filter(([k,v])=>/^[0-9]{1,5}$/.test(k)&&Number.isSafeInteger(v)&&v>=0)),
-  persistenceProgress:Object.fromEntries(Object.entries(l.persistenceProgress||{}).filter(([k,v])=>['writes','lastDurationMs'].includes(k)&&Number.isSafeInteger(v)&&v>=0||k==='lastCompletedAt'&&utc(v))),
+  persistenceProgress:Object.fromEntries(Object.entries(l.persistenceProgress||{}).filter(([k,v])=>['writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','rssBytes'].includes(k)&&Number.isSafeInteger(v)&&v>=0||k==='lastCompletedAt'&&utc(v))),
   projection,amqp320:closures};
 }
 export function snapshotValidationReport(current,ledger={}){return{readOnlyRemote:true,providerRequests:0,workerRestarted:false,posnetChanged:false,

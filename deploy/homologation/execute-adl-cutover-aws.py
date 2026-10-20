@@ -535,7 +535,7 @@ def existing_recovery_timeline(consumers,window):
                 if row.get('lane') in ('prematch','inplay'):record['lane']=row['lane']
                 if op=='file.persist':
                     record['operation']=op
-                    for k in ('writes','lastDurationMs','regularFixtures'):
+                    for k in ('writes','lastDurationMs','regularFixtures','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','rssBytes'):
                         if type(row.get(k)) is int and 0<=row[k]<=10**12:record[k]=row[k]
                 elif op=='snapshot.events' and row.get('status')=='full_spool_progress':
                     record.update(operation=op,status='full_spool_progress')
@@ -579,7 +579,7 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
         progress=source.get('consumerProgress') or {};full=source.get('fullSnapshot') or {}
         lanes[lane]['consumerProgress']={k:v for k,v in progress.items() if k=='active' and type(v) is bool or k=='acknowledgedMessages' and type(v) is int and 0<=v<=10**12 or k in ('lastAckAt','registeredAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
         lanes[lane]['fullSnapshot']={k:v for k,v in full.items() if k=='method' and v=='disk_spool_two_pass' or k=='stage' and v in ('waiting_http','download','validate','apply','complete') or k in ('rows','bytes','ackedDuringRecovery','validatedRows','appliedRows') and type(v) is int and 0<=v<=2**40 or k in ('startedAt','completedAt','lastProgressAt') and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
-        persistence=source.get('persistenceProgress') or {};lanes[lane]['persistenceProgress']={k:v for k,v in persistence.items() if k in ('writes','lastDurationMs') and type(v) is int and 0<=v<=10**12 or k=='lastCompletedAt' and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
+        persistence=source.get('persistenceProgress') or {};lanes[lane]['persistenceProgress']={k:v for k,v in persistence.items() if k in ('writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','rssBytes') and type(v) is int and 0<=v<=10**12 or k=='lastCompletedAt' and isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',v)}
         lanes[lane]['distributionObservations']=[safe_distribution_observation(o) for o in source.get('distributionObservations',[])[-3:] if isinstance(o,dict)]
         lane_coverage=feed.get('coverage',{}).get(lane,{}) or {}
         coverage=lane_coverage.get('activity',{})

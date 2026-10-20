@@ -82,3 +82,12 @@ test('HTTP coordinator is released before local snapshot validation/application;
 });
 
 test('disk-spool guard preserves 320 MiB working reserve and refuses exhausted available memory',()=>{const original=process.availableMemory;try{process.availableMemory=()=>768*1024*1024;fullSnapshotMemory();process.availableMemory=()=>64*1024*1024;assert.throws(()=>fullSnapshotMemory(),(e:any)=>e.diagnostic.reason==='memory_budget_exceeded'&&e.diagnostic.memoryBudgetBytes===320*1024*1024);}finally{process.availableMemory=original;}});
+
+test('dense tokens cross chunks while durable consumer progress and timer turns continue',async()=>{
+ const {coalescedPersistence}=await import('./connected.js');const dir=await mkdtemp(join(tmpdir(),'adl-dense-concurrent-'));const file=join(dir,'body');let timerTurns=0,acks=0,durable=0,received=0,chain=Promise.resolve();
+ const bets=Array.from({length:300},(_,i)=>({Id:String(i+1),Price:'2.00',Status:1}));
+ await writeFile(file,JSON.stringify({Body:Array.from({length:200},(_,i)=>({...row(i+1),Markets:[{Id:1,Bets:bets}]})),Header:{}}));
+ const {open,readFile}=await import('node:fs/promises');const save=coalescedPersistence(async()=>{const captured=received;const fd=await open(join(dir,'journal'),'w');try{await fd.writeFile(JSON.stringify({captured}));await fd.sync();}finally{await fd.close();}durable=captured;});
+ const clock=setInterval(()=>timerTurns++,1);const consumer=setInterval(()=>{chain=chain.then(async()=>{const delivery=++received;await save();assert.ok(durable>=delivery);assert.ok(JSON.parse(await readFile(join(dir,'journal'),'utf8')).captured>=delivery);acks++;});},5);
+ try{let rows=0;await walkSnapshot(file,async raw=>{convertSnapshotRow(raw);rows++;});assert.equal(rows,200);assert.ok(timerTurns>1);clearInterval(consumer);await chain;assert.ok(acks>0);}finally{clearInterval(clock);clearInterval(consumer);await chain;await rm(dir,{recursive:true,force:true});}
+});

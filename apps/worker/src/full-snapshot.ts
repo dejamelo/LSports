@@ -23,20 +23,25 @@ export function fullSnapshotMemory(){const c=snapshotCapacity({...process.env,LS
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.
 async function* tokens(file:string,max:number){let primitive='',quoted=false,escape=false,parts:string[]=[],size=0;
  for await(const chunk of createReadStream(file,{encoding:'utf8',highWaterMark:64*1024})){
-  let start=quoted?0:-1;
+  const batch:string[]=[];let start=quoted?0:-1;
   for(let i=0;i<chunk.length;i++){const ch=chunk[i];
-   if(quoted){if(size+i-start+1>max)fail('token_size_limit');if(escape)escape=false;else if(ch==='\\')escape=true;else if(ch==='"'){parts.push(chunk.slice(start,i+1));yield parts.join('');parts=[];size=0;quoted=false;start=-1;}}
+   if(quoted){if(size+i-start+1>max)fail('token_size_limit');if(escape)escape=false;else if(ch==='\\')escape=true;else if(ch==='"'){parts.push(chunk.slice(start,i+1));batch.push(parts.join(''));parts=[];size=0;quoted=false;start=-1;}}
    else if(ch==='"'){if(primitive)fail('invalid_json');quoted=true;start=i;}
-   else if(ch===' '||ch==='\n'||ch==='\r'||ch==='\t'||'{}[],:'.includes(ch)){if(primitive){yield primitive;primitive='';}if('{}[],:'.includes(ch))yield ch;}
+   else if(ch===' '||ch==='\n'||ch==='\r'||ch==='\t'||'{}[],:'.includes(ch)){if(primitive){batch.push(primitive);primitive='';}if('{}[],:'.includes(ch))batch.push(ch);}
    else{primitive+=ch;if(primitive.length>max)fail('token_size_limit');}
   }
-  if(quoted){const part=chunk.slice(start);parts.push(part);size+=part.length;}await yieldTurn();
- }if(quoted)fail('truncated_string');if(primitive)yield primitive;
+  if(quoted){const part=chunk.slice(start);parts.push(part);size+=part.length;}
+  if(batch.length)yield batch;
+  await yieldTurn();
+ }if(quoted)fail('truncated_string');if(primitive)yield [primitive];
 }
 export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes){
- const it=tokens(file,limit)[Symbol.asyncIterator]();
- const take=async()=>{const n=await it.next();if(n.done)fail('truncated_json');return n.value;};
- const rawValue=async(first:string,max=limit)=>{let n=first.length;const pieces=[first];let depth=first==='{'||first==='['?1:0;while(depth){const t=await take();n+=t.length;if(n>max)fail('item_size_limit');pieces.push(t);if(t==='{'||t==='[')depth++;if(t==='}'||t===']')depth--;if(depth>128)fail('nesting_limit');if(depth<0)fail('invalid_json');}try{const text=pieces.join('');if(Buffer.byteLength(text)>max)fail('item_size_limit');return IdSafeJsonParser.parse(text);}catch{return fail('invalid_json');}};
+ const it=tokens(file,limit)[Symbol.asyncIterator]();let batch:string[]=[],offset=0;
+ const fill=async()=>{const next=await it.next();if(next.done)fail('truncated_json');batch=next.value;offset=0;};
+ const take=async()=>{if(offset>=batch.length)await fill();return batch[offset++];};
+ const rawValue=async(first:string,max=limit)=>{let n=first.length;const pieces=[first];let depth=first==='{'||first==='['?1:0;
+  while(depth){if(offset>=batch.length)await fill();while(offset<batch.length&&depth){const t=batch[offset++];n+=t.length;if(n>max)fail('item_size_limit');pieces.push(t);if(t==='{'||t==='[')depth++;if(t==='}'||t===']')depth--;if(depth>128)fail('nesting_limit');if(depth<0)fail('invalid_json');}}
+  try{const text=pieces.join('');if(Buffer.byteLength(text)>max)fail('item_size_limit');return IdSafeJsonParser.parse(text);}catch{return fail('invalid_json');}};
  let header:unknown,body=false;const rootErrors:Record<string,unknown>={};const keys=new Set<string>();
  try{if(await take()!=='{')fail('root_not_object');let next=await take();while(next!=='}'){
   let key:unknown;try{key=JSON.parse(next);}catch{fail('invalid_root_key');}if(typeof key!=='string'||key.length>64||keys.size>=64||keys.has(key))fail('duplicate_or_invalid_root_key');keys.add(key as string);if(await take()!==':')fail('invalid_root_colon');
@@ -44,7 +49,7 @@ export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void
    body=true;if(first!=='[')fail('body_not_array');first=await take();if(first!==']')for(;;){await onRow(await rawValue(first));first=await take();if(first===']')break;if(first!==',')fail('invalid_body_separator');first=await take();}
   }else{const value=await rawValue(first,64*1024);if(key==='Header')header=value;else if(['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
   next=await take();if(next==='}')break;if(next!==',')fail('invalid_root_separator');next=await take();if(next==='}')fail('trailing_comma');
- }if(!(await it.next()).done)fail('trailing_json');
+ }if(offset<batch.length||!(await it.next()).done)fail('trailing_json');
  const inspection=inspectResponse({...rootErrors,Header:header,Body:[]},'application/json');
  if(!body||!header||typeof header!=='object'||Array.isArray(header)||inspection.applicationErrorFields)fail('invalid_header_or_application_error');
  const code=(header as {HttpStatusCode?:unknown}).HttpStatusCode;if(code!==undefined&&(!Number.isInteger(code)||Number(code)<200||Number(code)>=300))fail('header_status_rejected');
