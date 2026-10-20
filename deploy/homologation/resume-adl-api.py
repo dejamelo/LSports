@@ -23,7 +23,7 @@ def run(args,timeout=30,log=None):
     p=subprocess.run(args,capture_output=True,timeout=timeout,check=False)
     if log:
         with open(log,'ab') as f: f.write(p.stdout);f.write(p.stderr)
-    if p.returncode:raise RuntimeError('command_failed')
+    if p.returncode:raise subprocess.CalledProcessError(p.returncode,args,output=p.stdout,stderr=p.stderr)
     return p.stdout
 
 def safe_helper_error(error):

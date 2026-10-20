@@ -7,6 +7,32 @@ def partition_base(meta):
         path=Path(entry);require(path.parent==SECURE and path.is_file() and not path.is_symlink(),'OVERRIDE_UNVERIFIED');base+=['-f',entry]
     return base
 
+def distribution_stop_log_summary(backup):
+    path=backup/'distribution-stop.private.log'
+    if not path.exists():return {'present':False}
+    require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and not backup.is_symlink() and backup.stat().st_mode&0o077==0,'STOP_LOG_NOT_PROTECTED')
+    raw=read_tail(path);text=raw.decode(errors='replace').lower();signals=classify(raw)
+    for token,label in [('heap out of memory','heap_exhausted'),('cannot find package','module_not_found'),('enoent','missing_file'),('etimedout','network_timeout'),('econnreset','connection_reset'),('fetch failed','http_transport_failure')]:
+        if token in text:signals.append(label)
+    records=[]
+    for line in raw.decode(errors='replace').splitlines():
+        try:entry=json.loads(line)
+        except Exception:continue
+        if not isinstance(entry,dict):continue
+        if entry.get('operation')=='distribution.stop' and entry.get('status')=='ok' and entry.get('bodyIsDistributionOn') is False and entry.get('lane') in ('prematch','inplay'):
+            records.append({'packageId':4511 if entry['lane']=='prematch' else 4510,'stage':'after','bodyIsDistributionOn':False,'historicalLogRecord':True});continue
+        if entry.get('operation')!='upgrade.distribution_stop':continue
+        if entry.get('packageId') not in (4510,4511):continue
+        row={'packageId':entry['packageId']}
+        if isinstance(entry.get('observedAtUTC'),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',entry['observedAtUTC']):row['observedAtUTC']=entry['observedAtUTC']
+        for k,allowed in {'stage':('before','after','failed'),'step':('configuration','status_before','stop','status_after'),'localReason':('STATUS_SHAPE_UNVERIFIED','DISTRIBUTION_STILL_ON'),'action':('stop_requested','already_off','status_only'),'category':('network','authentication_rejected','invalid_response','supplier_error','rate_limited','unexpected'),'reason':('timeout','invalid_snapshot','distribution_still_off','unknown_exception'),'rateLimitSource':('supplier_http','local_operation_cooldown','local_in_flight')}.items():
+            if entry.get(k) in allowed:row[k]=entry[k]
+        for k in ('bodyIsDistributionOn','sdkIsDistributionOn'):
+            if type(entry.get(k)) is bool:row[k]=entry[k]
+        if type(entry.get('httpStatus')) is int and 100<=entry['httpStatus']<=599:row['httpStatus']=entry['httpStatus']
+        records.append(row)
+    return {'present':True,'signals':sorted(set(signals)),'records':records[-12:],'httpStatusCodes':sorted(set(int(v) for v in re.findall(r'httpStatus[\"\']?\s*[:=]\s*([1-5][0-9]{2})',raw.decode(errors='replace')))),'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
+
 def upgrade_partitioned(request):
     stage='partitioned_upgrade.input';backup=None
     try:
@@ -161,7 +187,8 @@ def upgrade_partitioned(request):
             progress['phase']='running';save(progress);emit(operation='cutover.aws',stage='partitioned_upgrade.running',status='ok',reused=True,workerStarted=True,startedAtUTC=progress.get('startAt'),posnetChanged=False);return 0
         worker_states=states('worker')
         if progress['phase']=='prepared':
-            require(len(worker_states)==1 and worker_states[0]['running'],'OLD_WORKER_NOT_RUNNING_BEFORE_STOP');require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
+            emit(operation='cutover.aws',stage='partitioned_upgrade.old_worker.inspect',status='collected',workerStates=worker_states,backup=str(backup),posnetChanged=False)
+            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');require(worker_states[0]['running'] or worker_states[0].get('exitCode')==0 and not worker_states[0].get('oomKilled'),'OLD_WORKER_EXIT_REQUIRES_REVIEW');require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
             old_container=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0];require(old_container['Image']==progress['baseImageId'] and snapshot_memory_bytes(old_container['HostConfig']['Memory'])==4294967296,'OLD_WORKER_IDENTITY_CHANGED_BEFORE_STOP')
             if request.get('fullRecovery') and not progress.get('supplierStoppedBeforeConsumer'):
                 stage='partitioned_upgrade.distribution_stop'
@@ -170,12 +197,22 @@ def upgrade_partitioned(request):
                 env_file=backup/'stop-distribution.private.env';env_content=('\n'.join(environment)+'\n').encode()
                 if env_file.exists():require(env_file.is_file() and not env_file.is_symlink() and env_file.stat().st_mode&0o077==0 and env_file.read_bytes()==env_content,'STOP_ENV_BACKUP_CHANGED')
                 else:private(env_file,env_content)
-                code="""import{loadConfig}from'/app/apps/worker/src/config.ts';import{clients}from'/app/apps/worker/src/provider.ts';const config=loadConfig();for(const pkg of config.packages){await clients(pkg,config).stopDistribution()}console.log('planned-distribution-stop-ok');"""
-                output=run(['docker','run','--rm','--network','container:'+worker_states[0]['id'],'--memory','256m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--env-file',str(env_file),'-e','NODE_OPTIONS=--max-old-space-size=128','--entrypoint','node',progress['image'],'--import','tsx','--input-type=module','-e',code],timeout=90,log=backup/'distribution-stop.private.log')
+                previous=distribution_stop_log_summary(backup)
+                emit(operation='cutover.aws',stage='partitioned_upgrade.distribution_stop.inspect',status='collected',previousAttempt=previous,workerStates=worker_states,preparedImage=progress['image'],backup=str(backup),imageRebuilt=False,posnetChanged=False)
+                helper_memory,helper_heap=('384m','256') if 'heap_exhausted' in previous.get('signals',[]) else ('256m','128')
+                # Old helper may have stopped one package before failing. Query BOTH
+                # current states before any Stop; an already-off package is never stopped again.
+                code="""import{loadConfig}from'/app/apps/worker/src/config.ts';import{clients}from'/app/apps/worker/src/provider.ts';import{describeFailure}from'/app/apps/worker/src/diagnostics.ts';const config=loadConfig(),feeds=[];let pkgId,step='configuration';try{for(const pkg of config.packages){pkgId=pkg.packageId;step='status_before';const api=clients(pkg,config),s=await api.distributionStatus(),o=api.distributionObservations().at(-1);if(typeof o?.bodyIsDistributionOn!=='boolean'||o.bodyIsDistributionOn!==s.isDistributionOn)throw Object.assign(Error(),{code:'STATUS_SHAPE_UNVERIFIED'});console.log(JSON.stringify({operation:'upgrade.distribution_stop',observedAtUTC:new Date().toISOString(),packageId:pkgId,stage:'before',bodyIsDistributionOn:o.bodyIsDistributionOn,sdkIsDistributionOn:s.isDistributionOn,action:s.isDistributionOn?'status_only':'already_off'}));feeds.push({pkg,api,on:s.isDistributionOn})}for(const f of feeds){pkgId=f.pkg.packageId;if(f.on){step='stop';console.log(JSON.stringify({operation:'upgrade.distribution_stop',observedAtUTC:new Date().toISOString(),packageId:pkgId,stage:'before',action:'stop_requested'}));await f.api.stopDistribution()}step='status_after';const s=await f.api.distributionStatus();if(s.isDistributionOn!==false)throw Object.assign(Error(),{code:'DISTRIBUTION_STILL_ON'});console.log(JSON.stringify({operation:'upgrade.distribution_stop',observedAtUTC:new Date().toISOString(),packageId:pkgId,stage:'after',sdkIsDistributionOn:false}))}console.log('planned-distribution-stop-ok')}catch(error){const d=describeFailure(error,'distribution.stop','http');console.log(JSON.stringify({operation:'upgrade.distribution_stop',observedAtUTC:new Date().toISOString(),packageId:pkgId,stage:'failed',step,localReason:['STATUS_SHAPE_UNVERIFIED','DISTRIBUTION_STILL_ON'].includes(error?.code)?error.code:undefined,category:d.category,reason:d.reason,httpStatus:d.httpStatus,rateLimitSource:d.rateLimitSource}));process.exitCode=2}"""
+                output=run(['docker','run','--rm','--network',('container:'+worker_states[0]['id']) if worker_states[0]['running'] else 'bridge','--memory',helper_memory,'--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--env-file',str(env_file),'-e','NODE_OPTIONS=--max-old-space-size='+helper_heap,'--entrypoint','node',progress['image'],'--import','tsx','--input-type=module','-e',code],timeout=90,log=backup/'distribution-stop.private.log')
+                current_stop=distribution_stop_log_summary(backup);emit(operation='cutover.aws',stage='partitioned_upgrade.distribution_stop.result',status='collected',distribution=current_stop,posnetChanged=False)
                 require(b'planned-distribution-stop-ok' in output,'PLANNED_DISTRIBUTION_STOP_NOT_CONFIRMED_CONSUMER_PRESERVED')
                 progress['supplierStoppedBeforeConsumer']=True;progress['supplierStoppedAtUTC']=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z');save(progress)
-            progress['phase']='stop_requested';progress['oldContainer']=worker_states[0]['id'];save(progress)
-            stage='partitioned_upgrade.graceful_stop';run(['docker','kill','--signal','SIGTERM',worker_states[0]['id']])
+            progress['oldContainer']=worker_states[0]['id']
+            if worker_states[0]['running']:
+                progress['phase']='stop_requested';save(progress)
+                stage='partitioned_upgrade.graceful_stop';run(['docker','kill','--signal','SIGTERM',worker_states[0]['id']])
+            else:
+                progress['phase']='stopped';save(progress)
         if progress['phase']=='stop_requested':
             deadline=time.time()+90
             while time.time()<deadline and any(c['running'] for c in states('worker')):time.sleep(1)
@@ -213,4 +250,9 @@ def upgrade_partitioned(request):
         emit(operation='cutover.aws',stage='partitioned_upgrade.started',status='ok',workerStarted=True,startedAtUTC=progress.get('startAt'),image=progress['image'],migrationRepeated=False,composeOverridesPreserved=True,journalsRewrittenByUpgrade=False,journalsImported=False,posnetChanged=False,backup=str(backup));return 0
     except Exception as error:
         reason=str(error) if re.fullmatch('[A-Z][A-Z_]+',str(error)) else 'PRIVATE_PARTITIONED_UPGRADE_FAILED'
-        emit(operation='cutover.aws',stage=stage,status='blocked',reason=reason,backup=str(backup) if backup else None,posnetChanged=False,rawExceptionPrinted=False);return 2
+        if stage=='partitioned_upgrade.distribution_stop' and isinstance(error,subprocess.CalledProcessError):reason='DISTRIBUTION_STOP_HELPER_EXIT_NONZERO'
+        if stage=='partitioned_upgrade.distribution_stop' and isinstance(error,subprocess.TimeoutExpired):reason='DISTRIBUTION_STOP_HELPER_TIMEOUT'
+        detail=safe_helper_error(error)
+        if stage=='partitioned_upgrade.distribution_stop' and backup:
+            detail['distributionStop']=distribution_stop_log_summary(backup);detail['workerStates']=states('worker')
+        emit(operation='cutover.aws',stage=stage,status='blocked',reason=reason,backup=str(backup) if backup else None,posnetChanged=False,rawExceptionPrinted=False,**detail);return 2
