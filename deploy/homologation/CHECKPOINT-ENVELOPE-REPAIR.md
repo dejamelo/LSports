@@ -73,3 +73,29 @@ with the current feed-store/contracts dependencies mounted; this is not an AWS
 restoration proof. The previous build log is archived before retry. Preparation
 emits the verified base image ID, local tag and builder without credentials.
 The copied-backup restore remains the mandatory next remote gate before start.
+
+## Rehearsal copy access
+
+The privileged executor created the rehearsal directories as root/0700 and
+copied files root/0600, while the image runs as node. These copies were unreadable
+by the rehearsal process. The executor now probes UID/GID/groups using the image
+and the Compose user (or image user), rejects root/unknown identity, and applies
+0700 directories and 0600 files owned by that identity **only inside the separate
+rehearsal copy**. Sources, backup parent and original feed volume are not chowned
+or chmodded. Symlinks, hardlinks and shared original/copy inodes are rejected;
+content hashes are checked before/after. The restore runs explicitly with the
+same selected user and the read-only /recovery bind plus writable /tmp tmpfs.
+
+Before changing the copy it emits known EACCES/EPERM operations and safe /recovery
+paths extracted from the existing private log. This workspace cannot read that
+AWS log: the resume performs this extraction remotely before attempting restore.
+The private log is append-only across attempts; combined snapshot rejection and
+permission signals must not be presumed to describe the same attempt.
+
+Local Docker reproduction: node failed to open the restricted copy, then restored
+16,329 synthetic fixtures after the copy-only ownership correction, using
+UID/GID 1000, read-only mount, 4 GiB cgroup, swap disabled and 2560 MiB heap.
+Source hashes, UID/GID and modes matched their recorded initial values. This is
+not a validation of the protected AWS backup. Helper tests also reject root,
+symlinks/hardlinks and verify originals are unchanged. No worker source, image
+digest, commercial settings, distribution or migration step changed in this fix.

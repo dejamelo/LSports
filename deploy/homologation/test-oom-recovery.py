@@ -32,6 +32,21 @@ class OomRecovery(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    backup=Path(tmp);backup.chmod(0o700);(backup/'checkpoint-fix-build.private.log').write_text('ERROR secret arbitrary failure')
    report=NS['checkpoint_build_log_summary'](backup);self.assertFalse(report['recognizedError']);self.assertNotIn('secret',json.dumps(report))
+ def test_rehearsal_permissions_change_only_independent_copies(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);backup.chmod(0o700);source=backup/'trade-feed.json';source.write_bytes(b'checkpoint preserved');source.chmod(0o600)
+   rehearsal=backup/('rehearsal-'+'a'*24);rehearsal.mkdir(mode=0o700);target=rehearsal/source.name;target.write_bytes(source.read_bytes());sha=NS['snapshot_file_hash'](source)
+   before=(source.read_bytes(),source.stat().st_uid,source.stat().st_gid,source.stat().st_mode,backup.stat().st_mode)
+   result=NS['rehearsal_copy_permissions'](backup,rehearsal,[(source,target,sha)],{'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000]})
+   self.assertEqual(result['scope'],'rehearsal_copy_only');self.assertEqual(target.stat().st_mode&0o777,0o600);self.assertEqual(rehearsal.stat().st_mode&0o777,0o700)
+   self.assertEqual(before,(source.read_bytes(),source.stat().st_uid,source.stat().st_gid,source.stat().st_mode,backup.stat().st_mode))
+   target.unlink();os.link(source,target)
+   with self.assertRaisesRegex(Exception,'REHEARSAL_COPY_IDENTITY_UNVERIFIED'):NS['rehearsal_copy_permissions'](backup,rehearsal,[(source,target,sha)],{'uid':os.getuid() or 1000,'gid':os.getgid() or 1000})
+   with self.assertRaisesRegex(Exception,'REHEARSAL_NONROOT_IDENTITY_UNVERIFIED'):NS['rehearsal_copy_permissions'](backup,rehearsal,[],{'uid':0,'gid':0})
+ def test_permission_log_reports_exact_safe_operation_and_path(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);backup.chmod(0o700);(backup/'oom-restore.private.log').write_text("EACCES: permission denied, open '/recovery/trade-feed.json'\nEACCES: permission denied, open '/etc/SECRET_PASSWORD'\n")
+   report=NS['oom_restore_log_summary'](backup);self.assertEqual(report['permissionFailures'],[{'operation':'open','path':'/recovery/trade-feed.json','code':'EACCES'}]);self.assertNotIn('SECRET_PASSWORD',json.dumps(report))
  def test_durable_inboxes_checked_without_deleting_confirmed_rows(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)

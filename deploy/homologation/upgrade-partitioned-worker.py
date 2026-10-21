@@ -60,7 +60,33 @@ def oom_restore_log_summary(backup):
     signals=classify(raw)
     for token,label in [('memory_budget_exceeded','preventive_memory_budget_rejection'),('heap out of memory','node_heap_exhausted'),('invalid private','checkpoint_validation_failed'),('invalid saved trade','checkpoint_validation_failed'),('snapshot completo rechazado','preserved_snapshot_validation_failed'),('duplicate fixture','preserved_snapshot_inventory_invalid'),('fixture count limit','preserved_snapshot_inventory_invalid')]:
         if token in text:signals.append(label)
-    return {'present':True,'signals':sorted(set(signals)),'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
+    permission_failures=[]
+    decoded=raw.decode(errors='replace')
+    for m in re.finditer(r"(?:EACCES|EPERM): permission denied, (open|scandir|mkdir|stat|access|readlink|copyfile) ['\"]([^'\"\n]{1,240})['\"]",decoded):
+        path_value=m[2]
+        if path_value=='/dev/null' or re.fullmatch(r'/recovery(?:/(?:trade-feed\.json[A-Za-z0-9_.-]*|\.full-snapshot-[A-Za-z0-9_-]{1,80}|response\.private\.json))*',path_value):
+            permission_failures.append({'operation':m[1],'path':path_value,'code':'EACCES' if m[0].startswith('EACCES') else 'EPERM'})
+    return {'present':True,'signals':sorted(set(signals)),'permissionFailures':permission_failures[-8:],'logMayContainEarlierAttempts':True,'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
+
+def rehearsal_copy_permissions(backup,rehearsal,sources,identity):
+    uid=identity.get('uid');gid=identity.get('gid')
+    require(type(uid) is int and type(gid) is int and 0<uid<2**31 and 0<gid<2**31,'REHEARSAL_NONROOT_IDENTITY_UNVERIFIED')
+    require(rehearsal.parent==backup and re.fullmatch('rehearsal-[0-9a-f]{24}',rehearsal.name),'REHEARSAL_SCOPE_UNVERIFIED')
+    dirs={rehearsal};files=[]
+    for src,dst,sha in sources:
+        require(dst.is_relative_to(rehearsal) and dst!=src,'REHEARSAL_SCOPE_UNVERIFIED')
+        require(dst.is_file() and not dst.is_symlink() and dst.stat().st_nlink==1 and (dst.stat().st_dev,dst.stat().st_ino)!=(src.stat().st_dev,src.stat().st_ino) and snapshot_file_hash(dst)==sha,'REHEARSAL_COPY_IDENTITY_UNVERIFIED')
+        files.append(dst);parent=dst.parent
+        while parent!=backup:dirs.add(parent);parent=parent.parent
+    for directory in dirs:require(directory.is_dir() and not directory.is_symlink(),'REHEARSAL_DIRECTORY_UNVERIFIED')
+    before=[{'path':'/recovery'+('/'+str(p.relative_to(rehearsal)) if p!=rehearsal else ''),'uid':p.stat().st_uid,'gid':p.stat().st_gid,'mode':format(p.stat().st_mode&0o777,'04o')} for p in sorted(dirs|set(files))]
+    # Owner-only access inside the bind root. Host backup parent stays root/0700.
+    for directory in dirs:os.chown(directory,uid,gid);os.chmod(directory,0o700)
+    for path in files:os.chown(path,uid,gid);os.chmod(path,0o600)
+    for directory in dirs:require(directory.stat().st_uid==uid and directory.stat().st_gid==gid and directory.stat().st_mode&0o777==0o700,'REHEARSAL_DIRECTORY_ACCESS_UNVERIFIED')
+    for path in files:require(path.stat().st_uid==uid and path.stat().st_gid==gid and path.stat().st_mode&0o777==0o600,'REHEARSAL_FILE_ACCESS_UNVERIFIED')
+    for src,dst,sha in sources:require(snapshot_file_hash(dst)==sha and snapshot_file_hash(src)==sha,'REHEARSAL_CONTENT_CHANGED_DURING_PERMISSION_FIX')
+    return {'containerIdentity':identity,'before':before[:80],'pathsTotal':len(before),'directoriesMode':'0700','filesMode':'0600','scope':'rehearsal_copy_only','backupParentChanged':False}
 
 def checkpoint_build_log_summary(backup):
     path=backup/'checkpoint-fix-build.private.log'
@@ -460,6 +486,14 @@ def upgrade_partitioned(request):
                             shutil.copyfile(src,dst);os.chmod(dst,0o600)
                             with dst.open('rb') as fd:os.fsync(fd.fileno())
                         require(dst.is_file() and not dst.is_symlink() and snapshot_file_hash(dst)==sha,'REHEARSAL_COPY_HASH_MISMATCH')
+                    prior_diagnostic=oom_restore_log_summary(backup)
+                    emit(operation='cutover.aws',stage='partitioned_upgrade.oom_restore.permissions.before',status='collected',previousDiagnostic=prior_diagnostic,workerStarted=False,posnetChanged=False)
+                    user=before['services']['worker'].get('user') or image_info.get('Config',{}).get('User')
+                    require(user=='node' or isinstance(user,str) and re.fullmatch(r'[1-9][0-9]{0,9}(?::[1-9][0-9]{0,9})?',user),'REHEARSAL_RUNTIME_USER_UNVERIFIED')
+                    probe="console.log(JSON.stringify({uid:process.getuid(),gid:process.getgid(),groups:process.getgroups()}))"
+                    identity=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--user',user,'--entrypoint','node',progress['image'],'-e',probe],timeout=30))
+                    permissions=rehearsal_copy_permissions(backup,rehearsal,sources,identity)
+                    emit(operation='cutover.aws',stage='partitioned_upgrade.oom_restore.permissions',status='verified',permissions=permissions,user=user,mount={'source':str(rehearsal),'target':'/recovery','readOnly':True},workerStarted=False,posnetChanged=False)
                     previous_log=backup/'oom-restore.private.log'
                     archived_log=backup/('oom-restore-before-'+digest[:24]+'.private.log')
                     if previous_log.exists() and not archived_log.exists():shutil.copyfile(previous_log,archived_log);os.chmod(archived_log,0o600)
@@ -467,7 +501,7 @@ def upgrade_partitioned(request):
                     code="import{restore}from'/app/apps/worker/src/persistence.ts';import{TradeState}from'/app/apps/worker/src/state.ts';import{walkSnapshot,convertSnapshotRow,fullSnapshotMemory}from'/app/apps/worker/src/full-snapshot.ts';import{writeJsonObject}from'/app/packages/feed-store/src/index.ts';import{open}from'node:fs/promises';const s=new TradeState();const r=await restore(s,'/recovery/trade-feed.json');let sourceSnapshotRehearsed=false,rows=0;const spool="+json.dumps(spool_path)+";if(spool){const ids=new Set();await walkSnapshot(spool,async raw=>{fullSnapshotMemory();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId))throw Error('duplicate fixture');ids.add(row.fixtureId);rows++;if(rows>50000)throw Error('fixture count limit')});s.beginPartitionedSnapshot('prematch');await walkSnapshot(spool,async raw=>{fullSnapshotMemory();s.apply('prematch',[{...convertSnapshotRow(raw),marketRecovery:true}],Date.now(),{source:'snapshot',receivedAt:Date.now()})});s.finishPartitionedSnapshot('prematch',ids);fullSnapshotMemory();const feed=s.feed(Date.now(),true,true),out=await open('/dev/null','w');try{await writeJsonObject(out,feed,s.availabilityBlocks())}finally{await out.close()}sourceSnapshotRehearsed=true;}console.log(JSON.stringify({operation:'offline.restore',rows:r.rows,sourceSnapshotRehearsed,snapshotRows:rows,rssBytes:process.memoryUsage().rss}));console.log('oom-checkpoint-restore-ok');"
                     stage='partitioned_upgrade.oom_restore'
                     emit(operation='cutover.aws',stage='partitioned_upgrade.oom_restore',status='running',readOnly=True,workerStarted=False,posnetChanged=False)
-                    output=run(['docker','run','--rm','--network','none','--memory','4g','--cpus','2','--read-only','--mount','type=bind,source='+str(rehearsal)+',target=/recovery,readonly','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--max-old-space-size=2560','--import','tsx','--input-type=module','-e',code],timeout=780,log=backup/'oom-restore.private.log')
+                    output=run(['docker','run','--rm','--network','none','--memory','4g','--cpus','2','--read-only','--user',user,'--mount','type=bind,source='+str(rehearsal)+',target=/recovery,readonly','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--max-old-space-size=2560','--import','tsx','--input-type=module','-e',code],timeout=780,log=backup/'oom-restore.private.log')
                     require(b'oom-checkpoint-restore-ok' in output,'OOM_CHECKPOINT_RESTORE_FAILED_ORIGINALS_PRESERVED')
                     if spool:require(snapshot_file_hash(spool)==spool_hash,'PRESERVED_SPOOL_CHANGED_DURING_REHEARSAL')
                     progress['oomRestoreVerified']=True;progress['rehearsalCopyVerified']=True;progress['preservedSpoolRehearsed']=spool is not None;save(progress)

@@ -1,0 +1,14 @@
+{
+  "test": "offline_rehearsal_copy_access",
+  "status": "ok",
+  "fixtureSource": "synthetic_cold_checkpoint_copy_not_AWS_backup",
+  "before": {"error": "EACCES", "operation": "open", "path": "/recovery/feed.json"},
+  "after": {"restoredRows": 16329, "uid": 1000, "gid": 1000, "readOnlyBind": true},
+  "memoryLimitBytes": 4294967296,
+  "v8HeapMiB": 2560,
+  "swapDisabled": true,
+  "sourceHashesAndMetadataPreserved": true,
+  "providerRequests": 0,
+  "awsValidated": false,
+  "protectedBackupRestorePending": true
+}
