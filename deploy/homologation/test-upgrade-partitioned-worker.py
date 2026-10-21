@@ -27,7 +27,7 @@ class Upgrade(unittest.TestCase):
    log=backup/'durable-ingress-test.private.log';log.write_bytes(b'PRIVATE_SECRET ERR_INPUT_TYPE_NOT_ALLOWED INBOX_CAPACITY_EXCEEDED')
    summary=NS['durable_ingress_log_summary'](backup)
    self.assertEqual(summary['signals'],['worker_inherited_input_type','inbox_disk_reserve_unavailable']);self.assertNotIn('PRIVATE_SECRET',json.dumps(summary))
- def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False,distribution=False,full=False,supplier=False,nullable=False,throughput=False,spool=False,parser=False,durable=False,oom=False):
+ def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False,distribution=False,full=False,supplier=False,nullable=False,throughput=False,spool=False,parser=False,durable=False,oom=False,read_access_fails=False):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();releases=root/'releases';release=releases/('a'*40);release.mkdir(parents=True);volume=root/'volume';volume.mkdir()
    evidence=backups/'adl-snapshot-shape-example';evidence.mkdir(mode=0o700);raw=json.dumps({'FixtureId':20563979,'Fixture':{'Status':1},'Markets':None}).encode();(evidence/'rejected-row.private.json').write_bytes(raw);(evidence/'rejected-row.private.json').chmod(0o600);(evidence/'report.json').write_text(json.dumps({'rawRowSha256':hashlib.sha256(raw).hexdigest(),'rawRowBytes':len(raw),'rejection':{'path':'Markets','actualType':'null'},'sdk':{'conversion':'succeeded','markets':{'type':'null'}}}));(evidence/'report.json').chmod(0o600)
@@ -47,7 +47,7 @@ class Upgrade(unittest.TestCase):
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([images[args[3]]]).encode()
     if args[:2]==['docker','tag']:images[args[3]]=images['base'];return b''
-    if args[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in args):return json.dumps({'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000]}).encode()
+    if args[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in args):return json.dumps({'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000],'opened':not read_access_fails,'readBytes':0 if read_access_fails else 1,'code':'EACCES' if read_access_fails else None,'chain':[]}).encode()
     if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok throughput-offline-ok spool-memory-offline-ok snapshot-throughput-offline-ok planned-distribution-stop-ok durable-ingress-offline-ok snapshot-memory-offline-ok oom-checkpoint-restore-ok' if '--input-type=module' in args or any(str(a).endswith('-proof.mjs') for a in args) else json.dumps(hashes).encode()
     if args[:2]==['docker','build']:images[image]={'Id':'sha256:'+('c'*64),'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':digest}}};return b''
     if args[:2]==['docker','inspect']:
@@ -83,7 +83,10 @@ class Upgrade(unittest.TestCase):
     if resume_stopped:
      progress_file=next(secure.glob('partitioned-upgrade-*.json'));progress=json.loads(progress_file.read_bytes());progress['phase']='stop_requested';progress_file.write_text(json.dumps(progress));running=False
     if oom:
-     code,verified=invoke('activate',verify_only=True);self.assertEqual(code,0,verified);self.assertTrue(verified['offlineRestoreVerified']);self.assertFalse(running);self.assertFalse(any('up' in c for c in calls));self.assertEqual(len([c for c in calls if any('oom-checkpoint-restore-ok' in str(a) for a in c)]),1)
+     code,verified=invoke('activate',verify_only=True)
+     if read_access_fails:
+      self.assertEqual(code,2);self.assertEqual(verified['reason'],'REHEARSAL_READ_ACCESS_NOT_VERIFIED_NO_START');self.assertFalse(any('oom-checkpoint-restore-ok' in str(a) for c in calls for a in c));self.assertFalse(any('up' in c for c in calls));return
+     self.assertEqual(code,0,verified);self.assertTrue(verified['offlineRestoreVerified']);self.assertFalse(running);self.assertFalse(any('up' in c for c in calls));self.assertEqual(len([c for c in calls if any('oom-checkpoint-restore-ok' in str(a) for a in c)]),1)
     code,result=invoke('activate');self.assertEqual(code,0,result);self.assertTrue(running);self.assertEqual(selected,image);
     if oom:self.assertEqual(len([c for c in calls if any('oom-checkpoint-restore-ok' in str(a) for a in c)]),1)
     self.assertEqual(journal.read_bytes(),journal_before);self.assertEqual(regular.read_bytes(),regular_before);self.assertEqual((Path(result['backup'])/regular.name).read_bytes(),regular_before)
@@ -97,6 +100,10 @@ class Upgrade(unittest.TestCase):
     if oom:
      rehearsal_calls=[c for c in calls if c[:2]==['docker','run'] and any('oom-checkpoint-restore-ok' in str(v) for v in c)]
      self.assertEqual(len(rehearsal_calls),1)
+     read_calls=[c for c in calls if c[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in c)]
+     self.assertEqual(len(read_calls),2)
+     self.assertEqual(read_calls[-1][:-2],rehearsal_calls[0][:rehearsal_calls[0].index('--max-old-space-size=2560')])
+     self.assertEqual(read_calls[-1][read_calls[-1].index('--user')+1],'node')
      self.assertTrue(any('rehearsal-'+digest[:24]+',target=/recovery,readonly' in str(v) for v in rehearsal_calls[0]))
      self.assertEqual((Path(json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_bytes())['backup'])/('rehearsal-'+digest[:24])/'trade-feed.json').read_bytes(),(volume/'trade-feed.json').read_bytes())
      code,verified=invoke('activate',verify_only=True);self.assertEqual(code,0,verified);self.assertTrue(verified['offlineRestoreVerified'])
@@ -133,6 +140,7 @@ class Upgrade(unittest.TestCase):
     build=next(c for c in calls if c[:2]==['docker','build']);self.assertEqual(build[2:4],['--builder','default'])
     dockerfile=Path(build[-1])/'Dockerfile';self.assertTrue(dockerfile.read_text().startswith('FROM adl-partition-base:'));self.assertNotIn('FROM sha256:',dockerfile.read_text())
    finally:NS.update(old)
+ def test_failed_read_gate_never_runs_full_restore_or_starts_worker(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True,throughput=True,spool=True,parser=True,durable=True,oom=True,read_access_fails=True)
  def test_confirmed_oom_resume_backs_up_and_validates_without_signalling_dead_worker(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True,throughput=True,spool=True,parser=True,durable=True,oom=True)
  def test_durable_ingress_image_gate_preserves_single_activation_and_rollback(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True,throughput=True,spool=True,parser=True,durable=True)
  def test_parser_offline_gate_preserves_worker_only_upgrade_and_reuse(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True,throughput=True,spool=True,parser=True)

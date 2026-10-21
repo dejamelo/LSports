@@ -99,3 +99,32 @@ Source hashes, UID/GID and modes matched their recorded initial values. This is
 not a validation of the protected AWS backup. Helper tests also reject root,
 symlinks/hardlinks and verify originals are unchanged. No worker source, image
 digest, commercial settings, distribution or migration step changed in this fix.
+
+## Mandatory in-container read gate and current-attempt logs
+
+The previous executor checked ownership on the host but did not demonstrate
+`open` inside the mounted namespace before attempting the expensive restore.
+Its append-only historical log could also report an earlier EACCES for a later
+failure. Those are executor defects; the workspace still cannot assert the exact
+current AWS filesystem cause without the mounted view.
+
+Resume now runs the same immutable image ID, Compose/image user and Docker
+mount/options for a small Node probe and the full rehearsal. The probe records
+UID/GID/groups, numeric uid_map/gid_map, lstat modes/owners/types for `/`,
+`/recovery` and the checkpoint, and detects links without following them. It must
+open the checkpoint with O_NOFOLLOW and read one byte. Unsafe/missing paths stop;
+copy permissions translate namespace IDs for host-side ownership when needed and
+are followed by a second in-container probe. Only that successful open allows
+the full restore. Original volume and protected backup are never chowned.
+
+Each full rehearsal now has a separate protected `oom-restore-attempt-*` log and
+an atomic latest pointer. Existing logs remain intact. Reports distinguish the
+current attempt from old append-only evidence. No old EACCES is silently reused
+as the failure of a new attempt.
+
+The local synthetic test reproduced root/0700 traversal denial, passed the exact
+probe after copy-only correction, restored 16,329 fixtures as UID/GID 1000 under
+4 GiB, and rejected a symlink without following it. Original source hashes and
+metadata remained unchanged. Tests assert probe/restore share Docker arguments,
+and a failed probe never runs restore or starts the worker. The real AWS backup
+and namespace view remain to be validated by the single resume command.

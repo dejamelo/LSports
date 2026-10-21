@@ -47,6 +47,18 @@ class OomRecovery(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    backup=Path(tmp);backup.chmod(0o700);(backup/'oom-restore.private.log').write_text("EACCES: permission denied, open '/recovery/trade-feed.json'\nEACCES: permission denied, open '/etc/SECRET_PASSWORD'\n")
    report=NS['oom_restore_log_summary'](backup);self.assertEqual(report['permissionFailures'],[{'operation':'open','path':'/recovery/trade-feed.json','code':'EACCES'}]);self.assertNotIn('SECRET_PASSWORD',json.dumps(report))
+ def test_current_attempt_does_not_reuse_historical_permission_error(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);backup.chmod(0o700);(backup/'oom-restore.private.log').write_text("EACCES: permission denied, open '/recovery/trade-feed.json'")
+   name='oom-restore-attempt-'+'a'*16+'.private.log';(backup/name).write_text('Snapshot completo rechazado: invalid_fixture')
+   (backup/'oom-restore.latest.json').write_text(json.dumps({'name':name}))
+   report=NS['oom_restore_log_summary'](backup);self.assertFalse(report['logMayContainEarlierAttempts']);self.assertEqual(report['permissionFailures'],[]);self.assertNotIn('permission_denied',report['signals'])
+   (backup/'oom-restore.latest.json').write_text(json.dumps({'name':'../secret'}))
+   with self.assertRaisesRegex(Exception,'OFFLINE_LOG_NAME_UNVERIFIED'):NS['oom_restore_log_summary'](backup)
+ def test_namespace_uid_mapping_is_explicit_and_unambiguous(self):
+  fn=NS['rehearsal_host_id'];self.assertEqual(fn(1000,[[0,0,4294967295]]),1000);self.assertEqual(fn(1000,[[0,165536,65536]]),166536)
+  with self.assertRaisesRegex(Exception,'REHEARSAL_NAMESPACE_ID_UNMAPPED'):fn(1000,[[0,165536,1]])
+  with self.assertRaisesRegex(Exception,'REHEARSAL_NAMESPACE_ID_UNMAPPED'):fn(1000,[[0,0,65536],[0,165536,65536]])
  def test_durable_inboxes_checked_without_deleting_confirmed_rows(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)

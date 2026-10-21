@@ -1,14 +1,109 @@
 {
-  "test": "offline_rehearsal_copy_access",
   "status": "ok",
-  "fixtureSource": "synthetic_cold_checkpoint_copy_not_AWS_backup",
-  "before": {"error": "EACCES", "operation": "open", "path": "/recovery/feed.json"},
-  "after": {"restoredRows": 16329, "uid": 1000, "gid": 1000, "readOnlyBind": true},
+  "before": {
+    "uid": 1000,
+    "gid": 1000,
+    "groups": [
+      1000
+    ],
+    "chain": [
+      {
+        "path": "/",
+        "uid": 0,
+        "gid": 0,
+        "mode": "0755",
+        "symlink": false,
+        "kind": "directory"
+      },
+      {
+        "path": "/recovery",
+        "uid": 0,
+        "gid": 0,
+        "mode": "0700",
+        "symlink": false,
+        "kind": "directory"
+      },
+      {
+        "path": "/recovery/trade-feed.json",
+        "code": "EACCES"
+      }
+    ],
+    "uidMap": [
+      [
+        0,
+        0,
+        4294967295
+      ]
+    ],
+    "gidMap": [
+      [
+        0,
+        0,
+        4294967295
+      ]
+    ],
+    "opened": false,
+    "code": "EACCES",
+    "operation": "open",
+    "path": "/recovery/trade-feed.json"
+  },
+  "after": {
+    "uid": 1000,
+    "gid": 1000,
+    "groups": [
+      1000
+    ],
+    "chain": [
+      {
+        "path": "/",
+        "uid": 0,
+        "gid": 0,
+        "mode": "0755",
+        "symlink": false,
+        "kind": "directory"
+      },
+      {
+        "path": "/recovery",
+        "uid": 1000,
+        "gid": 1000,
+        "mode": "0700",
+        "symlink": false,
+        "kind": "directory"
+      },
+      {
+        "path": "/recovery/trade-feed.json",
+        "uid": 1000,
+        "gid": 1000,
+        "mode": "0600",
+        "symlink": false,
+        "kind": "file"
+      }
+    ],
+    "uidMap": [
+      [
+        0,
+        0,
+        4294967295
+      ]
+    ],
+    "gidMap": [
+      [
+        0,
+        0,
+        4294967295
+      ]
+    ],
+    "readBytes": 1,
+    "opened": true
+  },
+  "restored": {
+    "rows": 16329,
+    "uid": 1000,
+    "gid": 1000
+  },
+  "linkRejected": true,
+  "originalsPreserved": true,
   "memoryLimitBytes": 4294967296,
-  "v8HeapMiB": 2560,
-  "swapDisabled": true,
-  "sourceHashesAndMetadataPreserved": true,
-  "providerRequests": 0,
   "awsValidated": false,
-  "protectedBackupRestorePending": true
+  "source": "synthetic_copy"
 }
