@@ -594,6 +594,128 @@ def existing_recovery_timeline(consumers,window):
             reads.append({'exitCode':code,'linesRead':lines,'tailMayBeTruncated':lines>=5000,'rawLogPrinted':False})
     return {'window':window,'records':sorted(records,key=lambda r:r['loggedAtUTC'])[-1500:],'reads':reads,'recordsMayBeTruncated':len(records)>1500,'eventLoopLagRecorded':False,'amqpWireHeartbeatRecorded':False,'absenceOfLogIsNotProofOfNoActivity':True}
 
+# One stable open file, bounded records; skipped data still has its complete JSON
+# grammar validated. Never json.load/read_bytes the public+private checkpoint.
+class DiagnosticJson:
+    nonspace=re.compile(r'[^ \t\r\n]')
+    special=re.compile(r'["\\\x00-\x1f]')
+    def __init__(self,file):
+        self.file=file;self.buffer='';self.pos=0;self.offset=0
+    def peek(self):
+        if self.pos==len(self.buffer):
+            self.offset+=self.pos;self.buffer=self.file.read(65536);self.pos=0
+        return self.buffer[self.pos:self.pos+1]
+    def take(self):
+        ch=self.peek();require(bool(ch),'DIAGNOSTIC_TRUNCATED_JSON');self.pos+=1;return ch
+    def whitespace(self):
+        while self.peek():
+            match=self.nonspace.search(self.buffer,self.pos)
+            if match:self.pos=match.start();return
+            self.pos=len(self.buffer)
+    def string(self,keep):
+        require(self.take()=='"','DIAGNOSTIC_STRING_EXPECTED');parts=[];size=0
+        while True:
+            require(bool(self.peek()),'DIAGNOSTIC_TRUNCATED_JSON')
+            match=self.special.search(self.buffer,self.pos)
+            n=match.start()-self.pos if match else len(self.buffer)-self.pos
+            text=self.buffer[self.pos:self.pos+n];self.pos+=n;size+=n
+            require(size<=16*1024*1024,'DIAGNOSTIC_TOKEN_LIMIT')
+            if keep:parts.append(text)
+            if not match:continue
+            ch=self.take()
+            if ch=='"':return json.loads('"'+''.join(parts)+'"') if keep else None
+            require(ch=='\\','DIAGNOSTIC_INVALID_STRING')
+            escape=self.take();require(escape in '"\\/bfnrtu','DIAGNOSTIC_INVALID_ESCAPE')
+            text='\\'+escape
+            if escape=='u':
+                digits=''.join(self.take() for _ in range(4));require(bool(re.fullmatch('[a-fA-F0-9]{4}',digits)),'DIAGNOSTIC_INVALID_ESCAPE');text+=digits
+            size+=len(text)
+            if keep:parts.append(text)
+    def captured(self):
+        # Native decoder for a single bounded event/metadata value. Never decode
+        # the root document. Refill only if this value crosses a chunk boundary.
+        decoder=json.JSONDecoder(parse_constant=lambda value:require(False,'DIAGNOSTIC_NONFINITE_NUMBER'))
+        while True:
+            try:
+                value,end=decoder.raw_decode(self.buffer,self.pos)
+                require(end-self.pos<=16*1024*1024,'DIAGNOSTIC_RECORD_LIMIT');self.pos=end
+                def check(item,depth=0):
+                    require(depth<=128,'DIAGNOSTIC_DEPTH_LIMIT')
+                    if isinstance(item,dict):
+                        for child in item.values():check(child,depth+1)
+                    elif isinstance(item,list):
+                        for child in item:check(child,depth+1)
+                check(value);return value
+            except json.JSONDecodeError:
+                prefix=self.pos;self.offset+=prefix;self.buffer=self.buffer[prefix:];self.pos=0
+                require(len(self.buffer)<=16*1024*1024,'DIAGNOSTIC_RECORD_LIMIT')
+                extra=self.file.read(65536);require(bool(extra),'DIAGNOSTIC_INVALID_JSON');self.buffer+=extra
+    def value(self,keep=False,depth=0,budget=None):
+        require(depth<=128,'DIAGNOSTIC_DEPTH_LIMIT');self.whitespace();
+        if keep:return self.captured()
+        start=self.offset+self.pos
+        if keep and budget is None:budget=start
+        if budget is not None:require(start-budget<=16*1024*1024,'DIAGNOSTIC_RECORD_LIMIT')
+        ch=self.peek()
+        if ch=='"':result=self.string(keep)
+        elif ch in ('{','['):
+            self.take();close='}' if ch=='{' else ']';result={} if keep and ch=='{' else [] if keep else None
+            self.whitespace()
+            if self.peek()==close:self.take();return result
+            while True:
+                if ch=='{':
+                    self.whitespace();key=self.string(keep);self.whitespace();require(self.take()==':','DIAGNOSTIC_COLON_EXPECTED')
+                    item=self.value(keep,depth+1,budget)
+                    if keep:
+                        require(key not in result,'DIAGNOSTIC_DUPLICATE_KEY');result[key]=item
+                else:
+                    self.whitespace()
+                    item=self.captured() if not keep and self.peek()=='{' else self.value(keep,depth+1,budget)
+                    if keep:result.append(item)
+                self.whitespace();separator=self.take()
+                if separator==close:break
+                require(separator==',','DIAGNOSTIC_SEPARATOR_EXPECTED')
+        else:
+            parts=[]
+            while self.peek() and self.peek() not in ',]} \t\r\n':
+                parts.append(self.take());require(len(parts)<=256,'DIAGNOSTIC_SCALAR_LIMIT')
+            text=''.join(parts)
+            require(bool(re.fullmatch(r'(?:null|true|false|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)',text)),'DIAGNOSTIC_INVALID_SCALAR')
+            result=json.loads(text) if keep else None
+        if budget is not None:require(self.offset+self.pos-budget<=16*1024*1024,'DIAGNOSTIC_RECORD_LIMIT')
+        return result
+
+def diagnostic_checkpoint(path,on_event):
+    flags=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0);fd=os.open(path,flags)
+    try:
+        initial=os.fstat(fd);require(__import__('stat').S_ISREG(initial.st_mode),'CHECKPOINT_NOT_REGULAR')
+        with os.fdopen(fd,'r',encoding='utf-8',closefd=False) as file:
+            reader=DiagnosticJson(file);reader.whitespace();require(reader.take()=='{','DIAGNOSTIC_ROOT_EXPECTED')
+            metadata={};seen=set();count=0;reader.whitespace()
+            if reader.peek()!='}':
+                while True:
+                    reader.whitespace();key=reader.string(True);require(key not in seen and len(key)<=128 and len(seen)<128,'DIAGNOSTIC_ROOT_KEY');seen.add(key)
+                    reader.whitespace();require(reader.take()==':','DIAGNOSTIC_COLON_EXPECTED');reader.whitespace()
+                    if key=='events':
+                        require(reader.take()=='[','DIAGNOSTIC_EVENTS_EXPECTED');reader.whitespace()
+                        if reader.peek()!=']':
+                            while True:
+                                event=reader.value(True);require(isinstance(event,dict),'DIAGNOSTIC_EVENT_EXPECTED');on_event(event);count+=1
+                                reader.whitespace();separator=reader.take()
+                                if separator==']':break
+                                require(separator==',','DIAGNOSTIC_SEPARATOR_EXPECTED')
+                        else:reader.take()
+                    elif key in ('connections','coverage','updatedAt','mode'):metadata[key]=reader.value(True)
+                    else:reader.value(False)
+                    reader.whitespace();separator=reader.take()
+                    if separator=='}':break
+                    require(separator==',','DIAGNOSTIC_SEPARATOR_EXPECTED')
+            else:reader.take()
+            reader.whitespace();require(not reader.peek(),'DIAGNOSTIC_TRAILING_JSON');require(isinstance(metadata.get('connections',{}),dict) and isinstance(metadata.get('coverage',{}),dict),'DIAGNOSTIC_METADATA_INVALID');require('events' in seen and metadata.get('mode')=='connected','DIAGNOSTIC_ENVELOPE_INVALID')
+        final=os.fstat(fd);require((initial.st_size,initial.st_mtime_ns)==(final.st_size,final.st_mtime_ns),'DIAGNOSTIC_OPEN_FILE_CHANGED')
+        return metadata,count,initial.st_size
+    finally:os.close(fd)
+
 def cutover_status(directory,start_requested,startup=False,expected_sources=None,recovery_expected=None,timeline_window=None):
     consumers=states('worker');path=directory/'trade-feed.json';result={'operation':'cutover.aws','stage':'status','readOnly':True,'workers':consumers,'posnetChanged':False}
     result['evidence']=feed_evidence(directory,consumers)
@@ -607,10 +729,36 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
         result['workerFailure']=inspect_worker_failure(consumers)[0]
     if not path.exists():
         emit(**result,status='waiting_checkpoint');return 0
-    require(path.is_file() and not path.is_symlink() and path.stat().st_size<=256*1024*1024,'CHECKPOINT_SIZE_LIMIT')
+    require(path.is_file() and not path.is_symlink(),'CHECKPOINT_NOT_REGULAR')
+    reader_info={'file':str(path),'sizeBytes':path.stat().st_size,'previousWholeFileLimitBytes':268435456,'reader':'incremental_json','recordLimitBytes':16777216,'chunkBytes':65536}
+    emit(operation='cutover.aws',stage='checkpoint_reader',status='reading',**reader_info,readOnly=True,workerRestarted=False,providerRequests=0)
     available=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))*1024
-    require(available>path.stat().st_size*8+64*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
-    feed=json.loads(path.read_bytes());lanes={}
+    require(available>192*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
+    selectable=0;markets=0;prices=0;reasons={}
+    per_lane={lane:{'events':0,'markets':0,'pricedSelections':0,'selectableSelections':0} for lane in ('prematch','inplay')}
+    def count_event(event):
+        nonlocal selectable,markets,prices
+        lane=str(event.get('id') or '').split(':',1)[0];counts=per_lane.get(lane)
+        if counts is not None:counts['events']+=1
+        require(isinstance(event.get('markets',[]),list),'DIAGNOSTIC_MARKETS_INVALID')
+        for market in event.get('markets',[]):
+            require(isinstance(market,dict) and isinstance(market.get('selections',[]),list),'DIAGNOSTIC_MARKET_INVALID');markets+=1
+            if counts is not None:counts['markets']+=1
+            for selection in market.get('selections',[]):
+                require(isinstance(selection,dict),'DIAGNOSTIC_SELECTION_INVALID')
+                priced=type(selection.get('odds')) in (int,float) and selection['odds']>1
+                if priced:prices+=1
+                if selection.get('available') is True:selectable+=1
+                if counts is not None:
+                    if priced:counts['pricedSelections']+=1
+                    if selection.get('available') is True:counts['selectableSelections']+=1
+                for reason in selection.get('unavailableReasons',[]):
+                    if isinstance(reason,str) and re.fullmatch('[a-z_]{1,80}',reason):reasons[reason]=reasons.get(reason,0)+1
+    read_started=time.time();feed,event_count,read_size=diagnostic_checkpoint(path,count_event);lanes={}
+    reader_info['readDurationMs']=int((time.time()-read_started)*1000);reader_info['observedAtUTC']=datetime.datetime.fromtimestamp(read_started,datetime.timezone.utc).isoformat()
+    consumers=states('worker');result['workers']=consumers
+    if any(c.get('state')=='exited' for c in consumers):result['workerFailure']=inspect_worker_failure(consumers)[0]
+    reader_info.update(sizeBytes=read_size,complete=True,maxRSSBytes=__import__('resource').getrusage(__import__('resource').RUSAGE_SELF).ru_maxrss*1024);result['checkpointReader']=reader_info
     fields=('phase','session','lastSnapshotAt','lastSnapshotAttemptAt','lastSnapshotErrorAt','recoveryProgress','partitionRecovery')
     for lane in ('prematch','inplay'):
         source=feed.get('connections',{}).get(lane,{})
@@ -630,28 +778,12 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
         for key in ('diagnostic','lastSnapshotDiagnostic'):
             lanes[lane][key]=safe_feed_diagnostic(source.get(key))
         lanes[lane]['sessionEnds']=[{'endedAt':entry.get('endedAt'),'startedAt':entry.get('startedAt'),'diagnostic':safe_feed_diagnostic(entry.get('diagnostic'))} for entry in source.get('sessionEnds',[])[-8:] if isinstance(entry,dict)]
-    events=feed.get('events',[]);selectable=0;markets=0;prices=0;reasons={}
-    per_lane={lane:{'events':0,'markets':0,'pricedSelections':0,'selectableSelections':0} for lane in ('prematch','inplay')}
-    for event in events:
-        lane=str(event.get('id') or '').split(':',1)[0];counts=per_lane.get(lane)
-        if counts is not None:counts['events']+=1
-        for market in event.get('markets',[]):
-            markets+=1
-            if counts is not None:counts['markets']+=1
-            for selection in market.get('selections',[]):
-                if counts is not None:
-                    if type(selection.get('odds')) in (int,float) and selection['odds']>1:counts['pricedSelections']+=1
-                    if selection.get('available') is True:counts['selectableSelections']+=1
-                if type(selection.get('odds')) in (int,float) and selection['odds']>1:prices+=1
-                if selection.get('available') is True:selectable+=1
-                for reason in selection.get('unavailableReasons',[]):
-                    if re.fullmatch('[a-z_]{1,80}',reason):reasons[reason]=reasons.get(reason,0)+1
     def epoch(value):
         try:return datetime.datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()
         except Exception:return 0
-    fresh=0<=time.time()-epoch(feed.get('updatedAt'))<20
+    fresh=0<=read_started-epoch(feed.get('updatedAt'))<20
     current_sessions=bool(start_requested) and all(epoch((c.get('session') or {}).get('startedAt'))>=epoch(start_requested)-5 and epoch(c.get('lastSnapshotAt'))>=epoch((c.get('session') or {}).get('startedAt')) for c in lanes.values())
     ready=fresh and current_sessions and len(consumers)==1 and consumers[0].get('running') is True and all(c.get('phase')=='connected' and (c.get('recoveryProgress') or {}).get('regularSnapshotReady') is True and c.get('lastSnapshotAt') for c in lanes.values())
-    emit(**result,status='snapshots_ready' if ready else 'recovering',updatedAt=feed.get('updatedAt'),lanes=lanes,events=len(events),markets=markets,pricedSelections=prices,selectableSelections=selectable,projectionByLane=per_lane,blockedReasons=reasons,iframeAuthenticated=False)
+    emit(**result,status='snapshots_ready' if ready else 'recovering',updatedAt=feed.get('updatedAt'),lanes=lanes,events=event_count,markets=markets,pricedSelections=prices,selectableSelections=selectable,projectionByLane=per_lane,blockedReasons=reasons,iframeAuthenticated=False)
     return 0
 if __name__=='__main__':raise SystemExit(cutover_main())

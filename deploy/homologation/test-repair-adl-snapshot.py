@@ -22,7 +22,7 @@ class Repair(unittest.TestCase):
    override=secure/'old.json';override.write_text('{}');meta={'release':str(release),'composeOverrides':[str(override)]};(secure/'deployment.json').write_text(json.dumps(meta))
    journal=directory/'trade-feed.json.snapshot-aaaaaaaaaaaaaaaa.json';journal.write_text(json.dumps({'nextAt':0,'due':{'4510:snapshot.events':0},'failures':{}}));original=journal.read_bytes()
    error={'reason':'response_size_limit','category':'response_limit','operation':'snapshot.events','httpStatus':200,'responseLimitBytes':134217728}
-   (directory/'trade-feed.json').write_text(json.dumps({'connections':{'inplay':{'lastSnapshotDiagnostic':error}}}))
+   (directory/'trade-feed.json').write_text(json.dumps({'mode':'connected','events':[],'connections':{'inplay':{'lastSnapshotDiagnostic':error}}}))
    handoff={'audit':{'status':'ok','workerLockAbsent':True,'matchingWorkerProcesses':0}}
    digest=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt=secure/('cutover-'+digest+'.json');receipt.write_text(json.dumps({'startRequestedAtUTC':'2026-01-01T00:00:00Z','notBeforeUTC':'2026-01-01T00:00:00Z'}))
    running=True;container_memory=current_memory;calls=[];hashes={k:'verified' for k in ('provider.ts','diagnostics.ts','snapshot-capacity.ts')}

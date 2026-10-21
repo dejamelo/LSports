@@ -14,12 +14,14 @@ test('complete CLI forwards startup report and explicit owner/parent unchanged; 
   await copyFile(entry,path.join(folder,'complete-adl-cutover.mjs'));
   // Replace only the executor boundary: no SSH, lock, signal, journal or provider access.
   await writeFile(path.join(folder,'resumable-adl-cutover.mjs'),`export async function run(args){console.log(JSON.stringify({operation:'test.forwarded',args}));}`);
-  const args=['--pid','12811','--parent','12809','--startup-report'];
+  for(const mode of ['--startup-report','--feed-validation-resume']){
+  const args=['--pid','12811','--parent','12809',mode];
   const result=spawnSync(process.execPath,[path.join(folder,'complete-adl-cutover.mjs'),...args],{encoding:'utf8',timeout:10000});
   assert.equal(result.status,0,result.stdout);
   const lines=result.stdout.trim().split('\n').map(JSON.parse);
   assert.deepEqual(lines,[{operation:'test.forwarded',args}]);
   assert.equal(result.stderr,'');
+  }
  }finally{await rm(folder,{recursive:true,force:true});}
 });
 

@@ -176,10 +176,10 @@ def repair_snapshot(request):
         feed={}
         checkpoint=directory/'trade-feed.json'
         if checkpoint.is_file():
-            require(not checkpoint.is_symlink() and checkpoint.stat().st_size<=256*1024*1024,'CHECKPOINT_SIZE_LIMIT')
+            require(not checkpoint.is_symlink(),'CHECKPOINT_NOT_REGULAR')
             available=snapshot_host_memory()
-            require(available>checkpoint.stat().st_size*8+64*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
-            feed=json.loads(checkpoint.read_bytes())
+            require(available>192*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
+            feed,_,_=diagnostic_checkpoint(checkpoint,lambda event:None)
             for lane in failures:
                 connection=feed.get('connections',{}).get(lane,{})
                 failures[lane].append(safe_feed_diagnostic(connection.get('lastSnapshotDiagnostic')))

@@ -14,6 +14,23 @@ exec((HERE/'resume-adl-api.py').read_text().split("if __name__=='__main__':")[0]
 exec((HERE/'execute-adl-cutover-aws.py').read_text().split("if __name__=='__main__':")[0],NS)
 
 class Cutover(unittest.TestCase):
+ def test_incremental_checkpoint_validates_skipped_data_and_keeps_one_event(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   path=Path(tmp)/'trade-feed.json';seen=[]
+   value={'mode':'connected','connections':{'prematch':{'consumerProgress':{'active':True}}},'coverage':{},'events':[{'id':'prematch:1','markets':[]},{'id':'inplay:2','markets':[]}],'workerCheckpoint':{'regular':[[1,{'text':'a\\b"c','nil':None}]]},'ticketOutcomes':[{'settlement':2}]}
+   path.write_text(json.dumps(value));metadata,count,size=NS['diagnostic_checkpoint'](path,seen.append)
+   self.assertEqual(count,2);self.assertEqual(seen,value['events']);self.assertNotIn('workerCheckpoint',metadata);self.assertEqual(size,path.stat().st_size)
+   for suffix in (',}', 'false', ',"private":[1,]}'):
+    path.write_text('{"mode":"connected","events":[]'+suffix)
+    with self.assertRaises(RuntimeError):NS['diagnostic_checkpoint'](path,lambda e:None)
+   path.write_text('{"mode":"connected","events":[],"private":{"secret":[true,false,null,"escaped\\\\value"],"bad":NaN}}')
+   with self.assertRaisesRegex(RuntimeError,'DIAGNOSTIC_INVALID_SCALAR'):NS['diagnostic_checkpoint'](path,lambda e:None)
+ def test_reader_keeps_open_inode_when_worker_atomically_publishes(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   path=Path(tmp)/'trade-feed.json';original={'mode':'connected','events':[{'id':'prematch:1','markets':[]}]};path.write_text(json.dumps(original))
+   def changed(event):
+    other=path.with_suffix('.new');other.write_text('{"mode":"connected","events":[]}');os.replace(other,path)
+   _,rows,_=NS['diagnostic_checkpoint'](path,changed);self.assertEqual(rows,1)
  def test_amqp_comparison_reports_secret_drift_without_values_or_hashes(self):
   before={'LSPORTS_PREMATCH_USERNAME':'SECRET_USER','LSPORTS_PREMATCH_PASSWORD':'SECRET_PASSWORD','LSPORTS_INPLAY_USERNAME':'SECRET_USER_2','LSPORTS_INPLAY_PASSWORD':'SECRET_PASS_2'}
   current=dict(before);current['LSPORTS_PREMATCH_PASSWORD']='NEW_SECRET'
@@ -119,12 +136,12 @@ class Cutover(unittest.TestCase):
    folder=Path(temporary);now=NS['datetime'].datetime.now(NS['datetime'].timezone.utc).isoformat().replace('+00:00','Z')
    old='2026-01-01T00:00:00Z'
    lane={'phase':'connected','lastSnapshotAt':now,'session':{'startedAt':old},'recoveryProgress':{'regularSnapshotReady':True}}
-   feed={'updatedAt':now,'connections':{'prematch':copy.deepcopy(lane),'inplay':copy.deepcopy(lane)},'events':[]}
+   feed={'mode':'connected','updatedAt':now,'connections':{'prematch':copy.deepcopy(lane),'inplay':copy.deepcopy(lane)},'events':[]}
    prior=NS['states'];prior_evidence=NS['feed_evidence'];NS['feed_evidence']=lambda *args:{};NS['states']=lambda service:[{'running':True}]
    def check():
     (folder/'trade-feed.json').write_text(json.dumps(feed));output=io.StringIO()
     with contextlib.redirect_stdout(output):NS['cutover_status'](folder,now)
-    return json.loads(output.getvalue())
+    return json.loads(output.getvalue().splitlines()[-1])
    try:
     self.assertEqual(check()['status'],'recovering')
     for entry in feed['connections'].values():entry['session']['startedAt']=now
