@@ -88,6 +88,9 @@ class OomRecovery(unittest.TestCase):
    try:
     result=NS['rehearsal_memory_configuration']({'image':'adl-worker-partitioned:'+'a'*24,'digest':digest},backup,'attempt');self.assertIsNone(result['rehearsalOOMKilled']);self.assertEqual(result['sameConfigurationProbe']['heapLimitBytes'],2734686208);self.assertNotIn('SECRET',json.dumps(result));self.assertNotIn('PASSWORD',json.dumps(result));probe=next(c for c in calls if c[:2]==['docker','run']);self.assertNotIn('--mount',probe);self.assertIn('--read-only',probe);self.assertIn('--max-old-space-size=2560',probe)
    finally:NS.update(old)
+ def test_phase_metrics_keep_stage_and_only_numeric_memory_samples(self):
+  raw=json.dumps({'operation':'offline.memory','stage':'checkpoint.sidecar','rows':1234,'heapUsedBytes':100000000,'heapLimitBytes':2885681152,'rssBytes':200000000,'maxRSSBytes':230000000,'sampledHeapPeakBytes':110000000,'SECRET':'password'}).encode()
+  report=NS['rehearsal_heap_evidence'](raw);self.assertEqual(report['stageAtFailure'],'checkpoint.sidecar');self.assertEqual(report['effectiveHeapLimitBytes'],2885681152);self.assertEqual(report['maxObservedRSSBytes'],230000000);self.assertEqual(report['maxSampledHeapBytes'],110000000);self.assertNotIn('SECRET',json.dumps(report));self.assertIsNone(report['peakRSSBytes'])
  def test_durable_inboxes_checked_without_deleting_confirmed_rows(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)

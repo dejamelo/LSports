@@ -39,9 +39,18 @@ export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void
  const it=tokens(file,limit)[Symbol.asyncIterator]();let batch:string[]=[],offset=0;
  const fill=async()=>{const next=await it.next();if(next.done)fail('truncated_json');batch=next.value as string[];offset=0;};
  const take=async()=>{if(offset>=batch.length)await fill();return batch[offset++];};
- const rawValue=async(first:string,max=limit)=>{let n=first.length;const pieces=[first];let depth=first==='{'||first==='['?1:0;
-  while(depth){if(offset>=batch.length)await fill();while(offset<batch.length&&depth){const t=batch[offset++];n+=t.length;if(n>max)fail('item_size_limit');pieces.push(t);if(t==='{'||t==='[')depth++;if(t==='}'||t===']')depth--;if(depth>128)fail('nesting_limit');if(depth<0)fail('invalid_json');}}
-  try{const text=pieces.join('');if(Buffer.byteLength(text)>max)fail('item_size_limit');return IdSafeJsonParser.parse(text);}catch{return fail('invalid_json');}};
+ const rawValue=async(first:string,max=limit)=>{
+  if(checkpoint)fullSnapshotMemory();
+  let n=first.length,blockChars=n,pieces=[first];const blocks:string[]=[];
+  const append=(token:string)=>{pieces.push(token);blockChars+=token.length;if(blockChars>=64*1024){blocks.push(pieces.join(''));pieces=[];blockChars=0;}};
+  let depth=first==='{'||first==='['?1:0;
+  while(depth){if(offset>=batch.length)await fill();while(offset<batch.length&&depth){const t=batch[offset++];n+=t.length;if(n>max)fail('item_size_limit');append(t);if(t==='{'||t==='[')depth++;if(t==='}'||t===']')depth--;if(depth>128)fail('nesting_limit');if(depth<0)fail('invalid_json');}}
+  if(pieces.length)blocks.push(pieces.join(''));pieces=[];
+  const text=blocks.join('');blocks.length=0;
+  if(Buffer.byteLength(text)>max)fail('item_size_limit');
+  if(checkpoint)fullSnapshotMemory();
+  try{return IdSafeJsonParser.parse(text);}catch{return fail('invalid_json');}
+ };
  // Projection metadata is not a fixture. Validate its complete JSON grammar
  // without retaining entire ticket/diagnostic collections beside recovered rows.
  const metadataValue=async(first:string,depth=0):Promise<void>=>{

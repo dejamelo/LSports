@@ -52,7 +52,8 @@ export async function persistRegularCheckpoint(path:string,regular:ReturnType<ty
 
 // Read directly: API freshness protection must not prevent recovery after downtime.
 // Never restore connection status from disk or infer current availability from a saved feed.
-export async function restore(state: TradeState, path: string) {
+export async function restore(state: TradeState, path: string, progress?:(sample:{stage:string;rows:number})=>void) {
+  progress?.({stage:'checkpoint.scan',rows:0});
   let value: unknown;
   try {
     const metadata=await walkSnapshot(path,async()=>{},32*1024**2,'events') as {header?:unknown;mode?:unknown};
@@ -63,8 +64,10 @@ export async function restore(state: TradeState, path: string) {
   }
   if (!object(value) || value.mode !== 'connected' || !Array.isArray(value.events))
     throw new Error('Invalid saved TRADE state; original file preserved');
+  progress?.({stage:'checkpoint.rebuild',rows:0});
   const recovered = new TradeState();
   let rows = 0;
+  let restoreStage='checkpoint.rebuild';
   if (value.workerCheckpoint !== undefined) {
     const saved = value.workerCheckpoint;
     if (!object(saved) || saved.version !== 1 || !Array.isArray(saved.outright))
@@ -72,7 +75,8 @@ export async function restore(state: TradeState, path: string) {
     if(saved.regularExternal!==undefined&&saved.regularExternal!==true)throw new Error('Invalid private checkpoint reference');
     if(saved.regular!==undefined&&!Array.isArray(saved.regular))throw new Error('Invalid regular checkpoint');
     const restoreEntry=(entry:unknown,regular:boolean)=>{
-      if(rows%100===0&&Math.min(getHeapStatistics().heap_size_limit-process.memoryUsage().heapUsed,process.availableMemory?.()??Infinity)<320*1024**2)throw new Error('Private checkpoint incremental memory guard; original preserved');
+      if(rows%100===0)progress?.({stage:restoreStage,rows});
+      if(Math.min(getHeapStatistics().heap_size_limit-process.memoryUsage().heapUsed,process.availableMemory?.()??Infinity)<320*1024**2)throw new Error('Private checkpoint incremental memory guard; original preserved');
       if (!object(entry) || !['prematch', 'inplay'].includes(String(entry.lane)) || !validId(entry.fixtureId) ||
           (!regular&&(!object(entry.outright)||!validId(entry.outright.competitionId))) || (regular&&entry.outright!==undefined) ||
           !tuples(entry.markets) || !tuples(entry.marketAt) || !tuples(entry.betAt) ||
@@ -127,6 +131,7 @@ export async function restore(state: TradeState, path: string) {
     if(saved.regularExternal===true){
       const sidePath=path+'.regular-checkpoint.json',info=await lstat(sidePath);
       if(!info.isFile()||info.isSymbolicLink()||info.size>2*1024**3)throw new Error('Private regular checkpoint identity guard; original preserved');
+      restoreStage='checkpoint.sidecar';progress?.({stage:restoreStage,rows});
       await walkSnapshot(sidePath,async entry=>{restoreEntry(entry,true);},32*1024**2,'regular');
     }else if(Array.isArray(saved.regular))for(const entry of saved.regular)restoreEntry(entry,true);
   } else {
@@ -177,6 +182,7 @@ export async function restore(state: TradeState, path: string) {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   }
   // Commit only after the whole file has been validated. Restored prices stay blocked pending updates.
+  progress?.({stage:'checkpoint.commit',rows});
   state.rows = recovered.rows;
   for (const lane of ['prematch', 'inplay'] as const)
     for (const row of state.rows[lane].values()) row.restored = true;

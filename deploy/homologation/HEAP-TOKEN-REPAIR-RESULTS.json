@@ -1,0 +1,176 @@
+{
+  "awsValidated": false,
+  "actualAWSFailurePhase": "not_recorded_in_uploaded_report",
+  "localParserDefectProven": true,
+  "denseRecord": {
+    "bytes": 12000080,
+    "values": 6000000,
+    "heapMiB": 256,
+    "beforeExitCode": 134,
+    "beforeFatal": "V8_heap_exhausted",
+    "after": {
+      "count": 6000000,
+      "rss": 138637312,
+      "maxRSS": 232034304
+    }
+  },
+  "fullRehearsal": {
+    "status": "ok",
+    "source": "synthetic_preserved_checkpoint_copy_and_generated_snapshot_not_AWS_backup",
+    "rowsRestored": 16329,
+    "rowsValidated": 16329,
+    "rowsApplied": 16329,
+    "snapshot": {
+      "bytes": 516000000,
+      "padding": 406786383,
+      "rows": 16329,
+      "markets": 130632,
+      "selections": 1045056
+    },
+    "memoryLimitBytes": 4294967296,
+    "oldSpaceMiB": 2560,
+    "uid": 1000,
+    "gid": 1000,
+    "readOnly": true,
+    "checkpointSourceHashesUnchanged": true,
+    "memory": {
+      "fatalSignals": [],
+      "gcSamples": [],
+      "maxLoggedHeapUsedMiB": null,
+      "nativeSubsystemHints": [],
+      "stageAtFailure": "complete",
+      "phaseSamples": [
+        {
+          "stage": "snapshot.apply",
+          "rows": 11000,
+          "elapsedMs": 100053,
+          "heapUsedBytes": 743785136,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1624371200,
+          "maxRSSBytes": 1624371200,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.apply",
+          "rows": 12000,
+          "elapsedMs": 101359,
+          "heapUsedBytes": 792589112,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1624371200,
+          "maxRSSBytes": 1624371200,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.apply",
+          "rows": 13000,
+          "elapsedMs": 104830,
+          "heapUsedBytes": 705982256,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1677754368,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.apply",
+          "rows": 13000,
+          "elapsedMs": 105055,
+          "heapUsedBytes": 723533424,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1677754368,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.apply",
+          "rows": 14000,
+          "elapsedMs": 107971,
+          "heapUsedBytes": 833910248,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1677754368,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.apply",
+          "rows": 14000,
+          "elapsedMs": 110060,
+          "heapUsedBytes": 871684776,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1677754368,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.apply",
+          "rows": 15000,
+          "elapsedMs": 111093,
+          "heapUsedBytes": 904253280,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1677754368,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.apply",
+          "rows": 16000,
+          "elapsedMs": 114527,
+          "heapUsedBytes": 769312984,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1678561280,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.apply",
+          "rows": 16000,
+          "elapsedMs": 115065,
+          "heapUsedBytes": 776742256,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1678561280,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "snapshot.finalize",
+          "rows": 16329,
+          "elapsedMs": 115527,
+          "heapUsedBytes": 844531736,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1678561280,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "projection.serialize",
+          "rows": 16329,
+          "elapsedMs": 115532,
+          "heapUsedBytes": 850478296,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1679609856,
+          "maxRSSBytes": 1693446144,
+          "sampledHeapPeakBytes": 1312100096
+        },
+        {
+          "stage": "complete",
+          "rows": 16329,
+          "elapsedMs": 118121,
+          "heapUsedBytes": 1105996296,
+          "heapLimitBytes": 2885681152,
+          "rssBytes": 1707266048,
+          "maxRSSBytes": 1711591424,
+          "sampledHeapPeakBytes": 1312100096
+        }
+      ],
+      "maxObservedRSSBytes": 1711591424,
+      "maxSampledHeapBytes": 1312100096,
+      "peakRSSBytes": null,
+      "effectiveHeapLimitBytes": 2885681152,
+      "metricsLimit": "GC samples are not RSS or a measured heap limit. Exit code alone is not Docker OOM proof."
+    }
+  },
+  "localTests": {
+    "parserRestoreAndIngress": 30,
+    "status": "passed"
+  },
+  "remaining": "Real protected backup must pass same complete rehearsal before AWS worker start; 30-minute live feed validation then required."
+}

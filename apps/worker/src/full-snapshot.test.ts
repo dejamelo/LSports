@@ -119,3 +119,14 @@ test('checkpoint metadata streams aggregates but rejects malformed grammar, gian
   }
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('dense record tokenization stays within 256 MiB heap without retaining all token fragments',{timeout:120000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-dense-tokens-')),file=join(dir,'body');
+ try{
+  const {execFile}=await import('node:child_process');const {promisify}=await import('node:util');
+  await writeFile(file,'{"Header":{},"Body":[{"FixtureId":1,"Fixture":{},"denseValues":['+'0,'.repeat(5999999)+'0]}]}');
+  const code=`import{walkSnapshot}from${JSON.stringify(new URL('./full-snapshot.ts',import.meta.url).href)};let count=0;await walkSnapshot(${JSON.stringify(file)},async row=>{count=row.denseValues.length});console.log(JSON.stringify({count,maxRSS:process.resourceUsage().maxRSS*1024}));`;
+  const {stdout}=await promisify(execFile)(process.execPath,['--max-old-space-size=256','--import','tsx','--input-type=module','-e',code],{timeout:90000,maxBuffer:4096});
+  const result=JSON.parse(stdout);assert.equal(result.count,6000000);assert.ok(result.maxRSS>0);assert.ok(result.maxRSS<384*1024**2);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

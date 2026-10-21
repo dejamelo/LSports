@@ -202,3 +202,43 @@ The failed attempt did not record phase samples, peak RSS or getHeapStatistics
 heap limit. These remain unknown; GC usage is not relabeled as RSS or configured
 heap size. No limit, worker image, permissions or preserved data is changed by
 this collection. The actual heap cause requires the resulting current log data.
+
+## Proven token-retention heap defect and measured complete rehearsal
+
+The newer uploaded log confirms a V8 fatal heap exhaustion with about 2,498 MiB
+still live after GC. The same-image probe measured a 2,885,681,152-byte heap limit
+with 2560 MiB old space and a 4,294,967,296-byte cgroup. This differs from the old
+worker's Docker OOM; the exact failed phase was not recorded in the old log.
+
+A local reproduction proved a parser allocation defect: rawValue retained one
+array entry per token until JSON.parse, simultaneously keeping the token array,
+token strings, joined JSON and parsed value. A valid 12,000,080-byte record with
+6,000,000 numeric values exhausted the old parser at a 256 MiB old-space limit
+(exit 134, explicit V8 heap fatal). The patched parser completed the same input
+and cap with 232,034,304 bytes kernel maxRSS. It compacts token fragments into
+64 KiB blocks and releases the temporary arrays before parsing. Input data,
+per-record limits, ID-safe parsing and validation are unchanged.
+
+Checkpoint guards now run before per-record assembly/parse and for every restored
+row instead of every 100 rows. They preserve the existing reserve and block start
+rather than discard rows or increase memory. The real rehearsal now records
+phase/row counts, measured heap limit, sampled heap, RSS and kernel maxRSS while
+scanning, rebuilding sidecar state, validating/applying the full spool and
+serializing the projection. Known current-phase metrics accompany any failure.
+This does not assert that token retention was the only cause in the remote run.
+
+The exact generated rehearsal program completed locally with UID/GID 1000,
+read-only synthetic checkpoint copies, 4 GiB cgroup, 2560 MiB old space and no
+network: restore 16,329 -> validate 16,329 -> apply 16,329 -> serialize -> complete.
+Snapshot wire size 516,000,000 bytes included 109,213,617 bytes structured JSON and
+406,786,383 bytes explicit padding; not a captured supplier body. Sampled heap
+peak 1,312,100,096 bytes; kernel maxRSS at completion 1,711,591,424 bytes.
+Checkpoint source/copy hashes matched after execution. 30 parser/restore/durable
+ingress tests passed, including sustained ingress and crash replay. Detailed
+numeric results are in HEAP-TOKEN-REPAIR-RESULTS.json.
+
+The executor derives only the parser/persistence files from the verified prepared
+image, retains the same backup and working copy, and repeats the mandatory full
+real-data rehearsal before start. It then requires live recovery validation;
+local proof is not AWS integration success. No limit or commercial/LSports
+configuration is raised or relaxed, and the Mac consumer stays stopped.
