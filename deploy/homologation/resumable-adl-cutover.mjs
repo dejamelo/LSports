@@ -79,11 +79,11 @@ export async function run(args){
     const mac=rows.find(r=>r.operation==='cutover.audit');
     if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
-    const report=await remote('worker_exit_report',{handoff},true);
+    const report=await remote('worker_exit_report',{handoff,rehearsalBackup:ledger.steps.throughput_image?.result?.backup},true);
     const {writeProtectedReport}=await import('./distribution-validation.mjs');
     const reportFile=path.join(folder,`worker-exit-${pid}-${parent}.json`);
     await writeProtectedReport(reportFile,JSON.stringify(report,null,2));
-    emit({stage,status:'collected',readOnly:true,providerRequests:0,workerRestarted:false,workers:report.workers?.map(({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})=>({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})),reportFile,posnetChanged:false});return;
+    emit({stage,status:'collected',readOnly:true,providerRequests:0,workerRestarted:false,offlineRehearsal:report.offlineRehearsal,workers:report.workers?.map(({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})=>({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})),reportFile,posnetChanged:false});return;
    }
   if(args[4]==='--api-validation-resume'){
    stage='api_health';

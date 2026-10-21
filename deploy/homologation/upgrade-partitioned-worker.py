@@ -62,6 +62,27 @@ def oom_restore_log_summary(backup):
         if token in text:signals.append(label)
     return {'present':True,'signals':sorted(set(signals)),'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
 
+def preserved_rehearsal_report(expected_backup):
+    backup=Path(expected_backup)
+    require(backup.parent==BACKUPS and re.fullmatch(r'adl-partitioned-upgrade-[A-Za-z0-9_-]{1,80}',backup.name) and not backup.is_symlink() and backup.is_dir() and backup.stat().st_uid==os.geteuid() and backup.stat().st_mode&0o077==0,'REHEARSAL_BACKUP_UNVERIFIED')
+    receipts=[]
+    for path in SECURE.glob('partitioned-upgrade-*.json'):
+        require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_size<=1024*1024,'REHEARSAL_RECEIPT_UNVERIFIED')
+        entry=json.loads(path.read_bytes())
+        if entry.get('backup')==str(backup):receipts.append(entry)
+    require(len(receipts)==1,'REHEARSAL_RECEIPT_NOT_UNIQUE')
+    entry=receipts[0];summary=oom_restore_log_summary(backup)
+    raw=read_tail(backup/'oom-restore.private.log').decode(errors='replace') if summary['present'] else ''
+    # Only source-defined validator codes/paths/types escape the private log.
+    allowed={'invalid_json','truncated_json','truncated_string','invalid_root_key','duplicate_or_invalid_root_key','invalid_root_colon','body_not_array','invalid_body_separator','invalid_root_separator','trailing_comma','trailing_json','invalid_header_or_application_error','header_status_rejected','root_not_object','row_not_object','invalid_fixture','invalid_markets_shape','invalid_timestamp','item_size_limit','nesting_limit','unsupported_content_encoding'}
+    details=sorted(set(re.findall(r"(?:detail["\']?\s*:\s*|Snapshot completo rechazado: )['\"]?([a-z_]+)",raw))&allowed)
+    fields=sorted(set(re.findall(r"fieldPath["\']?\s*:\s*['\"]((?:Markets|Bets)(?:\[\d{1,6}\])?(?:\.(?:Bets|Markets))?)['\"]",raw)))
+    types=sorted(set(re.findall(r"actualType["\']?\s*:\s*['\"](null|array|object|string|number|boolean|undefined)['\"]",raw)))
+    fixtures=sorted(set(int(x) for x in re.findall(r"fixtureId[\"']?\s*:\s*([1-9][0-9]{0,15})",raw)))[:8]
+    frames=[{'source':m[0],'line':int(m[1]),'column':int(m[2])} for m in re.findall(r'/app/(apps/worker/src/[a-zA-Z0-9_.-]+\.(?:mjs|ts|js)):(\d{1,7}):(\d{1,7})',raw)][-16:]
+    checkpoint=any(f['source'].endswith('/persistence.ts') for f in frames)
+    return {'backup':str(backup),'receiptPhase':entry.get('phase') if entry.get('phase') in ('prepared','stopped','configured','activated','rolled_back_stopped') else 'unknown','offlineRestoreVerified':entry.get('oomRestoreVerified') is True,'snapshotMemoryVerified':entry.get('snapshotMemoryVerified') is True,'preservedSpoolHash':entry.get('preservedSpoolHash') if re.fullmatch('[0-9a-f]{64}',str(entry.get('preservedSpoolHash',''))) else None,'failureOrigin':'checkpoint_restore' if checkpoint else 'not_proven','validationDetails':details,'fieldPaths':fields,'actualTypes':types,'fixtureIds':fixtures,'stackFrames':frames,'privateLog':summary,'distributionState':'not_queried_saved_stop_evidence_only','readOnly':True,'providerRequests':0,'workerRestarted':False}
+
 def archive_oom_locks(directory,backup,progress,workers):
     require(progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137,'OOM_LOCK_OWNER_NOT_CONFIRMED')
     # Verify no other running container can write this feed volume, not merely its Compose service label.

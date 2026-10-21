@@ -8,6 +8,20 @@ class OomRecovery(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    backup=Path(tmp);backup.chmod(0o700);(backup/'oom-restore.private.log').write_bytes(b'SECRET_TOKEN memory_budget_exceeded heap out of memory')
    result=NS['oom_restore_log_summary'](backup);self.assertEqual(result['signals'],['node_heap_exhausted','preventive_memory_budget_rejection']);self.assertNotIn('SECRET_TOKEN',json.dumps(result))
+ def test_targeted_rehearsal_report_is_readonly_and_sanitized(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);backup=root/'adl-partitioned-upgrade-example';backup.mkdir(mode=0o700);secure=root/'secure';secure.mkdir()
+   log=backup/'oom-restore.private.log';log.write_text("SECRET_TOKEN Snapshot completo rechazado: invalid_markets_shape.\n snapshotValidation: { detail: 'invalid_markets_shape', fieldPath: 'Markets', actualType: 'object', fixtureId: 20563979 }\n at file:///app/apps/worker/src/persistence.ts:201:12")
+   receipt=secure/'partitioned-upgrade-example.json';receipt.write_text(json.dumps({'backup':str(backup),'phase':'stopped','snapshotMemoryVerified':True,'preservedSpoolHash':'a'*64}))
+   old={k:NS.get(k) for k in ('BACKUPS','SECURE')};NS.update(BACKUPS=root,SECURE=secure)
+   before={p:p.read_bytes() for p in (log,receipt)}
+   try:
+    result=NS['preserved_rehearsal_report'](str(backup))
+    self.assertEqual(result['validationDetails'],['invalid_markets_shape']);self.assertEqual(result['fieldPaths'],['Markets']);self.assertEqual(result['actualTypes'],['object']);self.assertEqual(result['fixtureIds'],[20563979]);self.assertEqual(result['failureOrigin'],'checkpoint_restore');self.assertFalse(result['offlineRestoreVerified']);self.assertNotIn('SECRET_TOKEN',json.dumps(result))
+    self.assertEqual(before,{p:p.read_bytes() for p in before})
+    receipt.unlink()
+    with self.assertRaisesRegex(Exception,'REHEARSAL_RECEIPT_NOT_UNIQUE'):NS['preserved_rehearsal_report'](str(backup))
+   finally:NS.update(old)
  def test_durable_inboxes_checked_without_deleting_confirmed_rows(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)
