@@ -75,9 +75,9 @@ def preserved_rehearsal_report(expected_backup):
     raw=read_tail(backup/'oom-restore.private.log').decode(errors='replace') if summary['present'] else ''
     # Only source-defined validator codes/paths/types escape the private log.
     allowed={'invalid_json','truncated_json','truncated_string','invalid_root_key','duplicate_or_invalid_root_key','invalid_root_colon','body_not_array','invalid_body_separator','invalid_root_separator','trailing_comma','trailing_json','invalid_header_or_application_error','header_status_rejected','root_not_object','row_not_object','invalid_fixture','invalid_markets_shape','invalid_timestamp','item_size_limit','nesting_limit','unsupported_content_encoding'}
-    details=sorted(set(re.findall(r"(?:detail["\']?\s*:\s*|Snapshot completo rechazado: )['\"]?([a-z_]+)",raw))&allowed)
-    fields=sorted(set(re.findall(r"fieldPath["\']?\s*:\s*['\"]((?:Markets|Bets)(?:\[\d{1,6}\])?(?:\.(?:Bets|Markets))?)['\"]",raw)))
-    types=sorted(set(re.findall(r"actualType["\']?\s*:\s*['\"](null|array|object|string|number|boolean|undefined)['\"]",raw)))
+    details=sorted(set(re.findall(r"(?:detail[\"']?\s*:\s*|Snapshot completo rechazado: )['\"]?([a-z_]+)",raw))&allowed)
+    fields=sorted(set(re.findall(r"fieldPath[\"']?\s*:\s*['\"]((?:Markets|Bets)(?:\[\d{1,6}\])?(?:\.(?:Bets|Markets))?)['\"]",raw)))
+    types=sorted(set(re.findall(r"actualType[\"']?\s*:\s*['\"](null|array|object|string|number|boolean|undefined)['\"]",raw)))
     fixtures=sorted(set(int(x) for x in re.findall(r"fixtureId[\"']?\s*:\s*([1-9][0-9]{0,15})",raw)))[:8]
     frames=[{'source':m[0],'line':int(m[1]),'column':int(m[2])} for m in re.findall(r'/app/(apps/worker/src/[a-zA-Z0-9_.-]+\.(?:mjs|ts|js)):(\d{1,7}):(\d{1,7})',raw)][-16:]
     checkpoint=any(f['source'].endswith('/persistence.ts') for f in frames)
