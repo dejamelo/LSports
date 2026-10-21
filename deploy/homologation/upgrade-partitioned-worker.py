@@ -142,6 +142,54 @@ def checkpoint_build_log_summary(backup):
         contexts.append({'context':str(directory),'dockerfileSha256':hashlib.sha256(source.encode()).hexdigest(),'baseReference':match[1] if match else 'unrecognized_not_printed','command':['docker','build',*(['--builder','default'] if 'tagged-' in directory.name else []),'--network','none','--pull=false','-t','adl-worker-partitioned:'+directory.name[-24:],str(directory)]})
     return {'present':True,'stage':'partitioned_upgrade.checkpoint_parser_image','logBytes':path.stat().st_size,'tailTruncated':path.stat().st_size>128*1024,'records':records[-12:],'recognizedError':bool(records),'contexts':contexts[-4:],'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False,'readOnly':True}
 
+def rehearsal_heap_evidence(raw):
+    text=raw.decode(errors='replace');gc=[]
+    pattern=r'([0-9]+) ms: (Scavenge|Mark-Compact|Mark-sweep|Mark-Sweep)[^\n]*?([0-9]+(?:\.[0-9]+)?) \(([0-9]+(?:\.[0-9]+)?)\) -> ([0-9]+(?:\.[0-9]+)?) \(([0-9]+(?:\.[0-9]+)?)\) MB'
+    for m in re.finditer(pattern,text):gc.append({'elapsedMs':int(m[1]),'kind':m[2],'usedBeforeMiB':float(m[3]),'allocatedBeforeMiB':float(m[4]),'usedAfterMiB':float(m[5]),'allocatedAfterMiB':float(m[6])})
+    fatal=[label for phrase,label in [('Reached heap limit','reached_heap_limit'),('Ineffective mark-compacts near heap limit','ineffective_gc_near_heap_limit'),('JavaScript heap out of memory','javascript_heap_out_of_memory'),('ERR_WORKER_OUT_OF_MEMORY','worker_thread_heap_out_of_memory')] if phrase in text]
+    subsystems=[name for token,name in [('JsonParser','json_parse'),('JsonStringifier','json_serialization'),('SlowFlatten','string_flatten'),('StringBuilder','string_builder'),('NewFixedArray','array_allocation'),('HeapAllocator','heap_allocation')] if token in text]
+    return {'fatalSignals':fatal,'gcSamples':gc[-8:],'maxLoggedHeapUsedMiB':max((g['usedBeforeMiB'] for g in gc),default=None),'nativeSubsystemHints':subsystems,'stageAtFailure':'not_recorded_unless_JS_stack_identifies_source','peakRSSBytes':None,'effectiveHeapLimitBytes':None,'metricsLimit':'GC samples are not RSS or a measured heap limit. Exit code alone is not Docker OOM proof.'}
+
+def rehearsal_memory_configuration(entry,backup,log_name):
+    result={'rehearsalInvocation':{'containerMemoryLimitBytes':4294967296,'nodeMaxOldSpaceSizeMiB':2560,'source':'executor_arguments_not_preserved_container_inspect','containerRemovedAfterExit':True},'intendedWorker':{'containerMemoryLimitBytes':4294967296,'nodeMaxOldSpaceSizeMiB':2560},'effectiveRehearsalHeapLimitBytes':None,'rehearsalOOMKilled':None,'effectiveMetricsRecorded':False}
+    image=entry.get('image')
+    if not isinstance(image,str) or not re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image):result['imageIdentityVerified']=False;return result
+    image_info=json.loads(run(['docker','image','inspect',image]))[0]
+    require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==entry.get('digest'),'REHEARSAL_IMAGE_IDENTITY_UNVERIFIED')
+    result['imageId']=image_info['Id'];result['imageIdentityVerified']=True
+    options=next((x.split('=',1)[1] for x in image_info.get('Config',{}).get('Env',[]) if x.startswith('NODE_OPTIONS=')),None)
+    result['imageDefaultHeapMiB']=[int(n) for n in re.findall(r'--max[-_]old[-_]space[-_]size(?:=|\s+)([0-9]{1,6})',options or '')]
+    try:
+        meta=json.loads((SECURE/'deployment.json').read_bytes());worker=model(partition_base(meta))['services']['worker']
+        result['currentComposeWorker']={'memoryLimitBytes':snapshot_memory_bytes(worker.get('mem_limit')),'nodeMaxOldSpaceSizeMiB':[int(n) for n in re.findall(r'--max[-_]old[-_]space[-_]size(?:=|\s+)([0-9]{1,6})',(worker.get('environment') or {}).get('NODE_OPTIONS',''))]}
+    except Exception:result['currentComposeWorker']={'verified':False}
+    user=image_info.get('Config',{}).get('User')
+    if user=='node' or isinstance(user,str) and re.fullmatch(r'[1-9][0-9]{0,9}(?::[1-9][0-9]{0,9})?',user):
+        probe="const fs=require('node:fs'),v8=require('node:v8');let limit=null;for(const p of ['/sys/fs/cgroup/memory.max','/sys/fs/cgroup/memory/memory.limit_in_bytes']){try{const n=Number(fs.readFileSync(p,'utf8').trim());if(Number.isSafeInteger(n)&&n>0)limit=n;break}catch{}}const m=process.memoryUsage();console.log(JSON.stringify({heapLimitBytes:v8.getHeapStatistics().heap_size_limit,heapUsedBytes:m.heapUsed,rssBytes:m.rss,cgroupLimitBytes:limit,uid:process.getuid(),gid:process.getgid()}))"
+        try:
+            metrics=json.loads(run(['docker','run','--rm','--network','none','--read-only','--memory','4g','--cpus','2','--user',user,'--entrypoint','node',image_info['Id'],'--max-old-space-size=2560','-e',probe],timeout=30))
+            result['sameConfigurationProbe']={k:v for k,v in metrics.items() if k in ('heapLimitBytes','heapUsedBytes','rssBytes','cgroupLimitBytes','uid','gid') and type(v) is int and 0<=v<2**53}
+            result['configurationProbeStarted']=True;result['configurationProbeLimit']='Fresh diagnostic process; startup RSS is not failed rehearsal peak. No data mounted or restored.'
+        except Exception:result['configurationProbeVerified']=False
+    # Read bounded retained Docker events for this immutable image near the log's
+    # final write. No rehearsal container was retained; these are candidates only.
+    end=int((backup/log_name).stat().st_mtime)+5
+    try:
+        data=run(['docker','events','--since',str(end-905),'--until',str(end),'--filter','type=container','--filter','image='+image_info['Id'],'--format','{{json .}}'],timeout=20)
+        events=[]
+        for line in data.decode(errors='replace').splitlines()[-256:]:
+            try:row=json.loads(line)
+            except Exception:continue
+            action=row.get('Action') or row.get('status');actor=row.get('Actor') or {};cid=actor.get('ID') or row.get('id');attrs=actor.get('Attributes') or {}
+            if action not in ('oom','die') or not isinstance(cid,str) or not re.fullmatch('[0-9a-f]{12,64}',cid):continue
+            event={'action':action,'containerId':cid,'unixTime':row.get('time') if type(row.get('time')) is int else None}
+            code=attrs.get('exitCode')
+            if isinstance(code,str) and re.fullmatch('[0-9]{1,3}',code):event['exitCode']=int(code)
+            events.append(event)
+        result['nearbyImageEvents']=events[-16:];result['eventCorrelation']='candidate_only_no_rehearsal_container_id_recorded'
+    except Exception:result['nearbyImageEventsUnavailable']=True
+    return result
+
 def preserved_rehearsal_report(expected_backup,expected_log=None):
     backup=Path(expected_backup)
     require(backup.parent==BACKUPS and re.fullmatch(r'adl-partitioned-upgrade-[A-Za-z0-9_-]{1,80}',backup.name) and not backup.is_symlink() and backup.is_dir() and backup.stat().st_uid==os.geteuid() and backup.stat().st_mode&0o077==0,'REHEARSAL_BACKUP_UNVERIFIED')
@@ -168,7 +216,7 @@ def preserved_rehearsal_report(expected_backup,expected_log=None):
     origin='checkpoint_restore' if checkpoint else 'snapshot_application' if any(f['source'].endswith('/state.ts') for f in frames) else 'projection_serialization' if any(f['source'].startswith('packages/feed-store/') for f in frames) else 'snapshot_parser_or_conversion' if any(f['source'].endswith('/full-snapshot.ts') for f in frames) else 'not_proven'
     exceptions=sorted(set(re.findall(r'\b(OperationError|SyntaxError|TypeError|RangeError|Error):',raw)))
     known_messages=[message for message in ['Invalid checkpoint envelope','Invalid saved TRADE state; original file preserved','Unsupported TRADE checkpoint; original file preserved','Invalid outright checkpoint; original file preserved','Duplicate outright checkpoint identity','Private checkpoint incremental memory guard; original preserved','duplicate fixture','fixture count limit'] if message in raw]
-    return {'backup':str(backup),'receiptPhase':entry.get('phase') if entry.get('phase') in ('prepared','stopped','configured','activated','rolled_back_stopped') else 'unknown','offlineRestoreVerified':entry.get('oomRestoreVerified') is True,'snapshotMemoryVerified':entry.get('snapshotMemoryVerified') is True,'preservedSpoolHash':entry.get('preservedSpoolHash') if re.fullmatch('[0-9a-f]{64}',str(entry.get('preservedSpoolHash',''))) else None,'failureOrigin':origin,'exceptionTypes':exceptions,'knownExceptionMessages':known_messages,'validationDetails':details,'fieldPaths':fields,'actualTypes':types,'fixtureIds':fixtures,'stackFrames':frames,'privateLog':summary,'checkpointImageBuild':checkpoint_build_log_summary(backup),'distributionState':'not_queried_saved_stop_evidence_only','readOnly':True,'providerRequests':0,'workerRestarted':False}
+    return {'backup':str(backup),'receiptPhase':entry.get('phase') if entry.get('phase') in ('prepared','stopped','configured','activated','rolled_back_stopped') else 'unknown','offlineRestoreVerified':entry.get('oomRestoreVerified') is True,'snapshotMemoryVerified':entry.get('snapshotMemoryVerified') is True,'preservedSpoolHash':entry.get('preservedSpoolHash') if re.fullmatch('[0-9a-f]{64}',str(entry.get('preservedSpoolHash',''))) else None,'failureOrigin':origin,'heapEvidence':rehearsal_heap_evidence(raw_bytes),'memoryConfiguration':rehearsal_memory_configuration(entry,backup,summary['attemptLog']) if summary['present'] else None,'exceptionTypes':exceptions,'knownExceptionMessages':known_messages,'validationDetails':details,'fieldPaths':fields,'actualTypes':types,'fixtureIds':fixtures,'stackFrames':frames,'privateLog':summary,'checkpointImageBuild':checkpoint_build_log_summary(backup),'distributionState':'not_queried_saved_stop_evidence_only','readOnly':True,'providerRequests':0,'workerRestarted':False}
 
 def archive_oom_locks(directory,backup,progress,workers):
     require(progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137,'OOM_LOCK_OWNER_NOT_CONFIRMED')

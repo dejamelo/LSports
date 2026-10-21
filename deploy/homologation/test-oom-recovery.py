@@ -72,6 +72,22 @@ class OomRecovery(unittest.TestCase):
   fn=NS['rehearsal_host_id'];self.assertEqual(fn(1000,[[0,0,4294967295]]),1000);self.assertEqual(fn(1000,[[0,165536,65536]]),166536)
   with self.assertRaisesRegex(Exception,'REHEARSAL_NAMESPACE_ID_UNMAPPED'):fn(1000,[[0,165536,1]])
   with self.assertRaisesRegex(Exception,'REHEARSAL_NAMESPACE_ID_UNMAPPED'):fn(1000,[[0,0,65536],[0,165536,65536]])
+ def test_heap_evidence_distinguishes_v8_gc_from_rss_and_docker_oom(self):
+  raw=b"SECRET_PASSWORD\n[7:0x123] 123456 ms: Mark-Compact 2591.4 (2698.0) -> 2588.3 (2701.0) MB, pooled: 0 MB\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\nv8::internal::JsonParser::ParseJson\n"
+  report=NS['rehearsal_heap_evidence'](raw);self.assertEqual(report['maxLoggedHeapUsedMiB'],2591.4);self.assertEqual(report['gcSamples'][0]['usedAfterMiB'],2588.3);self.assertIn('javascript_heap_out_of_memory',report['fatalSignals']);self.assertIn('json_parse',report['nativeSubsystemHints']);self.assertIsNone(report['peakRSSBytes']);self.assertIsNone(report['effectiveHeapLimitBytes']);self.assertNotIn('SECRET_PASSWORD',json.dumps(report))
+ def test_memory_collection_uses_no_data_mount_and_does_not_infer_docker_oom(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);(backup/'attempt').write_bytes(b'log');digest='a'*64;calls=[]
+   def run(args,**kw):
+    calls.append(args)
+    if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':'sha256:'+'b'*64,'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':digest},'Env':['NODE_OPTIONS=--max-old-space-size=3072','PASSWORD=SECRET']}}]).encode()
+    if args[:2]==['docker','run']:return json.dumps({'heapLimitBytes':2734686208,'cgroupLimitBytes':4294967296,'uid':1000,'gid':1000,'SECRET':'PASSWORD'}).encode()
+    if args[:2]==['docker','events']:return json.dumps({'Action':'die','time':123,'Actor':{'ID':'c'*64,'Attributes':{'exitCode':'139','SECRET':'PASSWORD'}}}).encode()
+    raise AssertionError(args)
+   old={k:NS.get(k) for k in ('run','SECURE')};NS.update(run=run,SECURE=backup)
+   try:
+    result=NS['rehearsal_memory_configuration']({'image':'adl-worker-partitioned:'+'a'*24,'digest':digest},backup,'attempt');self.assertIsNone(result['rehearsalOOMKilled']);self.assertEqual(result['sameConfigurationProbe']['heapLimitBytes'],2734686208);self.assertNotIn('SECRET',json.dumps(result));self.assertNotIn('PASSWORD',json.dumps(result));probe=next(c for c in calls if c[:2]==['docker','run']);self.assertNotIn('--mount',probe);self.assertIn('--read-only',probe);self.assertIn('--max-old-space-size=2560',probe)
+   finally:NS.update(old)
  def test_durable_inboxes_checked_without_deleting_confirmed_rows(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)

@@ -178,3 +178,27 @@ recovery on a separate synthetic copy under 4 GiB restored/reconciled 16,329 row
 replayed two durable rows including one duplicate, checkpointed them and drained
 the inbox; cgroup peak 2,855,313,408 bytes. No AWS or supplier calls were made.
 The real protected backup still must pass the remote full rehearsal.
+
+## Heap-exhaustion evidence collection (no replay)
+
+The read-only worker-exit report now extracts only numeric V8 GC samples, known
+fatal heap phrases and native JSON/string/array subsystem hints from the current
+exclusive rehearsal log. It compares image-default heap options and the current
+Compose model with the rehearsal/intended-worker arguments: 4 GiB cgroup and
+2560 MiB old space. Current Compose can still describe the old, stopped worker;
+it is not automatically the configuration of the prepared rehearsal image.
+
+A short network-isolated diagnostic Node process using that immutable image and
+the same memory/heap/user options reads the effective V8/cgroup limits. It mounts
+no backup, inbox or checkpoint, imports no worker code and performs no replay.
+Its startup heap/RSS is explicitly not the peak of the failed process. An isolated
+local probe confirmed the metric extraction; tests cover numeric-only output and
+no data mounts. Bounded retained Docker oom/die events near the attempt log mtime
+are reported as candidates only, because --rm removed the rehearsal container
+and its ID/OOMKilled field were not saved. Exit 139 is not classified as Docker
+OOM. Historical worker OOM remains separately reported under workers.
+
+The failed attempt did not record phase samples, peak RSS or getHeapStatistics
+heap limit. These remain unknown; GC usage is not relabeled as RSS or configured
+heap size. No limit, worker image, permissions or preserved data is changed by
+this collection. The actual heap cause requires the resulting current log data.
