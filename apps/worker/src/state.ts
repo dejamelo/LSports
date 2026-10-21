@@ -1,3 +1,4 @@
+import {maskEventAvailability,type AvailabilityBlocks} from '@lsports/feed-store';
 import { timestampOrder } from './timestamp-contract.js';
 import { SettlementType, OutrightScoreStatus } from "trade360-nodejs-sdk";
 import { marketStatusLabel, settlementLabel } from "@lsports/contracts";
@@ -81,6 +82,8 @@ const defined = <T extends object>(value: T) =>
     Object.entries(value).filter(([, v]) => v !== undefined),
   ) as Partial<T>;
 export class TradeState {
+  // Opt-in worker publication cache: immutable event projections; never raw SDK rows.
+  private projectionCache=new WeakMap<Row,{context:string;event:SportEvent}>();
   restoration?:import("@lsports/contracts").EventFeed["restoration"];
   rows: Record<Lane, Map<number | string, Row>> = {
     prematch: new Map(),
@@ -124,6 +127,7 @@ export class TradeState {
     duplicate: boolean,
     keepAliveActiveEvents?: number,
     decodedAt = Date.now(),
+    receivedAt = decodedAt,
   ) {
     const m = this.metrics[lane];
     m.messages++;
@@ -132,10 +136,10 @@ export class TradeState {
     if(type===31||type===32)activity.lastControlDecodedAt=now;
     else if(duplicate)activity.lastDuplicateDecodedAt=now;
     else if(events>0){
-      activity.lastDataDecodedAt=now;
+      activity.lastDataDecodedAt=now;activity.lastDataReceivedAt=new Date(receivedAt).toISOString();
       if([1,2,37,38,39].includes(type))activity.lastEventDecodedAt=now;
-      if([3,40,41].includes(type))activity.lastMarketDecodedAt=now;
-      if([35,42].includes(type))activity.lastSettlementDecodedAt=now;
+      if([3,40,41].includes(type)){activity.lastMarketDecodedAt=now;activity.lastMarketReceivedAt=new Date(receivedAt).toISOString();}
+      if([35,42].includes(type)){activity.lastSettlementDecodedAt=now;activity.lastSettlementReceivedAt=new Date(receivedAt).toISOString();}
     }
     m.messagesByType[String(type)] = (m.messagesByType[String(type)] || 0) + 1;
     m.eventUpdatesReceived += events;
@@ -163,6 +167,7 @@ export class TradeState {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
         this.rows[lane].set(key, row);
       }
+      this.projectionCache.delete(row);
       if(observation){
         const at=new Date(observation.receivedAt).toISOString();
         const proof=(row.observation ||= {});
@@ -311,7 +316,7 @@ export class TradeState {
   }
   beginPartitionedSnapshot(lane:Lane){
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
-    for(const row of this.rows[lane].values())if(!row.outright){row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+    for(const row of this.rows[lane].values())if(!row.outright){this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
   }
   finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
     this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));
@@ -327,7 +332,17 @@ export class TradeState {
       snapshotEvents: events.length,
     });
   }
-  feed(now = Date.now()): EventFeed {
+  availabilityBlocks():AvailabilityBlocks{
+    const result:AvailabilityBlocks={};
+    for(const lane of ['prematch','inplay'] as const){
+      const m=this.connections[lane].ingressProgress,reasons:NonNullable<AvailabilityBlocks['prematch']>=[];
+      if(this.connections[lane].phase!=='connected')reasons.push('feed_disconnected');
+      if(m&&(m.processingBacklog??m.backlog)>0&&(m.oldestProcessingAgeMs??m.oldestAgeMs)>5000)reasons.push('processing_backlog');
+      result[lane]=reasons;
+    }return result;
+  }
+  feed(now = Date.now(),useCache=false,deferAvailability=false): EventFeed {
+    const blocks=this.availabilityBlocks();
     const ticketVersionRecoveries: NonNullable<EventFeed["ticketVersionRecoveries"]> = [];
     const ticketOutcomes: NonNullable<EventFeed["ticketOutcomes"]> = [];
     for (const lane of ["prematch", "inplay"] as const) {
@@ -400,14 +415,17 @@ export class TradeState {
         if (!fixture) continue;
         const sport = classifySport(fixture.sport?.name);
         if (sport === "hipica") observed.add(lane);
+        const context=`${lane}:${id}`;const deferred=useCache&&!row.outright;
+        const cached=useCache&&!row.outright?this.projectionCache.get(row):undefined;
+        if(cached?.context===context){events.push(deferAvailability?cached.event:maskEventAvailability(cached.event,blocks[lane]));continue;}
         const score = row.livescore?.value.scoreboard;
         const status =
           (row.livescore && row.livescore.at >= (row.fixture?.at || 0)
             ? score?.status
             : undefined) ?? fixture.status;
         const available =
-          this.connections[lane].phase === "connected" &&
-          !(this.connections[lane].ingressProgress && this.connections[lane].ingressProgress!.backlog > 0 && this.connections[lane].ingressProgress!.oldestAgeMs > 5000) &&
+          (deferred||this.connections[lane].phase === "connected") &&
+          (deferred||!(this.connections[lane].ingressProgress && (this.connections[lane].ingressProgress!.processingBacklog??this.connections[lane].ingressProgress!.backlog) > 0 && (this.connections[lane].ingressProgress!.oldestProcessingAgeMs??this.connections[lane].ingressProgress!.oldestAgeMs) > 5000)) &&
           [1, 2, 9].includes(status ?? 0);
         const prefix = `${lane}:${id}`;
         const markets: EventMarket[] = [...row.markets.values()].map((m) => ({
@@ -416,8 +434,8 @@ export class TradeState {
           status: m.status,
           selections: (m.bets || []).map((b) => {
             const unavailableReasons = [
-              ...(this.connections[lane].phase !== "connected" ? ["feed_disconnected"] : []),
-              ...(this.connections[lane].ingressProgress && this.connections[lane].ingressProgress!.backlog > 0 && this.connections[lane].ingressProgress!.oldestAgeMs > 5000 ? ["processing_backlog"] : []),
+              ...(!deferred&&this.connections[lane].phase !== "connected" ? ["feed_disconnected"] : []),
+              ...(!deferred&&this.connections[lane].ingressProgress && (this.connections[lane].ingressProgress!.processingBacklog??this.connections[lane].ingressProgress!.backlog) > 0 && (this.connections[lane].ingressProgress!.oldestProcessingAgeMs??this.connections[lane].ingressProgress!.oldestAgeMs) > 5000 ? ["processing_backlog"] : []),
               ...(![1, 2, 9].includes(status ?? 0) ? ["event_inactive"] : []),
               ...(m.status !== 1 ? [m.status === 3 ? "market_settled" : "market_not_open"] : []),
               ...((b.betStatusId ?? b.status) !== 1 ? ["selection_not_open"] : []),
@@ -521,6 +539,7 @@ export class TradeState {
             ),
           ).toISOString(),
         });
+        if(useCache&&!row.outright){const base=events[events.length-1];this.projectionCache.set(row,{context,event:base});if(!deferAvailability)events[events.length-1]=maskEventAvailability(base,blocks[lane]);}
       }
     }
     // Prefer InPlay when a fixture exists in both packages; never merge their prices.
@@ -549,7 +568,7 @@ export class TradeState {
         eventsWithSelections: published.filter((e) =>
           e.markets?.some((m) => m.selections.length),
         ).length,
-        eventsWithSelectableOdds: published.filter((e) =>
+        eventsWithSelectableOdds: blocks[lane]?.length?0:published.filter((e) =>
           e.markets?.some((m) => m.selections.some((s) => s.available)),
         ).length,
       };

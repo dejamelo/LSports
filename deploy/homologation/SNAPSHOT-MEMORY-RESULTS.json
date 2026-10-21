@@ -1,0 +1,96 @@
+{
+  "scope": "offline_only_no_AWS_changes",
+  "productionEvidence": {
+    "exitCode": 137,
+    "oomKilled": true,
+    "finishedAtUTC": "2026-10-20T22:37:49.229874332Z",
+    "memoryLimitBytes": 4294967296
+  },
+  "environment": {
+    "network": "none_loopback_only",
+    "containerMemoryBytes": 4294967296,
+    "swap": "disabled",
+    "cpus": 2,
+    "heapMiB": 2560
+  },
+  "fullSpoolLoad": {
+    "cgroupPeakBytes": 3715850240,
+    "persistenceMaxMs": 42737,
+    "persistenceMeanMs": 3222,
+    "test": "durable_ingress_load",
+    "status": "ok",
+    "snapshotBytes": 613580938,
+    "syntheticPaddingBytes": 504367341,
+    "structuredJsonBytes": 109213597,
+    "snapshotStages": [
+      "waiting_http",
+      "download",
+      "validate",
+      "apply",
+      "complete"
+    ],
+    "sourceRate": 69,
+    "messageBytes": 8518,
+    "snapshotMarkets": 130632,
+    "snapshotSelections": 1045056,
+    "mainMaxEventLoopDelayMs": 10318,
+    "burstMessages": 3000,
+    "durationMs": 180003.868491,
+    "messages": 15420,
+    "received": 15420,
+    "acknowledged": 15420,
+    "processed": 15420,
+    "checkpointed": 15420,
+    "peakBacklog": 8367,
+    "maxRss": 2576961536,
+    "maxIngressEventLoopDelayMs": 485,
+    "writes": 69,
+    "restartReplayRows": 0,
+    "replayTested": false,
+    "finalBacklog": 0,
+    "awsValidated": false,
+    "peakProcessingAgeMs": 21170,
+    "peakProcessingBacklog": 3740,
+    "maxRetainedAgeMs": 77777,
+    "finalActiveProcessingAgeMaxMs": 1980,
+    "meanWireBytes": 8536,
+    "receivedBytes": 131628194
+  },
+  "coldRestart": {
+    "test": "cold_dense_replay",
+    "status": "ok",
+    "rows": 16329,
+    "appliedRows": 16329,
+    "replayedRawRows": 2,
+    "duplicateRows": 1,
+    "checkpointed": 2,
+    "writes": 8,
+    "cgroupPeakBytes": 2682826752,
+    "awsValidated": false,
+    "providerRequests": 0,
+    "snapshotSource": "synthetic_validated_rows_not_supplier_HTTP"
+  },
+  "limitations": [
+    "Synthetic fixtures, not a captured supplier response; padding is explicit.",
+    "Snapshot/load and cold-process recovery are separate tests.",
+    "Main-thread delay and checkpoint latency are not zero; unapplied gaps block selections.",
+    "InPlay real market delivery and 30-minute AWS stability remain unverified.",
+    "Peak main-thread delay was 10.318s in the burst; transport-thread delay peaked at 485ms. Steady final processing age was below 2s; checkpoint latency still peaked at 42.737s."
+  ],
+  "intermediateFailures": [
+    "Streaming alone still stalled processing behind checkpoint IO.",
+    "Live Map iteration chased incoming fixtures; row identity index is now frozen.",
+    "Rebuilding all selection objects on global state changes stalled main processing; availability masks now serialize per fixture.",
+    "An in-process restart test retained the previous large heap and hit the preventive memory guard; cold-process replay was tested independently."
+  ],
+  "regressions": {
+    "workerAndStorePassed": 242,
+    "workerSkippedOptIn": 2,
+    "executorJsPassed": 29,
+    "upgradePythonPassed": 12,
+    "upgradeSkippedDockerOptIn": 1,
+    "oomRecoveryPassed": 3,
+    "cutoverPythonPassed": 16,
+    "exitReportPassed": 2
+  }
+}

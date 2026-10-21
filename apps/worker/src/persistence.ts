@@ -3,6 +3,8 @@ import { constants } from 'node:fs';
 import { copyFile, readFile, open, rename, mkdir, lstat } from 'node:fs/promises';
 import {getHeapStatistics} from 'node:v8';
 import {dirname} from 'node:path';
+import {walkSnapshot} from './full-snapshot.js';
+import {writeJsonObject} from '@lsports/feed-store';
 import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
 import { TradeState, type Row } from './state.js';
@@ -10,11 +12,11 @@ import { TradeState, type Row } from './state.js';
 const validId = (n: unknown): n is number => Number.isSafeInteger(n) && Number(n) > 0;
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const tuples = (v: unknown): v is [string, unknown][] => Array.isArray(v) && v.every(e => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string');
-export function checkpoint(state: TradeState) {
-  const regular=(['prematch','inplay'] as const).flatMap(lane=>[...state.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({
+export function checkpoint(state: TradeState, includeRegular=true) {
+  const regular=includeRegular?(['prematch','inplay'] as const).flatMap(lane=>[...state.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({
     lane,fixtureId:Number(key),fixture:row.fixture,livescore:row.livescore,
     markets:[...row.markets],marketAt:[...row.marketAt],betAt:[...row.betAt],betOrder:row.betOrder?[...row.betOrder]:undefined,
-  })));
+  }))):[];
   return { version: 1, regular, outright: (['prematch', 'inplay'] as const).flatMap(lane =>
     [...state.rows[lane]].filter(([, row]) => row.outright).map(([key, row]) => ({
       lane, fixtureId: Number(String(key).split(':').at(-1)),
@@ -30,20 +32,36 @@ export function checkpoint(state: TradeState) {
 
 // Stable private sidecar may be ahead of the public feed after a crash; replay remains
 // idempotent and restored prices remain blocked. ACK is sent only after BOTH writes.
-export async function persistRegularCheckpoint(path:string,regular:ReturnType<typeof checkpoint>['regular']){
+export async function persistRegularCheckpoint(path:string,regular:ReturnType<typeof checkpoint>['regular']|TradeState){
   await mkdir(dirname(path),{recursive:true});const target=path+'.regular-checkpoint.json',temp=target+'.'+process.pid+'.tmp';
-  const file=await open(temp,'w',0o600);try{await file.writeFile(JSON.stringify({version:1,regular}));await file.sync();}finally{await file.close();}
+  const file=await open(temp,'w',0o600);try{
+    if(regular instanceof TradeState){
+      await file.writeFile('{"version":1,"regular":[');let first=true;
+      // Freeze only row identities/references, not their market/bet maps. A live
+      // Map iterator would chase fixtures arriving during this write indefinitely.
+      const captured=(['prematch','inplay'] as const).flatMap(lane=>[...regular.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({lane,key,row})));
+      for(const {lane,key,row} of captured){
+        if(!first)await file.writeFile(',');first=false;
+        await writeJsonObject(file,{lane,fixtureId:Number(key),fixture:row.fixture,livescore:row.livescore,markets:[...row.markets],marketAt:[...row.marketAt],betAt:[...row.betAt],betOrder:row.betOrder?[...row.betOrder]:undefined,marketReceipt:row.marketReceipt,deferredTimestampBets:row.deferredTimestampBets?[...row.deferredTimestampBets]:undefined,timestampRecovery:row.timestampRecovery?[...row.timestampRecovery]:undefined,settlementAudit:row.settlementAudit?[...row.settlementAudit]:undefined,settlementMarkets:row.settlementMarkets?[...row.settlementMarkets]:undefined});
+      }
+      await file.writeFile(']}');
+    }else await writeJsonObject(file,{version:1,regular});
+    await file.sync();}finally{await file.close();}
   await rename(temp,target);const directory=await open(dirname(path),'r');try{await directory.sync();}finally{await directory.close();}
 }
 
 // Read directly: API freshness protection must not prevent recovery after downtime.
 // Never restore connection status from disk or infer current availability from a saved feed.
 export async function restore(state: TradeState, path: string) {
-  let text: string;
-  try { text = await readFile(path, 'utf8'); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { source: 'missing', rows: 0 }; throw error; }
   let value: unknown;
-  try { value = JSON.parse(text); } catch { throw new Error('Invalid saved TRADE state; original file preserved'); }
+  try {
+    const metadata=await walkSnapshot(path,async()=>{},32*1024**2,'events') as {header?:unknown;mode?:unknown};
+    if(metadata.header!==undefined)value={mode:metadata.mode,events:[],workerCheckpoint:metadata.header};
+    else value=JSON.parse(await readFile(path,'utf8')); // Legacy projection only.
+  } catch(error) {
+    if((error as NodeJS.ErrnoException).code==='ENOENT')return {source:'missing',rows:0};
+    throw error;
+  }
   if (!object(value) || value.mode !== 'connected' || !Array.isArray(value.events))
     throw new Error('Invalid saved TRADE state; original file preserved');
   const recovered = new TradeState();
@@ -52,17 +70,10 @@ export async function restore(state: TradeState, path: string) {
     const saved = value.workerCheckpoint;
     if (!object(saved) || saved.version !== 1 || !Array.isArray(saved.outright))
       throw new Error('Unsupported TRADE checkpoint; original file preserved');
-    if(saved.regularExternal===true){
-      const sidePath=path+'.regular-checkpoint.json',info=await lstat(sidePath);
-      const headroom=Math.min(getHeapStatistics().heap_size_limit-process.memoryUsage().heapUsed,process.availableMemory?.()??Infinity);
-      if(!info.isFile()||info.isSymbolicLink()||info.size>2*1024**3||headroom<info.size*6+64*1024**2)throw new Error('Private regular checkpoint memory/identity guard; original preserved');
-      const side=JSON.parse(await readFile(sidePath,'utf8'));
-      if(!object(side)||side.version!==1||!Array.isArray(side.regular))throw new Error('Invalid private regular checkpoint; original preserved');
-      saved.regular=side.regular;
-    }else if(saved.regularExternal!==undefined)throw new Error('Invalid private checkpoint reference');
+    if(saved.regularExternal!==undefined&&saved.regularExternal!==true)throw new Error('Invalid private checkpoint reference');
     if(saved.regular!==undefined&&!Array.isArray(saved.regular))throw new Error('Invalid regular checkpoint');
-    const entries=[...saved.outright.map(entry=>({entry,regular:false})),...(Array.isArray(saved.regular)?saved.regular.map(entry=>({entry,regular:true})):[])];
-    for (const {entry,regular} of entries) {
+    const restoreEntry=(entry:unknown,regular:boolean)=>{
+      if(rows%100===0&&Math.min(getHeapStatistics().heap_size_limit-process.memoryUsage().heapUsed,process.availableMemory?.()??Infinity)<320*1024**2)throw new Error('Private checkpoint incremental memory guard; original preserved');
       if (!object(entry) || !['prematch', 'inplay'].includes(String(entry.lane)) || !validId(entry.fixtureId) ||
           (!regular&&(!object(entry.outright)||!validId(entry.outright.competitionId))) || (regular&&entry.outright!==undefined) ||
           !tuples(entry.markets) || !tuples(entry.marketAt) || !tuples(entry.betAt) ||
@@ -109,7 +120,13 @@ export async function restore(state: TradeState, path: string) {
         marketAt: new Map(entry.marketAt) as Map<string, number>, betAt: new Map(entry.betAt) as Map<string, number>,
       });
       rows++;
-    }
+    };
+    for(const entry of saved.outright)restoreEntry(entry,false);
+    if(saved.regularExternal===true){
+      const sidePath=path+'.regular-checkpoint.json',info=await lstat(sidePath);
+      if(!info.isFile()||info.isSymbolicLink()||info.size>2*1024**3)throw new Error('Private regular checkpoint identity guard; original preserved');
+      await walkSnapshot(sidePath,async entry=>{restoreEntry(entry,true);},32*1024**2,'regular');
+    }else if(Array.isArray(saved.regular))for(const entry of saved.regular)restoreEntry(entry,true);
   } else {
     // Migrate the previous UI-only projection. Preserve all participants and exposed markets;
     // provider-specific data absent from that old format cannot be reconstructed.

@@ -24,3 +24,27 @@ test('SDK recovery timestamp is seconds; null markets preserved; settlement and 
  state.apply('prematch',[row],Date.now());state.set('prematch',{phase:'connected'});const selection=state.feed().events[0].markets![0].selections[0];assert.equal(selection.available,false);assert.ok(selection.unavailableReasons?.includes('selection_settled'));
  const nullRow=convertSnapshotRow({FixtureId:2,Fixture:{Status:1},Markets:null});state.apply('prematch',[nullRow],Date.now());assert.equal(state.feed().events.find(e=>e.id==='prematch:2')?.markets?.length,0);
 });
+
+test('larger replay window is still bounded by payload plus metadata bytes; no rows are discarded',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-bounded-window-'));const db=openInbox(join(dir,'inbox.sqlite'));
+ try{
+  const padding='x'.repeat(60000);
+  for(let base=0;base<600;base+=50)db.append(Array.from({length:50},(_,i)=>({...message(base+i),properties:{headers:{MessageType:3,padding}}})));
+  const rows=db.peek();assert.ok(rows.length>100&&rows.length<600);
+  const bytes=rows.reduce((n,r)=>n+r.content.byteLength+Buffer.byteLength(JSON.stringify(r.properties))+Buffer.byteLength(JSON.stringify(r.fields)),0);
+  assert.ok(bytes<=16*1024**2);assert.equal(db.stats().backlog,600);
+  assert.deepEqual(rows.map(r=>JSON.parse(r.content).n),Array.from({length:rows.length},(_,i)=>i));
+ }finally{db.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('processing can advance beyond a checkpoint in flight; staged rows survive crash until durable completion',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-stage-prefix-'));const path=join(dir,'raw.sqlite');let latest:any;let transport=await connectDurableMq({} as any,path,m=>latest=m,{offline:true});
+ try{
+  const channel:any=await transport.createChannel();let applied=0;
+  await channel.consume('unused',(msg:any)=>{applied++;channel.stage(msg);});
+  transport.offline(Array.from({length:1000},(_,i)=>message(i)));
+  const deadline=Date.now()+5000;while(Date.now()<deadline&&(latest?.processed!==1000||applied!==1000))await sleep(20);
+  assert.equal(applied,1000);assert.equal(latest.acknowledged,1000);assert.equal(latest.processed,1000);assert.equal(latest.checkpointed,0);assert.equal(latest.processingBacklog,0);assert.equal(latest.backlog,1000);
+  await transport.crashOfflineForTest();const db=openInbox(path);assert.equal(db.stats().backlog,1000);assert.deepEqual(db.peek().map(r=>JSON.parse(r.content).n),Array.from({length:1000},(_,i)=>i));db.close();
+ }finally{await transport.close();await rm(dir,{recursive:true,force:true});}
+});

@@ -14,7 +14,7 @@ export function openInbox(path, maxBytes=2*1024**3){
  db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS inbox(id INTEGER PRIMARY KEY AUTOINCREMENT, received INTEGER NOT NULL, content BLOB NOT NULL, properties TEXT NOT NULL, fields TEXT NOT NULL); CREATE TABLE IF NOT EXISTS recovery(id INTEGER PRIMARY KEY CHECK(id=1), safe_seconds INTEGER);');
  const add=db.prepare('INSERT INTO inbox(received,content,properties,fields) VALUES(?,?,?,?)');
  const count=db.prepare('SELECT count(*) AS backlog,coalesce(sum(length(content)+length(cast(properties as blob))+length(cast(fields as blob))),0) AS bytes,min(received) AS oldest FROM inbox');
- const pending=db.prepare('SELECT id,received,content,properties,fields FROM inbox ORDER BY id LIMIT ?');
+ const pending=db.prepare('SELECT id,received,content,properties,fields FROM inbox WHERE id>? ORDER BY id LIMIT ?');
  const del=db.prepare('DELETE FROM inbox WHERE id=?');
  let usage=Number(count.get().bytes),backlog=Number(count.get().backlog);
  const rowSize=db.prepare('SELECT length(content)+length(cast(properties as blob))+length(cast(fields as blob)) AS bytes FROM inbox WHERE id=?');
@@ -24,22 +24,23 @@ export function openInbox(path, maxBytes=2*1024**3){
    const bytes=messages.reduce((n,m)=>n+m.content.byteLength+Buffer.byteLength(JSON.stringify(m.properties||{}))+Buffer.byteLength(JSON.stringify(m.fields||{})),0);if(bytes>16*1024**2||usage+bytes>maxBytes)throw Error('INBOX_CAPACITY_EXCEEDED');
    if(messages.some(m=>Buffer.byteLength(JSON.stringify(m.properties||{}))+Buffer.byteLength(JSON.stringify(m.fields||{}))>64*1024))throw Error('INBOX_CAPACITY_EXCEEDED');
    const ids=[];db.exec('BEGIN IMMEDIATE');try{for(const m of messages)ids.push(Number(add.run(m.received||Date.now(),m.content,JSON.stringify(m.properties||{}),JSON.stringify(m.fields||{})).lastInsertRowid));db.exec('COMMIT');usage+=bytes;backlog+=messages.length;return ids;}catch(e){db.exec('ROLLBACK');throw e;}},
-  peek(limit=500){const rows=pending.iterate(Math.min(limit,500));const out=[];let bytes=0;for(const row of rows){if(bytes+row.content.byteLength>16*1024**2&&out.length)break;bytes+=row.content.byteLength;out.push({...row,content:Buffer.from(row.content),properties:JSON.parse(row.properties,reviveBuffers),fields:JSON.parse(row.fields,reviveBuffers)});}return out;},
+  peek(limit=4096,after=0){const rows=pending.iterate(after,Math.min(limit,4096));const out=[];let bytes=0;for(const row of rows){const size=row.content.byteLength+Buffer.byteLength(row.properties)+Buffer.byteLength(row.fields);if(bytes+size>16*1024**2&&out.length)break;bytes+=size;out.push({...row,content:Buffer.from(row.content),properties:JSON.parse(row.properties,reviveBuffers),fields:JSON.parse(row.fields,reviveBuffers)});}return out;},
   complete(ids){db.exec('BEGIN IMMEDIATE');try{let removed=0,bytes=0;for(const id of ids){const row=rowSize.get(id);if(row){bytes+=Number(row.bytes);removed++;del.run(id);}}db.exec('COMMIT');usage-=bytes;backlog-=removed;}catch(e){db.exec('ROLLBACK');throw e;}},
   safePoint(seconds,checkpointPrefix=false){if(!Number.isSafeInteger(seconds)||seconds<0||backlog!==0&&!checkpointPrefix)throw Error('SAFE_POINT_REQUIRES_DRAINED_INBOX');if(backlog){const oldest=Number(db.prepare('SELECT received FROM inbox ORDER BY id LIMIT 1').get().received);seconds=Math.min(seconds,Math.max(0,Math.floor(oldest/1000)-2));}
    db.prepare('INSERT INTO recovery(id,safe_seconds) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET safe_seconds=excluded.safe_seconds').run(seconds);return seconds;},
+  processingStats(after){const row=db.prepare('SELECT count(*) AS processingBacklog,min(received) AS oldest FROM inbox WHERE id>?').get(after);return{processingBacklog:Number(row.processingBacklog),oldestProcessingAgeMs:row.oldest?Math.max(0,Date.now()-Number(row.oldest)):0};},
   safeSeconds(){return db.prepare('SELECT safe_seconds FROM recovery WHERE id=1').get()?.safe_seconds;},stats,
   close(){db.close();}
  };
 }
 
 if(!isMainThread){
- const send=v=>parentPort.postMessage(v);let inbox,connection,channel,callback,closed=false,pending=[],flushTimer,inflight=new Set(),pumpTimer;
- const metrics={received:0,acknowledged:0,processed:0,receivedBytes:0,lastReceiveAt:null,lastAckAt:null,headersByType:{},durableCommitMs:0};
+ const send=v=>parentPort.postMessage(v);let inbox,connection,channel,callback,closed=false,pending=[],flushTimer,inflight=new Set(),pumpTimer,deliveredThrough=0,stagedThrough=0;
+ const metrics={received:0,acknowledged:0,processed:0,checkpointed:0,receivedBytes:0,lastReceiveAt:null,lastAckAt:null,headersByType:{},durableCommitMs:0};
  const loop=monitorEventLoopDelay({resolution:20});loop.enable();let windowStart=Date.now();
- const report=()=>{const now=Date.now();send({event:'metrics',metrics:{...metrics,...inbox.stats(),rssBytes:process.memoryUsage().rss,ingressMaxEventLoopDelayMs:Math.ceil(loop.max/1e6),metricWindowStartUTC:new Date(windowStart).toISOString(),metricWindowEndUTC:new Date(now).toISOString()}});loop.reset();windowStart=now;};
+ const report=()=>{const now=Date.now();send({event:'metrics',metrics:{...metrics,...inbox.stats(),...inbox.processingStats(stagedThrough),rssBytes:process.memoryUsage().rss,ingressMaxEventLoopDelayMs:Math.ceil(loop.max/1e6),metricWindowStartUTC:new Date(windowStart).toISOString(),metricWindowEndUTC:new Date(now).toISOString()}});loop.reset();windowStart=now;};
  const fail=e=>{send({event:'failure',code:typeof e?.code==='number'||['ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN'].includes(e?.code)?e.code:null,reason:e?.message==='INBOX_CAPACITY_EXCEEDED'?'INBOX_CAPACITY_EXCEEDED':/CONNECTION_FORCED/i.test(e?.message||'')?'CONNECTION_FORCED':'INGRESS_FAILED'});};
- const pump=()=>{if(closed||inflight.size||!callback)return;const rows=inbox.peek();if(rows.length){inflight=new Set(rows.map(r=>r.id));send({event:'deliveries',rows});}};
+ const pump=()=>{if(closed||inflight.size||!callback)return;const rows=inbox.peek(4096,deliveredThrough);if(rows.length){deliveredThrough=rows.at(-1).id;inflight=new Set(rows.map(r=>r.id));send({event:'deliveries',rows});}};
  const flush=()=>{clearTimeout(flushTimer);flushTimer=undefined;if(!pending.length)return;const batch=pending;pending=[];try{const start=performance.now();inbox.append(batch);metrics.durableCommitMs=performance.now()-start;for(const m of batch){channel?.ack(m.original);metrics.acknowledged++;metrics.lastAckAt=new Date().toISOString();}pump();}catch(e){fail(e);void connection?.close().catch(()=>{});}};
  const receive=m=>{if(!m){fail(Error('CONSUMER_CANCELLED'));return;}if(closed)return;metrics.received++;metrics.receivedBytes+=m.content.byteLength;metrics.lastReceiveAt=new Date().toISOString();const type=m.properties?.headers?.MessageType??m.properties?.headers?.messageType??'unknown';if(Object.keys(metrics.headersByType).length<128||metrics.headersByType[type])metrics.headersByType[type]=(metrics.headersByType[type]||0)+1;
   if(m.content.byteLength>16*1024**2){fail(Error('INBOX_CAPACITY_EXCEEDED'));void connection?.close().catch(()=>{});return;}
@@ -51,7 +52,15 @@ if(!isMainThread){
   inbox=openInbox(workerData.path,workerData.maxBytes);send({event:'opened',safeSeconds:inbox.safeSeconds()});
   parentPort.on('message',async m=>{try{
    if(m.action==='consume'){callback=true;pump();}
-   if(m.action==='complete'){for(const id of m.ids)if(!inflight.has(id))throw Error('INBOX_COMPLETION_IDENTITY');inbox.complete(m.ids);metrics.processed+=m.ids.length;for(const id of m.ids)inflight.delete(id);if(!inflight.size){clearTimeout(pumpTimer);pumpTimer=setTimeout(pump,25);}}
+   if(m.action==='stage'){
+    for(const id of m.ids){if(!inflight.has(id)||id<=stagedThrough)throw Error('INBOX_STAGE_IDENTITY');stagedThrough=id;metrics.processed++;inflight.delete(id);}
+    if(!inflight.size){clearTimeout(pumpTimer);pumpTimer=setTimeout(pump,25);}
+   }
+   if(m.action==='complete'){
+    for(const id of m.ids){if(!Number.isSafeInteger(id)||id>deliveredThrough||id>stagedThrough&&!inflight.has(id))throw Error('INBOX_COMPLETION_IDENTITY');if(inflight.has(id)){metrics.processed++;stagedThrough=Math.max(stagedThrough,id);inflight.delete(id);}}
+    inbox.complete(m.ids);metrics.checkpointed+=m.ids.length;
+    if(!inflight.size){clearTimeout(pumpTimer);pumpTimer=setTimeout(pump,25);}
+   }
    if(m.action==='safe'){flush();const seconds=inbox.safePoint(m.seconds,true);send({event:'safe',id:m.id,drained:true,seconds});}
    if(m.action==='offline_load'&&workerData.offline){
     const template=JSON.parse(Buffer.from(m.message.content).toString()),started=performance.now();let sent=0,burstDone=false;
@@ -81,7 +90,9 @@ export async function connectDurableMq(pkg,path,onMetrics=()=>{},options={}){
  const worker=new Worker(new URL('./durable-ingress.mjs',import.meta.url),{workerData:{pkg,path,...options},resourceLimits:{maxOldGenerationSizeMb:192}});
  const connection=new EventEmitter(),channel=new EventEmitter();let callback,closed=false,resolveClose,readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j;});
  let loadResolve;let recoveryAnchor;const anchors=new Map();let anchorId=0;
- const waiting=[];let completing=[];let completeScheduled=false;
+ const waiting=[];let completing=[],staging=[];let completeScheduled=false;
+ const flushOutgoing=()=>{completeScheduled=false;if(staging.length){worker.postMessage({action:'stage',ids:staging});staging=[];}if(completing.length){worker.postMessage({action:'complete',ids:completing});completing=[];}};
+ const scheduleOutgoing=()=>{if(!completeScheduled){completeScheduled=true;setImmediate(flushOutgoing);}};
  worker.on('message',m=>{
   if(m.event==='load_complete')loadResolve?.(m);
   if(m.event==='opened')recoveryAnchor=m.safeSeconds;
@@ -95,7 +106,7 @@ export async function connectDurableMq(pkg,path,onMetrics=()=>{},options={}){
  });
  worker.on('error',e=>{readyReject(e);if(connection.listenerCount('error'))connection.emit('error',new Error('INGRESS_THREAD_FAILED'));});
  worker.on('exit',()=>{const wasClosed=closed;closed=true;for(const resolve of anchors.values())resolve(false);anchors.clear();if(!wasClosed){readyReject(Error('INGRESS_THREAD_EXITED'));connection.emit('close');}resolveClose?.();});
- Object.assign(channel,{async prefetch(){},async consume(_queue,cb){callback=cb;worker.postMessage({action:'consume'});for(const row of waiting.splice(0))cb(row);return{consumerTag:'durable-inbox-exclusive'};},ack(msg){completing.push(msg.fields.inboxId);if(!completeScheduled){completeScheduled=true;setImmediate(()=>{completeScheduled=false;worker.postMessage({action:'complete',ids:completing});completing=[];});}},nack(){/* Retain durable row. Session failure must block/recover rather than delete it. */}});
- Object.assign(connection,{async crashOfflineForTest(){if(!options.offline)throw Error('OFFLINE_ONLY');await worker.terminate();},offlineLoad(config){const p=new Promise(r=>loadResolve=r);worker.postMessage({action:'offline_load',...config});return p;},recoveryAnchor:()=>recoveryAnchor,async checkpointAnchor(seconds){if(closed)return false;const id=++anchorId;const p=new Promise(r=>anchors.set(id,r));worker.postMessage({action:'safe',seconds,id});const ok=await p;return ok;},async createChannel(){return channel;},async close(){if(closed)return;closed=true;for(const resolve of anchors.values())resolve(false);anchors.clear();const p=new Promise(r=>resolveClose=r);worker.postMessage({action:'close'});await p;},offline(messages){worker.postMessage({action:'offline',messages});}});
+ Object.assign(channel,{async prefetch(){},async consume(_queue,cb){callback=cb;worker.postMessage({action:'consume'});for(const row of waiting.splice(0))cb(row);return{consumerTag:'durable-inbox-exclusive'};},stage(msg){staging.push(msg.fields.inboxId);scheduleOutgoing();},ack(msg){completing.push(msg.fields.inboxId);scheduleOutgoing();},nack(){/* Retain durable row. Session failure must block/recover rather than delete it. */}});
+ Object.assign(connection,{async crashOfflineForTest(){if(!options.offline)throw Error('OFFLINE_ONLY');await worker.terminate();},offlineLoad(config){const p=new Promise(r=>loadResolve=r);worker.postMessage({action:'offline_load',...config});return p;},recoveryAnchor:()=>recoveryAnchor,async checkpointAnchor(seconds){if(closed)return false;const id=++anchorId;const p=new Promise(r=>anchors.set(id,r));worker.postMessage({action:'safe',seconds,id});const ok=await p;return ok;},async createChannel(){return channel;},async close(){if(closed)return;closed=true;for(const resolve of anchors.values())resolve(false);anchors.clear();const p=new Promise(r=>resolveClose=r);flushOutgoing();worker.postMessage({action:'close'});await p;},offline(messages){worker.postMessage({action:'offline',messages});}});
  try{await ready;}catch(e){await connection.close();throw e;}return connection;
 }

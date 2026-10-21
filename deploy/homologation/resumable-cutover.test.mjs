@@ -37,3 +37,11 @@ test('inventory repair separates repeated current-container distribution errors 
  assert.deepEqual(calls,['status']);assert.equal(ledger.inventoryTransportBlock.reason,'SUPPLIER_DISTRIBUTION_REMAINS_OFF');
  }finally{process.exitCode=code;}
 });
+
+
+test('OOM repair and rollback remain distinct durable modes; no migration mode is selected',async()=>{
+ const {recoveryMode}=await import('./resumable-adl-cutover.mjs');
+ assert.deepEqual(recoveryMode('--snapshot-memory-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
+ assert.deepEqual(recoveryMode('--snapshot-memory-rollback'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:true});
+ assert.deepEqual(recoveryMode('--durable-ingress-repair'),{snapshotMemoryRepair:false,durableMode:true,durableRollback:false});
+});

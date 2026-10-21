@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import amqp from 'amqplib';
 import { createPublisher, readConnectedFeed } from '@lsports/feed-store';
 import { TradeState } from './state.js';
-import { checkpoint, restore } from './persistence.js';
+import { checkpoint, restore, persistRegularCheckpoint } from './persistence.js';
 import { session } from './connected.js';
 import { createApp } from '../../api/src/app.js';
 import type { PackageConfig } from './config.js';
@@ -183,4 +183,21 @@ test('both lanes persist concurrently through one writer; private checkpoint and
  const restarted=new TradeState();await restore(restarted,path);assert.equal(restarted.rows.prematch.size,1);assert.equal(restarted.rows.inplay.size,1);assert.equal(committed,2);
  await assert.rejects(readFile(path+'.lock'),(e:{code:string})=>e.code==='ENOENT');
  }finally{abort.abort();await rm(dir,{recursive:true,force:true});}
+});
+
+test('incremental private checkpoint and projection preserve full rows; truncated sidecar never commits partial restore', async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-incremental-')),path=join(dir,'feed.json');
+ try{
+  const state=new TradeState();
+  for(let id=1;id<=200;id++)state.apply('prematch',[{fixtureId:id,fixture:{status:1},markets:[{id:1,status:1,bets:[{id:'A',price:'2.1',status:1,isChanged:1}]}]}],Date.now());
+  await persistRegularCheckpoint(path,state);
+  await createPublisher(path)(state.feed(),{...checkpoint(state,false),regularExternal:true});
+  const restored=new TradeState();assert.equal((await restore(restored,path)).rows,200);
+  assert.ok([...restored.rows.prematch.values()].every(r=>r.restored));
+  const original=await readFile(path+'.regular-checkpoint.json','utf8');
+  await writeFile(path+'.regular-checkpoint.json',original.slice(0,-2));
+  const protectedState=new TradeState();protectedState.apply('inplay',[{fixtureId:999,fixture:{status:1}}],Date.now());
+  await assert.rejects(restore(protectedState,path));assert.equal(protectedState.rows.prematch.size,0);assert.ok(protectedState.rows.inplay.has(999));
+  assert.equal(await readFile(path+'.regular-checkpoint.json','utf8'),original.slice(0,-2));
+ }finally{await rm(dir,{recursive:true,force:true});}
 });

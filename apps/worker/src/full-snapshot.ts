@@ -35,7 +35,7 @@ async function* tokens(file:string,max:number){let primitive='',quoted=false,esc
   await yieldTurn();
  }if(quoted)fail('truncated_string');if(primitive)yield [primitive];
 }
-export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes){
+export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes,checkpoint?:'regular'|'events'){
  const it=tokens(file,limit)[Symbol.asyncIterator]();let batch:string[]=[],offset=0;
  const fill=async()=>{const next=await it.next();if(next.done)fail('truncated_json');batch=next.value as string[];offset=0;};
  const take=async()=>{if(offset>=batch.length)await fill();return batch[offset++];};
@@ -45,11 +45,12 @@ export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void
  let header:unknown,body=false;const rootErrors:Record<string,unknown>={};const keys=new Set<string>();
  try{if(await take()!=='{')fail('root_not_object');let next=await take();while(next!=='}'){
   let key:unknown;try{key=JSON.parse(next);}catch{fail('invalid_root_key');}if(typeof key!=='string'||key.length>64||keys.size>=64||keys.has(key))fail('duplicate_or_invalid_root_key');keys.add(key as string);if(await take()!==':')fail('invalid_root_colon');
-  let first=await take();if(key==='Body'){
+  let first=await take();if(key===(checkpoint||'Body')){
    body=true;if(first!=='[')fail('body_not_array');first=await take();if(first!==']')for(;;){await onRow(await rawValue(first));first=await take();if(first===']')break;if(first!==',')fail('invalid_body_separator');first=await take();}
-  }else{const value=await rawValue(first,64*1024);if(key==='Header')header=value;else if(['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
+  }else{const value=await rawValue(first,checkpoint?limit:64*1024);if(key===(checkpoint==='regular'?'version':checkpoint==='events'?'workerCheckpoint':'Header'))header=value;else if(checkpoint||['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
   next=await take();if(next==='}')break;if(next!==',')fail('invalid_root_separator');next=await take();if(next==='}')fail('trailing_comma');
  }if(offset<batch.length||!(await it.next()).done)fail('trailing_json');
+ if(checkpoint){if(!body||checkpoint==='regular'&&header!==1||checkpoint==='events'&&rootErrors.mode!=='connected')throw Error('Invalid checkpoint envelope');return {header,mode:rootErrors.mode};}
  const inspection=inspectResponse({...rootErrors,Header:header,Body:[]},'application/json');
  if(!body||!header||typeof header!=='object'||Array.isArray(header)||inspection.applicationErrorFields)fail('invalid_header_or_application_error');
  const code=(header as {HttpStatusCode?:unknown}).HttpStatusCode;if(code!==undefined&&(!Number.isInteger(code)||Number(code)<200||Number(code)>=300))fail('header_status_rejected');

@@ -140,6 +140,7 @@ export interface FeedObservation {
   amqpMarketReceivedAt?: string;
 }
 export interface FeedActivity {
+  lastDataReceivedAt?:string;lastMarketReceivedAt?:string;lastSettlementReceivedAt?:string;
   lastDecodedAt?:string;lastControlDecodedAt?:string;lastDataDecodedAt?:string;
   lastEventDecodedAt?:string;lastMarketDecodedAt?:string;lastSettlementDecodedAt?:string;
   lastDuplicateDecodedAt?:string;
@@ -377,7 +378,7 @@ export interface FeedMessageMetadata {
   warnings?: string[];
 }
 export interface ConnectionState {
-  ingressProgress?:{received:number;acknowledged:number;processed:number;backlog:number;bytes:number;oldestAgeMs:number;receivedBytes:number;lastReceiveAt:string|null;lastAckAt:string|null;durableCommitMs:number;rssBytes:number;ingressMaxEventLoopDelayMs:number;metricWindowStartUTC:string;metricWindowEndUTC:string;headersByType:Record<string,number>};
+  ingressProgress?:{checkpointed?:number;processingBacklog?:number;oldestProcessingAgeMs?:number;received:number;acknowledged:number;processed:number;backlog:number;bytes:number;oldestAgeMs:number;receivedBytes:number;lastReceiveAt:string|null;lastAckAt:string|null;durableCommitMs:number;rssBytes:number;ingressMaxEventLoopDelayMs:number;metricWindowStartUTC:string;metricWindowEndUTC:string;headersByType:Record<string,number>};
   consumerProgress?:{acknowledgedMessages:number;lastAckAt?:string;registeredAt?:string;active?:boolean};
   persistenceProgress?:{writes:number;lastDurationMs:number;lastCompletedAt:string;captureDurationMs?:number;regularDurationMs?:number;publishDurationMs?:number;maxEventLoopDelayMs?:number;metricWindowStartUTC?:string;metricWindowEndUTC?:string;rssBytes?:number};
   fullSnapshot?:{stage?:'waiting_http'|'download'|'validate'|'apply'|'complete';validatedRows?:number;appliedRows?:number;lastProgressAt?:string;method:'disk_spool_two_pass';startedAt:string;completedAt?:string;rows?:number;bytes?:number;ackedDuringRecovery?:number};

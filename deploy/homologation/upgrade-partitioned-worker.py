@@ -33,9 +33,9 @@ def distribution_stop_log_summary(backup):
         records.append(row)
     return {'present':True,'signals':sorted(set(signals)),'records':records[-12:],'httpStatusCodes':sorted(set(int(v) for v in re.findall(r'httpStatus[\"\']?\s*[:=]\s*([1-5][0-9]{2})',raw.decode(errors='replace')))),'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
 
-def durable_ingress_proof_command(backup,image,check):
+def durable_ingress_proof_command(backup,image,check,name='durable-ingress-proof.mjs'):
     # A file entrypoint keeps --input-type out of the transport Worker's execArgv.
-    proof=backup/'durable-ingress-proof.mjs'
+    proof=backup/name
     require(not backup.is_symlink() and backup.stat().st_mode&0o077==0,'OFFLINE_PROOF_BACKUP_NOT_PRIVATE')
     if proof.exists():
         require(proof.is_file() and not proof.is_symlink() and proof.stat().st_uid==os.geteuid() and proof.read_bytes()==check.encode(),'OFFLINE_PROOF_CHANGED')
@@ -51,6 +51,61 @@ def durable_ingress_log_summary(backup):
     raw=read_tail(path)
     signals=[label for token,label in [(b'ERR_INPUT_TYPE_NOT_ALLOWED','worker_inherited_input_type'),(b'INBOX_CAPACITY_EXCEEDED','inbox_disk_reserve_unavailable'),(b'not durable ahead of processing','durable_ack_proof_failed'),(b'missing replay','durable_replay_proof_failed')] if token in raw]
     return {'present':True,'signals':signals,'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
+
+def oom_restore_log_summary(backup):
+    path=backup/'oom-restore.private.log'
+    if not path.exists():return {'present':False}
+    require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and not backup.is_symlink() and backup.stat().st_mode&0o077==0,'OFFLINE_LOG_NOT_PROTECTED')
+    raw=read_tail(path);text=raw.decode(errors='replace').lower()
+    signals=classify(raw)
+    for token,label in [('memory_budget_exceeded','preventive_memory_budget_rejection'),('heap out of memory','node_heap_exhausted'),('invalid private','checkpoint_validation_failed'),('invalid saved trade','checkpoint_validation_failed'),('snapshot completo rechazado','preserved_snapshot_validation_failed'),('duplicate fixture','preserved_snapshot_inventory_invalid'),('fixture count limit','preserved_snapshot_inventory_invalid')]:
+        if token in text:signals.append(label)
+    return {'present':True,'signals':sorted(set(signals)),'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
+
+def archive_oom_locks(directory,backup,progress,workers):
+    require(progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137,'OOM_LOCK_OWNER_NOT_CONFIRMED')
+    # Verify no other running container can write this feed volume, not merely its Compose service label.
+    ids=run(['docker','ps','-q']).decode().split()
+    for item in json.loads(run(['docker','inspect',*ids])) if ids else []:
+        require(not any(m.get('RW') and m.get('Type')=='volume' and Path(m.get('Source',''))==directory for m in item.get('Mounts',[])),'OTHER_FEED_VOLUME_WRITER_PRESENT')
+    paths=[directory/'trade-feed.json.lock',*directory.glob('trade-feed.json*.reclaim'),*directory.glob('trade-feed.json.snapshot-*.lock')]
+    for lock in paths:
+        if not lock.exists():continue
+        require(lock.is_file() and not lock.is_symlink() and lock.stat().st_size<=4096,'OOM_LOCK_FORMAT_UNVERIFIED')
+        owner=lock.read_bytes();require(re.fullmatch(rb'[1-9][0-9]{0,9}',owner) is not None or owner==b'' and (lock.name.endswith('.reclaim') or lock.name.startswith('trade-feed.json.snapshot-')),'OOM_LOCK_OWNER_FORMAT_UNVERIFIED')
+        target=backup/('oom-preserved-'+lock.name)
+        if not target.exists():private(target,owner)
+        require(target.read_bytes()==owner,'OOM_LOCK_BACKUP_MISMATCH')
+        # Container namespace is dead; preserve original inode by moving, never reclaim a live owner.
+        archived=backup/('oom-archived-'+lock.name);require(not archived.exists(),'OOM_LOCK_ARCHIVE_ALREADY_PRESENT')
+        require(not any(w['running'] for w in states('worker')),'WORKER_STARTED_DURING_OOM_RECOVERY')
+        identity=lock.stat()
+        try:os.rename(lock,archived)
+        except OSError as error:
+            import errno
+            if error.errno!=errno.EXDEV:raise
+            private(archived,owner);require(archived.read_bytes()==owner,'OOM_CROSS_DEVICE_ARCHIVE_MISMATCH')
+            current=lock.lstat();require(current.st_ino==identity.st_ino and current.st_dev==identity.st_dev and lock.read_bytes()==owner,'OOM_LOCK_CHANGED_DURING_ARCHIVE');lock.unlink()
+    parent=os.open(backup,os.O_RDONLY)
+    try:os.fsync(parent)
+    finally:os.close(parent)
+    fd=os.open(directory,os.O_RDONLY)
+    try:os.fsync(fd)
+    finally:os.close(fd)
+
+def verify_oom_inboxes(directory):
+    import sqlite3
+    result=[]
+    for path in sorted(directory.glob('trade-feed.json.*.inbox.sqlite')):
+        require(path.is_file() and not path.is_symlink(),'INBOX_IDENTITY_UNVERIFIED')
+        db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)
+        try:
+            db.execute('PRAGMA query_only=ON')
+            require(db.execute('PRAGMA quick_check').fetchall()==[('ok',)],'DURABLE_INBOX_INTEGRITY_FAILED')
+            count=db.execute('SELECT count(*) FROM inbox').fetchone()[0]
+            result.append({'lane':'prematch' if '.prematch.' in path.name else 'inplay','pendingRows':count,'integrity':'ok'})
+        finally:db.close()
+    require(len(result)==2,'EXPECTED_BOTH_DURABLE_INBOXES');return result
 
 def upgrade_partitioned(request):
     stage='partitioned_upgrade.input';backup=None
@@ -69,7 +124,7 @@ def upgrade_partitioned(request):
             image_info=json.loads(run(['docker','image','inspect',progress['image']]))[0]
             require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==digest,'UPGRADE_IMAGE_LABEL_MISMATCH')
         else:
-            require(phase=='prepare','UPGRADE_MUST_BE_PREPARED');workers=states('worker');require(len(workers)==1 and workers[0]['running'],'UPGRADE_REQUIRES_SINGLE_RUNNING_WORKER')
+            require(phase=='prepare','UPGRADE_MUST_BE_PREPARED');workers=states('worker');require(len(workers)==1 and (workers[0]['running'] or request.get('snapshotMemoryRepair') and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137),'UPGRADE_REQUIRES_VERIFIED_RUNNING_OR_OOM_WORKER')
             require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT');require(shutil.disk_usage('/opt').free>=1024**3,'UPGRADE_DISK_HEADROOM_INSUFFICIENT')
             original_image=before['services']['worker']['image'];base_info=json.loads(run(['docker','image','inspect',original_image]))[0]
             container=json.loads(run(['docker','inspect',workers[0]['id']]))[0];require(container['Image']==base_info['Id'],'UPGRADE_RUNNING_IMAGE_MISMATCH');require(snapshot_memory_bytes(container['HostConfig']['Memory'])==4294967296,'UPGRADE_CONTAINER_MEMORY_LIMIT_MISMATCH')
@@ -143,8 +198,16 @@ def upgrade_partitioned(request):
         if request.get('durableIngress') and not progress.get('durableIngressVerified'):
             stage='partitioned_upgrade.offline_durable_ingress'
             check="import{connectDurableMq,openInbox}from'/app/apps/worker/src/durable-ingress.mjs';import{mkdtemp,rm}from'node:fs/promises';const d=await mkdtemp('/tmp/inbox-'),p=d+'/raw.sqlite';let latest;const c=await connectDurableMq({},p,m=>latest=m,{offline:true});c.offline([{content:Buffer.from('payload'),properties:{headers:{MessageType:3}},fields:{}}]);for(let i=0;i<100&&latest?.acknowledged!==1;i++)await new Promise(r=>setTimeout(r,10));if(latest?.acknowledged!==1||latest?.processed!==0)throw Error('not durable ahead of processing');await c.close();const db=openInbox(p);if(db.stats().backlog!==1)throw Error('missing replay');db.close();await rm(d,{recursive:true,force:true});console.log('durable-ingress-offline-ok');"
+            if request.get('snapshotMemoryRepair'):
+                check="import{connectDurableMq,openInbox}from'/app/apps/worker/src/durable-ingress.mjs';import{mkdtemp,rm}from'node:fs/promises';const d=await mkdtemp('/tmp/inbox-'),p=d+'/raw.sqlite';let latest;const c=await connectDurableMq({},p,m=>latest=m,{offline:true}),ch=await c.createChannel();await ch.consume('offline',msg=>ch.stage(msg));c.offline([{content:Buffer.from('payload'),properties:{headers:{MessageType:3}},fields:{}}]);for(let i=0;i<1000&&latest?.processed!==1;i++)await new Promise(r=>setTimeout(r,10));if(latest?.acknowledged!==1||latest?.processed!==1||latest?.checkpointed!==0||latest?.backlog!==1||latest?.processingBacklog!==0)throw Error('not durable ahead of processing');await c.close();const db=openInbox(p);if(db.stats().backlog!==1)throw Error('missing replay');db.close();await rm(d,{recursive:true,force:true});console.log('durable-ingress-offline-ok');"
             output=run(durable_ingress_proof_command(backup,progress['image'],check),timeout=45,log=backup/'durable-ingress-test.private.log')
             require(b'durable-ingress-offline-ok' in output,'DURABLE_INGRESS_OFFLINE_FAILED');progress['durableIngressVerified']=True;save(progress)
+        if request.get('snapshotMemoryRepair') and not progress.get('snapshotMemoryVerified'):
+            stage='partitioned_upgrade.offline_snapshot_memory'
+            check="import{persistRegularCheckpoint,checkpoint,restore}from'/app/apps/worker/src/persistence.ts';import{TradeState}from'/app/apps/worker/src/state.ts';import{createPublisher}from'/app/packages/feed-store/src/index.ts';import{mkdtemp,rm}from'node:fs/promises';const dir=await mkdtemp('/tmp/checkpoint-proof-'),path=dir+'/feed.json',s=new TradeState();for(let id=1;id<=500;id++)s.apply('prematch',[{fixtureId:id,fixture:{status:1},markets:Array.from({length:8},(_,m)=>({id:m+1,status:1,bets:Array.from({length:8},(_,b)=>({id:String(b),price:'2.1',status:1}))}))}],Date.now());if(checkpoint(s,false).regular.length!==0)throw Error('full checkpoint captured');await persistRegularCheckpoint(path,s);const f=s.feed(Date.now(),true,true),g=s.feed(Date.now(),true,true);if(f.events[0]!==g.events[0])throw Error('projection cache missing');await createPublisher(path)(f,{...checkpoint(s,false),regularExternal:true},s.availabilityBlocks());const recovered=new TradeState(),result=await restore(recovered,path);if(result.rows!==500||[...recovered.rows.prematch.values()].some(r=>!r.restored))throw Error('incomplete checkpoint recovery');await rm(dir,{recursive:true,force:true});console.log('snapshot-memory-offline-ok');"
+            args=durable_ingress_proof_command(backup,progress['image'],check,'snapshot-memory-proof.mjs');args[-1:-1]=['--import','tsx'];args[args.index('512m')]='1g'
+            output=run(args,timeout=90,log=backup/'snapshot-memory-test.private.log')
+            require(b'snapshot-memory-offline-ok' in output,'SNAPSHOT_MEMORY_OFFLINE_FAILED');progress['snapshotMemoryVerified']=True;save(progress)
         if phase=='prepare':
             if request.get('spoolMemoryFix') and not progress.get('spoolMemoryVerified'):
                 stage='partitioned_upgrade.offline_spool_memory'
@@ -156,12 +219,13 @@ def upgrade_partitioned(request):
                 check="import{writeFile,mkdtemp,rm}from'node:fs/promises';import{walkSnapshot,convertSnapshotRow}from'/app/apps/worker/src/full-snapshot.ts';const d=await mkdtemp('/tmp/parser-'),p=d+'/body';let ticks=0,rows=0;const timer=setInterval(()=>ticks++,1);try{const bets=Array.from({length:300},(_,i)=>({Id:String(i+1),Price:'2.00',Status:1}));await writeFile(p,JSON.stringify({Body:Array.from({length:200},(_,i)=>({FixtureId:i+1,Fixture:{Status:1},Markets:[{Id:1,Bets:bets}]})),Header:{}}));await walkSnapshot(p,async raw=>{convertSnapshotRow(raw);rows++});if(rows!==200||ticks<2)throw Error('parser did not yield');console.log('snapshot-throughput-offline-ok')}finally{clearInterval(timer);await rm(d,{recursive:true,force:true})}"
                 output=run(['docker','run','--rm','--network','none','--memory','512m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--max-old-space-size=384','--import','tsx','--input-type=module','-e',check],timeout=60,log=backup/'snapshot-throughput-test.private.log')
                 require(b'snapshot-throughput-offline-ok' in output,'SNAPSHOT_THROUGHPUT_OFFLINE_FAILED');progress['snapshotThroughputVerified']=True;save(progress)
-            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlineType38Verified=True,offlinePartitionsVerified=True,offlineDurableIngressVerified=progress.get('durableIngressVerified',False),offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),offlineNullableMarketsVerified=progress.get('nullableMarketsVerified',False),offlineThroughputVerified=progress.get('throughputVerified',False),offlineSpoolMemoryVerified=progress.get('spoolMemoryVerified',False),offlineSnapshotThroughputVerified=progress.get('snapshotThroughputVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
+            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlineType38Verified=True,offlinePartitionsVerified=True,offlineRestoreVerified=progress.get('oomRestoreVerified',False),offlineSnapshotMemoryVerified=progress.get('snapshotMemoryVerified',False),offlineDurableIngressVerified=progress.get('durableIngressVerified',False),offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),offlineNullableMarketsVerified=progress.get('nullableMarketsVerified',False),offlineThroughputVerified=progress.get('throughputVerified',False),offlineSpoolMemoryVerified=progress.get('spoolMemoryVerified',False),offlineSnapshotThroughputVerified=progress.get('snapshotThroughputVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
         stage='partitioned_upgrade.fresh_mac_gate'
         handoff=request['handoff'];audit=handoff['audit'];require(audit['status']=='ok' and audit['workerLockAbsent'] and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(request['freshAuditAt'].endswith('Z') and -5<=time.time()-datetime.datetime.fromisoformat(request['freshAuditAt'].replace('Z','+00:00')).timestamp()<60,'MAC_REAUDIT_EXPIRED')
         digest_handoff=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();migration_receipt=SECURE/('cutover-'+digest_handoff+'.json');migration=json.loads(migration_receipt.read_bytes());require(migration.get('startRequestedAtUTC'),'MIGRATION_NOT_COMPLETE')
         saved_model=json.loads((backup/'model.before.private.json').read_bytes());expected=copy.deepcopy(saved_model);expected['services']['worker']['image']=progress['image'];expected['services']['worker']['environment']['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT']='true'
+        if request.get('snapshotMemoryRepair'):expected['services']['worker']['environment']['NODE_OPTIONS']='--max-old-space-size=2560'
         rollback_expected=copy.deepcopy(expected);rollback_expected['services']['worker']['image']=progress['baseImage']
         current=model(partition_base(meta));require(current==saved_model or current==expected or phase=='rollback' and current==rollback_expected,'DEPLOYMENT_CHANGED_SINCE_UPGRADE_PREPARE')
         image_id=json.loads(run(['docker','image','inspect',progress['image']]))[0]['Id']
@@ -208,12 +272,16 @@ def upgrade_partitioned(request):
             workers=states('worker');require(len(workers)==1 and workers[0]['running'],'UPGRADED_WORKER_NOT_RUNNING_NO_BLIND_RESTART');current_container=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
             require(current_container['Image']==image_id and snapshot_memory_bytes(current_container['HostConfig']['Memory'])==4294967296,'UPGRADED_CONTAINER_MISMATCH')
             env=dict(x.split('=',1) for x in current_container['Config']['Env'] if '=' in x);require(env.get('LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT')=='true','PARTITION_FLAG_NOT_APPLIED')
-            progress['phase']='running';save(progress);emit(operation='cutover.aws',stage='partitioned_upgrade.running',status='ok',reused=True,workerStarted=True,startedAtUTC=progress.get('startAt'),posnetChanged=False);return 0
+            if request.get('snapshotMemoryRepair'):require(env.get('NODE_OPTIONS')=='--max-old-space-size=2560','WORKER_HEAP_RESERVE_NOT_APPLIED')
+            progress['phase']='running';save(progress);emit(operation='cutover.aws',stage='partitioned_upgrade.running',status='ok',offlineRestoreVerified=progress.get('oomRestoreVerified',False),reused=True,workerStarted=True,startedAtUTC=progress.get('startAt'),posnetChanged=False);return 0
         worker_states=states('worker')
         if progress['phase']=='prepared':
             emit(operation='cutover.aws',stage='partitioned_upgrade.old_worker.inspect',status='collected',workerStates=worker_states,backup=str(backup),posnetChanged=False)
-            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');require(worker_states[0]['running'] or worker_states[0].get('exitCode')==0 and not worker_states[0].get('oomKilled'),'OLD_WORKER_EXIT_REQUIRES_REVIEW');require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
-            old_container=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0];require(old_container['Image']==progress['baseImageId'] and snapshot_memory_bytes(old_container['HostConfig']['Memory'])==4294967296,'OLD_WORKER_IDENTITY_CHANGED_BEFORE_STOP')
+            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');require(worker_states[0]['running'] or worker_states[0].get('exitCode')==0 and not worker_states[0].get('oomKilled') or request.get('snapshotMemoryRepair') and worker_states[0].get('exitCode')==137 and worker_states[0].get('oomKilled') is True,'OLD_WORKER_EXIT_REQUIRES_REVIEW');require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
+            old_container=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0];
+            if request.get('snapshotMemoryRepair') and not worker_states[0]['running']:
+                require(old_container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'OOM_RESTART_POLICY_UNSAFE');progress['oomContainerId']=worker_states[0]['id'];save(progress)
+            require(old_container['Image']==progress['baseImageId'] and snapshot_memory_bytes(old_container['HostConfig']['Memory'])==4294967296,'OLD_WORKER_IDENTITY_CHANGED_BEFORE_STOP')
             if request.get('fullRecovery') and not progress.get('supplierStoppedBeforeConsumer'):
                 stage='partitioned_upgrade.distribution_stop'
                 info=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0]
@@ -245,18 +313,45 @@ def upgrade_partitioned(request):
         api=states('api');require(len(api)==1 and api[0]['health']=='healthy','API_NOT_HEALTHY');api_info=json.loads(run(['docker','inspect',api[0]['id']]))[0]
         mounts=[m for m in api_info['Mounts'] if m['Destination']=='/app/.runtime/feed'];require(len(mounts)==1 and mounts[0]['Type']=='volume' and not mounts[0]['RW'],'FEED_VOLUME_UNVERIFIED')
         vol=json.loads(run(['docker','volume','inspect',mounts[0]['Name']]))[0];require((vol.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','VOLUME_PROJECT_UNVERIFIED');directory=Path(vol['Mountpoint'])
-        require(not (directory/'trade-feed.json.lock').exists() and not list(directory.glob('trade-feed.json*.reclaim')) and not list(directory.glob('trade-feed.json.snapshot-*.lock')),'UPGRADE_LOCK_PRESENT_PRESERVED')
+        if not request.get('snapshotMemoryRepair'):require(not (directory/'trade-feed.json.lock').exists() and not list(directory.glob('trade-feed.json*.reclaim')) and not list(directory.glob('trade-feed.json.snapshot-*.lock')),'UPGRADE_LOCK_PRESENT_PRESERVED')
         if progress['phase']=='stopped':
-            for source in [directory/'trade-feed.json',directory/'trade-feed.json.regular-checkpoint.json',*directory.glob('trade-feed.json.snapshot-*.json'),*directory.glob('trade-feed.json.*.inbox.sqlite*')]:
+            for source in [directory/'trade-feed.json',directory/'trade-feed.json.regular-checkpoint.json',*directory.glob('trade-feed.json.snapshot-*.json'),*directory.glob('trade-feed.json.*.inbox.sqlite*'),*directory.glob('trade-feed.json*.tmp')]:
                 if not source.exists():continue
                 require(source.is_file() and not source.is_symlink(),'PERSISTENCE_SOURCE_UNVERIFIED');target=backup/source.name
                 if not target.exists():
                     shutil.copyfile(source,target);os.chmod(target,0o600)
                     with target.open('rb') as copied:os.fsync(copied.fileno())
-                require(snapshot_file_hash(source)==snapshot_file_hash(target),'UPGRADE_BACKUP_HASH_MISMATCH')
+                # Preserve and verify the first backup even if SQLite later updates only SHM.
+                recorded=progress.get('dataBackupHashes',{}).get(source.name)
+                require((snapshot_file_hash(target)==recorded and (snapshot_file_hash(source)==recorded or request.get('snapshotMemoryRepair') and source.name.endswith('.inbox.sqlite-shm'))) if recorded else snapshot_file_hash(source)==snapshot_file_hash(target),'UPGRADE_BACKUP_HASH_MISMATCH')
+                progress.setdefault('dataBackupHashes',{})[source.name]=snapshot_file_hash(target)
+            save(progress)
+            if request.get('snapshotMemoryRepair'):
+                stage='partitioned_upgrade.oom_integrity'
+                require(not any(w['running'] for w in states('worker')),'OOM_RECOVERY_REQUIRES_NO_CONSUMER')
+                if progress.get('oomContainerId'):archive_oom_locks(directory,backup,progress,states('worker'))
+                require(not (directory/'trade-feed.json.lock').exists() and not list(directory.glob('trade-feed.json*.reclaim')) and not list(directory.glob('trade-feed.json.snapshot-*.lock')),'OOM_LOCKS_NOT_ARCHIVED')
+                progress['inboxIntegrity']=verify_oom_inboxes(directory)
+                if not progress.get('oomRestoreVerified'):
+                    candidates=[p for p in directory.glob('.full-snapshot-*/response.private.json') if p.is_file() and not p.is_symlink() and not p.parent.is_symlink() and re.fullmatch(r'\.full-snapshot-[A-Za-z0-9_-]{1,80}',p.parent.name) and 0<p.stat().st_size<=2*1024**3]
+                    spool=max(candidates,key=lambda p:p.stat().st_mtime) if candidates else None
+                    spool_hash=snapshot_file_hash(spool) if spool else None
+                    if progress.get('preservedSpoolHash'):require(progress['preservedSpoolHash']==spool_hash,'PRESERVED_SPOOL_CHANGED_NO_START')
+                    progress['preservedSpoolHash']=spool_hash;save(progress)
+                    spool_path='/recovery/'+str(spool.relative_to(directory)) if spool else None
+                    code="import{restore}from'/app/apps/worker/src/persistence.ts';import{TradeState}from'/app/apps/worker/src/state.ts';import{walkSnapshot,convertSnapshotRow,fullSnapshotMemory}from'/app/apps/worker/src/full-snapshot.ts';import{writeJsonObject}from'/app/packages/feed-store/src/index.ts';import{open}from'node:fs/promises';const s=new TradeState();const r=await restore(s,'/recovery/trade-feed.json');let sourceSnapshotRehearsed=false,rows=0;const spool="+json.dumps(spool_path)+";if(spool){const ids=new Set();await walkSnapshot(spool,async raw=>{fullSnapshotMemory();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId))throw Error('duplicate fixture');ids.add(row.fixtureId);rows++;if(rows>50000)throw Error('fixture count limit')});s.beginPartitionedSnapshot('prematch');await walkSnapshot(spool,async raw=>{fullSnapshotMemory();s.apply('prematch',[{...convertSnapshotRow(raw),marketRecovery:true}],Date.now(),{source:'snapshot',receivedAt:Date.now()})});s.finishPartitionedSnapshot('prematch',ids);fullSnapshotMemory();const feed=s.feed(Date.now(),true,true),out=await open('/dev/null','w');try{await writeJsonObject(out,feed,s.availabilityBlocks())}finally{await out.close()}sourceSnapshotRehearsed=true;}console.log(JSON.stringify({operation:'offline.restore',rows:r.rows,sourceSnapshotRehearsed,snapshotRows:rows,rssBytes:process.memoryUsage().rss}));console.log('oom-checkpoint-restore-ok');"
+                    stage='partitioned_upgrade.oom_restore'
+                    emit(operation='cutover.aws',stage='partitioned_upgrade.oom_restore',status='running',readOnly=True,workerStarted=False,posnetChanged=False)
+                    output=run(['docker','run','--rm','--network','none','--memory','4g','--cpus','2','--read-only','--mount','type=bind,source='+str(directory)+',target=/recovery,readonly','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--max-old-space-size=2560','--import','tsx','--input-type=module','-e',code],timeout=780,log=backup/'oom-restore.private.log')
+                    require(b'oom-checkpoint-restore-ok' in output,'OOM_CHECKPOINT_RESTORE_FAILED_ORIGINALS_PRESERVED')
+                    if spool:require(snapshot_file_hash(spool)==spool_hash,'PRESERVED_SPOOL_CHANGED_DURING_REHEARSAL')
+                    progress['oomRestoreVerified']=True;progress['preservedSpoolRehearsed']=spool is not None;save(progress)
             if not (backup/'migration.before.json').exists():private(backup/'migration.before.json',migration_receipt.read_bytes())
             require(snapshot_host_memory()>=6*1024**3,'HOST_HEADROOM_CHANGED_DURING_UPGRADE')
-            overlay=SECURE/('compose.partitioned-'+digest[:24]+'.json');content=json.dumps({'services':{'worker':{'image':progress['image'],'environment':{'LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT':'true'}}}}).encode()
+            if request.get('verifyOnly'):
+                require(request.get('snapshotMemoryRepair') and progress.get('oomRestoreVerified'),'INVALID_VERIFY_ONLY_PHASE')
+                emit(operation='cutover.aws',stage='partitioned_upgrade.persistence_verified',status='ok',offlineRestoreVerified=True,preservedSpoolRehearsed=progress.get('preservedSpoolRehearsed',False),inboxes=progress.get('inboxIntegrity'),workerStarted=False,backup=str(backup),posnetChanged=False);return 0
+            overlay=SECURE/('compose.partitioned-'+digest[:24]+'.json');content=json.dumps({'services':{'worker':{'image':progress['image'],'environment':{'LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT':'true',**({'NODE_OPTIONS':'--max-old-space-size=2560'} if request.get('snapshotMemoryRepair') else {})}}}}).encode()
             if overlay.exists():require(overlay.read_bytes()==content,'UPGRADE_OVERLAY_CHANGED')
             else:private(overlay,content)
             candidate=partition_base(meta) if str(overlay) in meta.get('composeOverrides',[]) else partition_base(meta)+['-f',str(overlay)]
@@ -271,12 +366,14 @@ def upgrade_partitioned(request):
             temporary=SECURE/(receipt_path.name+'.migration.tmp');private(temporary,json.dumps(migration).encode());durable_replace(temporary,migration_receipt)
             progress['phase']='start_requested';save(progress)
             run(partition_base(json.loads((SECURE/'deployment.json').read_bytes()))+['--profile','feed-consumer','up','-d','--force-recreate','--no-deps','--no-build','--pull','never','worker'],timeout=90,log=backup/'start.private.log')
-        emit(operation='cutover.aws',stage='partitioned_upgrade.started',status='ok',workerStarted=True,startedAtUTC=progress.get('startAt'),image=progress['image'],migrationRepeated=False,composeOverridesPreserved=True,journalsRewrittenByUpgrade=False,journalsImported=False,posnetChanged=False,backup=str(backup));return 0
+        emit(operation='cutover.aws',stage='partitioned_upgrade.started',status='ok',offlineRestoreVerified=progress.get('oomRestoreVerified',False),workerStarted=True,startedAtUTC=progress.get('startAt'),image=progress['image'],migrationRepeated=False,composeOverridesPreserved=True,journalsRewrittenByUpgrade=False,journalsImported=False,posnetChanged=False,backup=str(backup));return 0
     except Exception as error:
         reason=str(error) if re.fullmatch('[A-Z][A-Z_]+',str(error)) else 'PRIVATE_PARTITIONED_UPGRADE_FAILED'
         if stage=='partitioned_upgrade.distribution_stop' and isinstance(error,subprocess.CalledProcessError):reason='DISTRIBUTION_STOP_HELPER_EXIT_NONZERO'
         if stage=='partitioned_upgrade.distribution_stop' and isinstance(error,subprocess.TimeoutExpired):reason='DISTRIBUTION_STOP_HELPER_TIMEOUT'
+        if stage=='partitioned_upgrade.oom_restore' and isinstance(error,(subprocess.CalledProcessError,subprocess.TimeoutExpired)):reason='PRESERVED_DATA_OFFLINE_REHEARSAL_FAILED_NO_START'
         detail=safe_helper_error(error)
+        if stage=='partitioned_upgrade.oom_restore' and backup:detail['offlineRehearsal']=oom_restore_log_summary(backup)
         if stage=='partitioned_upgrade.offline_durable_ingress' and backup:
             detail['offlineDurableIngress']=durable_ingress_log_summary(backup)
         if stage=='partitioned_upgrade.distribution_stop' and backup:

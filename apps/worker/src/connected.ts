@@ -77,17 +77,18 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0,loopWindowStart=Date.now();
     const save = coalescedPersistence(()=>operation("file.persist", "local", async () => {
-        const started=performance.now();const feed = state.feed();
+        const started=performance.now();const feed = state.feed(Date.now(),true,true),capturedBlocks=state.availabilityBlocks();
         tenantTickets?.reconcile(feed);
         ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
-        const {regular,...saved}=checkpoint(state);
+        const {regular,...saved}=checkpoint(state,false);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
-        await persistRegularCheckpoint(path,regular);
+        await persistRegularCheckpoint(path,state);
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
-        await publish(feed,{...saved,regularExternal:true});
+        const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
+        await publish(feed,{...saved,regularExternal:true},capturedBlocks);
         const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
-        if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:regular.length}));loopDelay.reset();loopWindowStart=Date.now();}
+        if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
     }));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
@@ -97,7 +98,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         console.info(
           JSON.stringify({
             operation: "feed.coverage",
-            coverage: state.feed().coverage,
+            coverage: state.feed(Date.now(),true,true).coverage,
           }),
         );
       }
@@ -272,7 +273,7 @@ export async function session(
     fail(transportEnd("worker_stopped"));
   })();void plannedStop.catch(error=>console.error(JSON.stringify({lane,status:'failed',...describeFailure(error,'distribution.stop','http')})));};
   signal.addEventListener("abort", abort, { once: true });
-  let processing = Promise.resolve();
+  let processing = Promise.resolve();let backgroundCommit:Promise<void>|undefined;let checkpointPending=0;
   let buffered: ConsumeMessage[] = [];
   let bufferingForSnapshot = false;
   let drainTimer:ReturnType<typeof setTimeout>|undefined;
@@ -310,6 +311,7 @@ export async function session(
           decoded.events.length,
           seen.has(decoded.guid),
           decoded.keepAliveActiveEvents,
+          Date.now(),Number((msg.fields as unknown as {inboxReceived?:number})?.inboxReceived)||Date.now(),
         );
         if (decoded.interrupted) {
           const diagnostic = {
@@ -350,7 +352,7 @@ export async function session(
         if(commit)await save();
         seen.add(decoded.guid);
         if (seen.size > 10000) seen.delete(seen.values().next().value!);
-        if(commit)await operation("amqp.ack", "amqp", async () => ackDelivery(msg));else {pendingAcks.push(msg);pendingMetadata.set(msg,decoded.metadata);}
+        if(commit)await operation("amqp.ack", "amqp", async () => ackDelivery(msg));else {const retained=durable?{fields:{inboxId:(msg.fields as unknown as {inboxId:number}).inboxId}} as unknown as ConsumeMessage:msg;pendingAcks.push(retained);pendingMetadata.set(retained,decoded.metadata);}
         const shape = JSON.stringify([
           decoded.type,
           decoded.metadata.compression,
@@ -385,13 +387,23 @@ export async function session(
         fail(new OperationError({ ...diagnostic, deliveryDisposition }));
       }
     };
+    const stageDelivery=(channel as typeof channel & {stage?:(msg:ConsumeMessage)=>void}).stage;
+    const commitPending=()=>{
+      if(backgroundCommit||closed||!pendingAcks.length)return;
+      const prefix=pendingAcks.splice(0);checkpointPending=prefix.length;const metadata=pendingMetadata.get(prefix[0]);
+      backgroundCommit=save().then(()=>{if(!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
+    };
     let drainScheduled=false;
     const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;
       const enqueue=()=>{if(closed){drainScheduled=false;return;}
       processing=processing.then(async()=>{
-        drainScheduled=false;const messages=buffered.splice(0,durable?500:100);
-        for(const msg of messages){await processMessage(msg,false);if(closed)break;}
-        if(!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}
+        drainScheduled=false;
+        while(!closed&&durable&&stageDelivery&&pendingAcks.length+checkpointPending>=8192)await backgroundCommit;
+        if(closed)return;
+        const messages=buffered.splice(0,durable&&stageDelivery?Math.min(4096,Math.max(1,8192-pendingAcks.length-checkpointPending)):durable?4096:100);
+        for(const msg of messages){await processMessage(msg,false);if(closed)break;if(durable&&stageDelivery)stageDelivery.call(channel,msg);}
+        if(!closed&&durable&&stageDelivery)commitPending();
+        else if(!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}
         if(buffered.length&&!closed)scheduleDrain();
       }).catch(error=>{const metadata=pendingMetadata.values().next().value;for(const msg of pendingAcks){try{channel.nack(msg,false,true);}catch{}}pendingAcks.length=0;pendingMetadata.clear();fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:durable?'retained_in_durable_inbox':'requeue_requested'}));});
       };
@@ -581,7 +593,7 @@ export async function session(
           status: fullCompleted?"full_snapshot_recovered":partitionCompleted?"partitioned_snapshot_recovered":rows === undefined ? "snapshot_deferred" : "snapshot_recovered",
           ...(partitionCompleted?{events:state.connections[lane].snapshotEvents,partitioned:!fullCompleted,fullSnapshot:fullCompleted}:rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
           snapshotAudit: api.snapshotAudit?.(),
-          coverage: state.feed().coverage?.[lane],
+          coverage: state.feed(Date.now(),true,true).coverage?.[lane],
         }),
       );
     };
@@ -643,6 +655,7 @@ export async function session(
       // Drain writes for deliveries already being processed before final persist.
       if(signal.aborted){abort();await plannedStop;}
       await processing;
+      await backgroundCommit;
       await save();
     } finally {
       await closeConnection();

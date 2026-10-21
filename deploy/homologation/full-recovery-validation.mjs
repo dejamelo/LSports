@@ -7,7 +7,7 @@ export function fullRecoveryResult(status,{requireSupplierOrder=false}={}){const
  const consumed=!!consumer&&consumer.acknowledgedMessages>0&&Date.parse(consumer.lastAckAt)>=Date.parse(pm?.session?.startedAt);
  const registered=l=>['connected','recovering'].includes(l?.phase)&&l?.consumerProgress?.active===true&&Date.parse(l.consumerProgress.registeredAt)>=Date.parse(l?.session?.startedAt);
  const distribution=l=>(l?.distributionObservations||[]).some(o=>o.stage==='after_propagation'&&o.bodyIsDistributionOn===true&&o.sdkIsDistributionOn===true&&Date.parse(o.observedAtUTC)>=Date.parse(l?.session?.startedAt));
- const market=l=>Date.parse(l?.updates?.lastMarketDecodedAt)>=Date.parse(l?.session?.startedAt);
+ const market=l=>Date.parse((l?.updates?.lastMarketReceivedAt??l?.updates?.lastMarketDecodedAt))>=Date.parse(l?.session?.startedAt);
  const registrationVerified=registered(pm)&&registered(ip),distributionVerified=distribution(pm)&&distribution(ip),marketUpdatesVerified=market(pm)&&market(ip);
  return{consumerRegistrationObserved:registrationVerified,distributionActiveVerified:distributionVerified,marketUpdatesVerified,ackEvidenceMeaning:'delivery_persisted_and_acknowledged_only',snapshotsVerified:!!snapshots,continuousConsumptionObserved:registered(pm)&&consumed&&full?.ackedDuringRecovery>0,ackObserved:{prematch:consumed,inplay:inplayConsumed},consumerActiveObserved:registered(pm)&&consumed,inplayConsumerActiveObserved:registered(ip)&&inplayConsumed,projectionOddsAvailable:snapshots&&status.selectableSelections>0,selectableSelections:status.selectableSelections??0,projectionByLane:status.projectionByLane,
  newAMQP320:Object.entries(status.lanes||{}).flatMap(([lane,l])=>(l.sessionEnds||[]).filter(e=>Date.parse(e.endedAt)>=since&&e.diagnostic?.amqpCode===320).map(e=>({lane,endedAtUTC:e.endedAt,amqpCode:320}))),
@@ -21,11 +21,11 @@ export async function validateFullRecovery(remote,handoff,ledger,save,progress,{
   }
   if(!requireIngress&&stableForMs>0&&result.reason==='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED'){
    const sessions=JSON.stringify(Object.values(current.lanes||{}).map(l=>l.session?.id||l.session?.startedAt));
-   if(!stable||stable.sessions!==sessions)stable={since:now(),sessions,counts:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,l.consumerProgress?.acknowledgedMessages||0])),markets:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,Date.parse(l.updates?.lastMarketDecodedAt)||0]))};
+   if(!stable||stable.sessions!==sessions)stable={since:now(),sessions,counts:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,l.consumerProgress?.acknowledgedMessages||0])),markets:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,Date.parse((l.updates?.lastMarketReceivedAt??l.updates?.lastMarketDecodedAt))||0]))};
    result.stabilityElapsedMs=now()-stable.since;result.stabilityRequiredMs=stableForMs;
    if(result.stabilityElapsedMs<stableForMs)result.reason='RECOVERY_STABILITY_WINDOW_PENDING';
    else if(!Object.entries(current.lanes).every(([k,l])=>(l.consumerProgress?.acknowledgedMessages||0)>stable.counts[k]))result.reason='NO_ACK_ADVANCE_DURING_STABILITY_WINDOW';
-   else if(!Object.entries(current.lanes).every(([k,l])=>(Date.parse(l.updates?.lastMarketDecodedAt)||0)>stable.markets[k]))result.reason='NO_MARKET_UPDATE_DURING_STABILITY_WINDOW';
+   else if(!Object.entries(current.lanes).every(([k,l])=>(Date.parse((l.updates?.lastMarketReceivedAt??l.updates?.lastMarketDecodedAt))||0)>stable.markets[k]))result.reason='NO_MARKET_UPDATE_DURING_STABILITY_WINDOW';
    else result.stableConsumptionVerified=true;
   }else if(result.reason!=='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED')stable=undefined;
   if(!requireIngress&&allowTransientReconnect&&result.newAMQP320.length<2&&result.snapshotsVerified&&result.consumerRegistrationObserved&&current.selectableSelections===0){zeroSince??=now();if(now()-zeroSince>=120000)result.reason='SNAPSHOTS_READY_NO_CURRENT_SELECTABLE_MARKETS';}else zeroSince=undefined;
