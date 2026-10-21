@@ -62,6 +62,39 @@ def oom_restore_log_summary(backup):
         if token in text:signals.append(label)
     return {'present':True,'signals':sorted(set(signals)),'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
 
+def checkpoint_build_log_summary(backup):
+    path=backup/'checkpoint-fix-build.private.log'
+    if not path.exists():return {'present':False}
+    require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and not backup.is_symlink() and backup.stat().st_mode&0o077==0,'BUILD_LOG_NOT_PROTECTED')
+    raw=read_tail(path);records=[]
+    # Fixed phrases only: registry URLs, environment values and arbitrary paths
+    # in Docker stderr must never be copied into the report.
+    rules=[
+      (r'pull access denied for sha256','IMAGE_ID_INTERPRETED_AS_REPOSITORY','pull access denied for sha256 [image ID redacted]'),
+      (r'failed to resolve source metadata for (?:docker\.io/library/)?sha256:','IMAGE_ID_SOURCE_RESOLUTION_FAILED','failed to resolve source metadata for sha256:[image ID]'),
+      (r'(?:sha256[^\n]*pull access denied|repository does not exist)','BASE_REPOSITORY_UNAVAILABLE','base repository does not exist or requires authorization'),
+      (r'no space left on device','DISK_FULL','no space left on device'),
+      (r'read-only file system','READ_ONLY_FILESYSTEM','read-only file system'),
+      (r'permission denied','PERMISSION_DENIED','permission denied'),
+      (r'cannot connect to the docker daemon','DOCKER_DAEMON_UNAVAILABLE','cannot connect to the Docker daemon'),
+      (r'(?:failed to (?:compute cache key|calculate checksum)|not found)[^\n]*overlay|overlay[^\n]*(?:not found|no such file)','OVERLAY_NOT_FOUND','build overlay not found or checksum unavailable'),
+      (r'failed to read dockerfile|cannot locate specified dockerfile','DOCKERFILE_UNAVAILABLE','failed to read Dockerfile'),
+      (r'dockerfile parse error','DOCKERFILE_PARSE_ERROR','Dockerfile parse error'),
+      (r'network is unreachable|i/o timeout|tls handshake timeout','BUILD_NETWORK_FAILURE','network unavailable or timed out'),
+    ]
+    for number,line in enumerate(raw.decode(errors='replace').splitlines(),1):
+        for pattern,reason,message in rules:
+            if re.search(pattern,line,re.I):records.append({'tailLine':number,'reason':reason,'messageSanitized':message})
+    contexts=[]
+    for directory in sorted(backup.glob('checkpoint-fix-*')):
+        if not re.fullmatch('checkpoint-fix-(?:tagged-)?[0-9a-f]{24}',directory.name):continue
+        require(directory.is_dir() and not directory.is_symlink(),'BUILD_CONTEXT_UNVERIFIED')
+        dockerfile=directory/'Dockerfile';require(dockerfile.is_file() and not dockerfile.is_symlink() and dockerfile.stat().st_size<4096,'BUILD_DOCKERFILE_UNVERIFIED')
+        source=dockerfile.read_text();first=source.splitlines()[0] if source else ''
+        match=re.fullmatch(r'FROM (sha256:[0-9a-f]{64}|adl-partition-base:[0-9a-f]{64})',first)
+        contexts.append({'context':str(directory),'dockerfileSha256':hashlib.sha256(source.encode()).hexdigest(),'baseReference':match[1] if match else 'unrecognized_not_printed','command':['docker','build','--network','none','--pull=false','-t','adl-worker-partitioned:'+directory.name[-24:],str(directory)]})
+    return {'present':True,'stage':'partitioned_upgrade.checkpoint_parser_image','logBytes':path.stat().st_size,'tailTruncated':path.stat().st_size>128*1024,'records':records[-12:],'recognizedError':bool(records),'contexts':contexts[-4:],'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False,'readOnly':True}
+
 def preserved_rehearsal_report(expected_backup):
     backup=Path(expected_backup)
     require(backup.parent==BACKUPS and re.fullmatch(r'adl-partitioned-upgrade-[A-Za-z0-9_-]{1,80}',backup.name) and not backup.is_symlink() and backup.is_dir() and backup.stat().st_uid==os.geteuid() and backup.stat().st_mode&0o077==0,'REHEARSAL_BACKUP_UNVERIFIED')
@@ -83,7 +116,7 @@ def preserved_rehearsal_report(expected_backup):
     fixtures=sorted(set(int(x) for x in re.findall(r"fixtureId[\"']?\s*:\s*([1-9][0-9]{0,15})",raw)))[:8]
     frames=[{'source':m[0],'line':int(m[1]),'column':int(m[2])} for m in re.findall(r'/app/(apps/worker/src/[a-zA-Z0-9_.-]+\.(?:mjs|ts|js)):(\d{1,7}):(\d{1,7})',raw)][-16:]
     checkpoint=any(f['source'].endswith('/persistence.ts') for f in frames)
-    return {'backup':str(backup),'receiptPhase':entry.get('phase') if entry.get('phase') in ('prepared','stopped','configured','activated','rolled_back_stopped') else 'unknown','offlineRestoreVerified':entry.get('oomRestoreVerified') is True,'snapshotMemoryVerified':entry.get('snapshotMemoryVerified') is True,'preservedSpoolHash':entry.get('preservedSpoolHash') if re.fullmatch('[0-9a-f]{64}',str(entry.get('preservedSpoolHash',''))) else None,'failureOrigin':'checkpoint_restore' if checkpoint else 'not_proven','validationDetails':details,'fieldPaths':fields,'actualTypes':types,'fixtureIds':fixtures,'stackFrames':frames,'privateLog':summary,'distributionState':'not_queried_saved_stop_evidence_only','readOnly':True,'providerRequests':0,'workerRestarted':False}
+    return {'backup':str(backup),'receiptPhase':entry.get('phase') if entry.get('phase') in ('prepared','stopped','configured','activated','rolled_back_stopped') else 'unknown','offlineRestoreVerified':entry.get('oomRestoreVerified') is True,'snapshotMemoryVerified':entry.get('snapshotMemoryVerified') is True,'preservedSpoolHash':entry.get('preservedSpoolHash') if re.fullmatch('[0-9a-f]{64}',str(entry.get('preservedSpoolHash',''))) else None,'failureOrigin':'checkpoint_restore' if checkpoint else 'not_proven','validationDetails':details,'fieldPaths':fields,'actualTypes':types,'fixtureIds':fixtures,'stackFrames':frames,'privateLog':summary,'checkpointImageBuild':checkpoint_build_log_summary(backup),'distributionState':'not_queried_saved_stop_evidence_only','readOnly':True,'providerRequests':0,'workerRestarted':False}
 
 def archive_oom_locks(directory,backup,progress,workers):
     require(progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137,'OOM_LOCK_OWNER_NOT_CONFIRMED')
@@ -154,6 +187,7 @@ def upgrade_partitioned(request):
                 value=json.loads(rp.read_bytes())
                 if value.get('backup')==prior_backup and value.get('phase')=='stopped' and value.get('snapshotMemoryVerified') and not value.get('oomRestoreVerified'):previous.append(value)
             require(len(previous)==1,'CHECKPOINT_REPAIR_SOURCE_NOT_UNIQUE')
+            backup=source_backup
             old=previous[0];require(not any(w['running'] for w in states('worker')),'CHECKPOINT_REPAIR_REQUIRES_STOPPED_WORKER')
             old_files={}
             for name in files:
@@ -164,14 +198,24 @@ def upgrade_partitioned(request):
             require(changed and changed<= {'apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts'},'CHECKPOINT_REPAIR_DIFF_NOT_ALLOWED')
             image_info=json.loads(run(['docker','image','inspect',old['image']]))[0]
             require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'CHECKPOINT_REPAIR_IMAGE_UNVERIFIED')
-            context=source_backup/('checkpoint-fix-'+digest[:24]);context.mkdir(mode=0o700,exist_ok=True)
+            context=source_backup/('checkpoint-fix-tagged-'+digest[:24]);context.mkdir(mode=0o700,exist_ok=True)
             for name in changed:
-                target=context/'overlay'/name;target.parent.mkdir(parents=True,exist_ok=True,mode=0o755);private(target,files[name].encode());os.chmod(target,0o644)
+                target=context/'overlay'/name;target.parent.mkdir(parents=True,exist_ok=True,mode=0o755)
+                if target.exists():require(target.is_file() and not target.is_symlink() and target.read_bytes()==files[name].encode(),'CHECKPOINT_REPAIR_OVERLAY_CHANGED')
+                else:private(target,files[name].encode())
+                os.chmod(target,0o644)
             for folder in (context/'overlay').rglob('*'):
                 if folder.is_dir():os.chmod(folder,0o755)
             os.chmod(context/'overlay',0o755)
             image='adl-worker-partitioned:'+digest[:24]
-            private(context/'Dockerfile',('FROM '+image_info['Id']+'\nUSER root\nCOPY --chown=node:node overlay/ /app/\nLABEL eu.adl.partitioned.patch="'+digest+'"\nUSER node\n').encode())
+            require(re.fullmatch('sha256:[0-9a-f]{64}',image_info['Id']),'CHECKPOINT_REPAIR_BASE_ID_UNVERIFIED')
+            tag='adl-partition-base:'+image_info['Id'].split(':')[-1]
+            run(['docker','tag',image_info['Id'],tag])
+            require(json.loads(run(['docker','image','inspect',tag]))[0]['Id']==image_info['Id'],'CHECKPOINT_REPAIR_BASE_TAG_CHANGED')
+            dockerfile=('FROM '+tag+'\nUSER root\nCOPY --chown=node:node overlay/ /app/\nLABEL eu.adl.partitioned.patch="'+digest+'"\nUSER node\n').encode()
+            target=context/'Dockerfile'
+            if target.exists():require(target.is_file() and not target.is_symlink() and target.read_bytes()==dockerfile,'CHECKPOINT_REPAIR_DOCKERFILE_CHANGED')
+            else:private(target,dockerfile)
             stage='partitioned_upgrade.checkpoint_parser_image'
             run(['docker','build','--network','none','--pull=false','-t',image,str(context)],timeout=240,log=source_backup/'checkpoint-fix-build.private.log')
             progress={**old,'digest':digest,'image':image,'snapshotMemoryVerified':False,'oomRestoreVerified':False,'checkpointParserSourceDigest':old['digest']}
@@ -443,8 +487,10 @@ def upgrade_partitioned(request):
         reason=str(error) if re.fullmatch('[A-Z][A-Z_]+',str(error)) else 'PRIVATE_PARTITIONED_UPGRADE_FAILED'
         if stage=='partitioned_upgrade.distribution_stop' and isinstance(error,subprocess.CalledProcessError):reason='DISTRIBUTION_STOP_HELPER_EXIT_NONZERO'
         if stage=='partitioned_upgrade.distribution_stop' and isinstance(error,subprocess.TimeoutExpired):reason='DISTRIBUTION_STOP_HELPER_TIMEOUT'
+        if stage=='partitioned_upgrade.checkpoint_parser_image' and isinstance(error,(subprocess.CalledProcessError,subprocess.TimeoutExpired)):reason='CHECKPOINT_PARSER_IMAGE_BUILD_FAILED'
         if stage=='partitioned_upgrade.oom_restore' and isinstance(error,(subprocess.CalledProcessError,subprocess.TimeoutExpired)):reason='PRESERVED_DATA_OFFLINE_REHEARSAL_FAILED_NO_START'
         detail=safe_helper_error(error)
+        if stage=='partitioned_upgrade.checkpoint_parser_image' and backup:detail['checkpointImageBuild']=checkpoint_build_log_summary(backup)
         if stage=='partitioned_upgrade.oom_restore' and backup:detail['offlineRehearsal']=oom_restore_log_summary(backup)
         if stage=='partitioned_upgrade.offline_durable_ingress' and backup:
             detail['offlineDurableIngress']=durable_ingress_log_summary(backup)

@@ -117,6 +117,7 @@ class Upgrade(unittest.TestCase):
    def run(args,**kw):
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':'sha256:'+'c'*64,'Config':{'Labels':{'eu.adl.partitioned.patch':old_digest if args[3]=='prepared-image' else digest}}}]).encode()
+    if args[:2]==['docker','tag']:return b''
     if args[:2]==['docker','build']:return b''
     if args[:2]==['docker','run']:return b'snapshot-memory-offline-ok'
     raise AssertionError(args)

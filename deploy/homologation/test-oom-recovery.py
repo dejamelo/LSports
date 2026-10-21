@@ -22,6 +22,16 @@ class OomRecovery(unittest.TestCase):
     receipt.unlink()
     with self.assertRaisesRegex(Exception,'REHEARSAL_RECEIPT_NOT_UNIQUE'):NS['preserved_rehearsal_report'](str(backup))
    finally:NS.update(old)
+ def test_build_log_reports_source_resolution_without_secrets_or_mutation(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);backup.chmod(0o700);context=backup/('checkpoint-fix-'+'a'*24);context.mkdir();dockerfile=context/'Dockerfile';dockerfile.write_text('FROM sha256:'+'b'*64+'\nUSER node\n')
+   log=backup/'checkpoint-fix-build.private.log';log.write_text('SECRET_PASSWORD https://private.invalid/?token=SECRET\nERROR: failed to resolve source metadata for docker.io/library/sha256:abc: pull access denied, repository does not exist\n')
+   before={p:p.read_bytes() for p in (dockerfile,log)};report=NS['checkpoint_build_log_summary'](backup)
+   self.assertTrue(report['recognizedError']);self.assertIn('IMAGE_ID_SOURCE_RESOLUTION_FAILED',[r['reason'] for r in report['records']]);self.assertNotIn('SECRET',json.dumps(report));self.assertNotIn('private.invalid',json.dumps(report));self.assertEqual(report['contexts'][0]['command'][:5],['docker','build','--network','none','--pull=false']);self.assertEqual(before,{p:p.read_bytes() for p in before})
+ def test_unrecognized_build_error_does_not_leak_raw_line(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);backup.chmod(0o700);(backup/'checkpoint-fix-build.private.log').write_text('ERROR secret arbitrary failure')
+   report=NS['checkpoint_build_log_summary'](backup);self.assertFalse(report['recognizedError']);self.assertNotIn('secret',json.dumps(report))
  def test_durable_inboxes_checked_without_deleting_confirmed_rows(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp)

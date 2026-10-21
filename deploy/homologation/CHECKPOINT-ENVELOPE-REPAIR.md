@@ -46,3 +46,20 @@ Local synthetic regressions and constrained load results are recorded in
 `CHECKPOINT-ENVELOPE-RESULTS.json`. They are not AWS validation. The real backup
 is remote and unavailable to this workspace. Its copied-data rehearsal will run
 on AWS as the mandatory pre-activation gate; no claim that it has passed locally.
+
+## Build failure follow-up
+
+The checkpoint derivation used a bare `FROM sha256:<local-image-id>`. A local
+BuildKit reproduction resolved that as `docker.io/library/sha256:<id>` and failed
+with source metadata/pull authorization errors. Derivation now tags the verified
+local image as `adl-partition-base:<id>` and verifies the tag's image ID before
+using it in FROM. The tagged Docker build with the two parser files succeeded
+locally. This proves the local build defect, not the cause of the remote attempt.
+
+The existing read-only `--worker-exit-report` includes
+`offlineRehearsal.checkpointImageBuild`: protected build-log hash, recognized
+Docker error phrases, context Dockerfile hash/base reference and reconstructed
+build argv. Arbitrary log text, registry addresses and credentials are excluded.
+The failed context remains intact; the fixed context uses `checkpoint-fix-tagged-*`
+and checks existing file contents on retry. No worker or distribution operation
+is performed by this report. Read the actual remote log before resuming.
