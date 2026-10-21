@@ -35,7 +35,7 @@ def canonical_barrier(value):
     if dt.microsecond%1000:dt+=datetime.timedelta(microseconds=1000-dt.microsecond%1000)
     return dt.isoformat(timespec='milliseconds').replace('+00:00','Z')
 
-def worker_exit_report(rehearsal_backup=None):
+def worker_exit_report(rehearsal_backup=None,rehearsal_log=None):
     consumers=states('worker');reports=[]
     for c in consumers:
         require(re.fullmatch('[0-9a-f]{12,64}',c['id']) is not None,'WORKER_CONTAINER_ID_UNVERIFIED')
@@ -70,7 +70,7 @@ def worker_exit_report(rehearsal_backup=None):
                 kind='inbox_wal' if name.endswith('.inbox.sqlite-wal') else 'inbox_shm' if name.endswith('.inbox.sqlite-shm') else 'inbox' if name.endswith('.inbox.sqlite') else 'checkpoint' if name in ('trade-feed.json','trade-feed.json.regular-checkpoint.json') else 'other_feed_file'
                 stat=path.stat();row['persistedFiles'].append({'kind':kind,'lane':'prematch' if '.prematch.' in name else 'inplay' if '.inplay.' in name else None,'bytes':stat.st_size,'modifiedAtUTC':datetime.datetime.fromtimestamp(stat.st_mtime,datetime.timezone.utc).isoformat()})
         reports.append(row)
-    emit(operation='cutover.aws',stage='worker_exit_report',status='collected',readOnly=True,providerRequests=0,workerRestarted=False,posnetChanged=False,workers=reports,offlineRehearsal=preserved_rehearsal_report(rehearsal_backup) if rehearsal_backup else None,evidenceLimit='No restart or database open. File metadata does not verify inbox integrity; logs may be rotated. Exit 137 alone is not proof of OOM. Preventive memory rejection alone does not explain process exit.');return 0
+    emit(operation='cutover.aws',stage='worker_exit_report',status='collected',readOnly=True,providerRequests=0,workerRestarted=False,posnetChanged=False,workers=reports,offlineRehearsal=preserved_rehearsal_report(rehearsal_backup,rehearsal_log) if rehearsal_backup else None,evidenceLimit='No restart or database open. File metadata does not verify inbox integrity; logs may be rotated. Exit 137 alone is not proof of OOM. Preventive memory rejection alone does not explain process exit.');return 0
 
 def inspect_worker_failure(consumers):
     report={'records':[],'signals':[],'rawLogPrinted':False};raw=b''
@@ -163,7 +163,7 @@ def cutover_main():
         require(action in ('import','start','status','startup_report','worker_exit_report','recover_start','recovery_evidence'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(audit['operation']=='cutover.audit' and audit['readOnly'] is True,'INVALID_AUDIT')
-        if action=='worker_exit_report':return worker_exit_report(request.get('rehearsalBackup'))
+        if action=='worker_exit_report':return worker_exit_report(request.get('rehearsalBackup'),request.get('rehearsalLog'))
         deadline=datetime.datetime.fromisoformat(audit['notBeforeUTC'].replace('Z','+00:00')).timestamp()
         require(audit['notBeforeUTC'].endswith('Z') and math.isfinite(deadline),'INVALID_DEADLINE')
         digest=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest()

@@ -52,10 +52,13 @@ def durable_ingress_log_summary(backup):
     signals=[label for token,label in [(b'ERR_INPUT_TYPE_NOT_ALLOWED','worker_inherited_input_type'),(b'INBOX_CAPACITY_EXCEEDED','inbox_disk_reserve_unavailable'),(b'not durable ahead of processing','durable_ack_proof_failed'),(b'missing replay','durable_replay_proof_failed')] if token in raw]
     return {'present':True,'signals':signals,'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
 
-def oom_restore_log_summary(backup):
+def oom_restore_log_summary(backup,expected_log=None):
     path=backup/'oom-restore.private.log';current=False
     pointer=backup/'oom-restore.latest.json'
-    if pointer.exists():
+    if expected_log is not None:
+        require(isinstance(expected_log,str) and re.fullmatch(r'oom-restore-attempt-[0-9a-f]{16,32}\.private\.log',expected_log),'OFFLINE_LOG_NAME_UNVERIFIED')
+        path=backup/expected_log;current=True
+    if (expected_log is None or not path.exists()) and pointer.exists():
         require(pointer.is_file() and not pointer.is_symlink() and pointer.stat().st_uid==os.geteuid() and pointer.stat().st_size<4096,'OFFLINE_LOG_POINTER_UNVERIFIED')
         name=json.loads(pointer.read_bytes()).get('name')
         require(isinstance(name,str) and re.fullmatch(r'oom-restore-attempt-[0-9a-f]{16}\.private\.log',name),'OFFLINE_LOG_NAME_UNVERIFIED')
@@ -72,7 +75,7 @@ def oom_restore_log_summary(backup):
         path_value=m[2]
         if path_value=='/dev/null' or re.fullmatch(r'/recovery(?:/(?:trade-feed\.json[A-Za-z0-9_.-]*|\.full-snapshot-[A-Za-z0-9_-]{1,80}|response\.private\.json))*',path_value):
             permission_failures.append({'operation':m[1],'path':path_value,'code':'EACCES' if m[0].startswith('EACCES') else 'EPERM'})
-    return {'present':True,'signals':sorted(set(signals)),'permissionFailures':permission_failures[-8:],'logMayContainEarlierAttempts':not current,'attemptLog':path.name,'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
+    return {'present':True,'signals':sorted(set(signals)),'permissionFailures':permission_failures[-8:],'logMayContainEarlierAttempts':not current,'attemptLog':path.name,'requestedLog':expected_log,'requestedLogFound':(backup/expected_log).is_file() if expected_log else None,'logBytes':path.stat().st_size,'tailTruncated':path.stat().st_size>128*1024,'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
 
 REHEARSAL_ACCESS_PROBE="const fs=require('node:fs');const result={uid:process.getuid(),gid:process.getgid(),groups:process.getgroups(),chain:[]};const safeCode=e=>['EACCES','EPERM','ENOENT','ELOOP','ENOTDIR'].includes(e.code)?e.code:'other';for(const key of ['uid','gid']){try{result[key+'Map']=fs.readFileSync('/proc/self/'+key+'_map','utf8').trim().split('\\n').map(line=>line.trim().split(/\\s+/).map(Number));}catch{}}for(const path of ['/','/recovery','/recovery/trade-feed.json']){try{const st=fs.lstatSync(path);const entry={path,uid:st.uid,gid:st.gid,mode:(st.mode&511).toString(8).padStart(4,'0'),symlink:st.isSymbolicLink(),kind:st.isDirectory()?'directory':st.isFile()?'file':'other'};if(st.isSymbolicLink()){const link=fs.readlinkSync(path);entry.target=link.startsWith('/recovery/')&&!link.includes('..')?link:'outside_rehearsal_not_followed';result.linkDetected=true;}result.chain.push(entry);}catch(e){result.chain.push({path,code:safeCode(e)});}}let fd;try{if(result.linkDetected)throw Object.assign(Error(),{code:'ELOOP'});fd=fs.openSync('/recovery/trade-feed.json',fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);result.readBytes=fs.readSync(fd,Buffer.alloc(1),0,1,0);result.opened=result.readBytes===1;}catch(e){result.opened=false;result.code=safeCode(e);result.operation='open';result.path='/recovery/trade-feed.json';}finally{if(fd!==undefined)fs.closeSync(fd);}console.log(JSON.stringify(result));"
 
@@ -139,7 +142,7 @@ def checkpoint_build_log_summary(backup):
         contexts.append({'context':str(directory),'dockerfileSha256':hashlib.sha256(source.encode()).hexdigest(),'baseReference':match[1] if match else 'unrecognized_not_printed','command':['docker','build',*(['--builder','default'] if 'tagged-' in directory.name else []),'--network','none','--pull=false','-t','adl-worker-partitioned:'+directory.name[-24:],str(directory)]})
     return {'present':True,'stage':'partitioned_upgrade.checkpoint_parser_image','logBytes':path.stat().st_size,'tailTruncated':path.stat().st_size>128*1024,'records':records[-12:],'recognizedError':bool(records),'contexts':contexts[-4:],'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False,'readOnly':True}
 
-def preserved_rehearsal_report(expected_backup):
+def preserved_rehearsal_report(expected_backup,expected_log=None):
     backup=Path(expected_backup)
     require(backup.parent==BACKUPS and re.fullmatch(r'adl-partitioned-upgrade-[A-Za-z0-9_-]{1,80}',backup.name) and not backup.is_symlink() and backup.is_dir() and backup.stat().st_uid==os.geteuid() and backup.stat().st_mode&0o077==0,'REHEARSAL_BACKUP_UNVERIFIED')
     receipts=[]
@@ -150,17 +153,22 @@ def preserved_rehearsal_report(expected_backup):
     superseded={r['checkpointParserSourceDigest'] for r in receipts if r.get('checkpointParserSourceDigest')}
     receipts=[r for r in receipts if r.get('digest') not in superseded]
     require(len(receipts)==1,'REHEARSAL_RECEIPT_NOT_UNIQUE')
-    entry=receipts[0];summary=oom_restore_log_summary(backup)
-    raw=read_tail(backup/'oom-restore.private.log').decode(errors='replace') if summary['present'] else ''
+    entry=receipts[0];summary=oom_restore_log_summary(backup,expected_log)
+    raw_bytes=read_tail(backup/summary['attemptLog']) if summary['present'] else b''
+    require(not summary['present'] or hashlib.sha256(raw_bytes).hexdigest()==summary['privateLogSha256'],'REHEARSAL_LOG_CHANGED_DURING_REPORT')
+    raw=raw_bytes.decode(errors='replace')
     # Only source-defined validator codes/paths/types escape the private log.
-    allowed={'invalid_json','truncated_json','truncated_string','invalid_root_key','duplicate_or_invalid_root_key','invalid_root_colon','body_not_array','invalid_body_separator','invalid_root_separator','trailing_comma','trailing_json','invalid_header_or_application_error','header_status_rejected','root_not_object','row_not_object','invalid_fixture','invalid_markets_shape','invalid_timestamp','item_size_limit','nesting_limit','unsupported_content_encoding'}
+    allowed={'invalid_checkpoint_object','token_size_limit','invalid_json','truncated_json','truncated_string','invalid_root_key','duplicate_or_invalid_root_key','invalid_root_colon','body_not_array','invalid_body_separator','invalid_root_separator','trailing_comma','trailing_json','invalid_header_or_application_error','header_status_rejected','root_not_object','row_not_object','invalid_fixture','invalid_markets_shape','invalid_timestamp','item_size_limit','nesting_limit','unsupported_content_encoding'}
     details=sorted(set(re.findall(r"(?:detail[\"']?\s*:\s*|Snapshot completo rechazado: )['\"]?([a-z_]+)",raw))&allowed)
     fields=sorted(set(re.findall(r"fieldPath[\"']?\s*:\s*['\"]((?:Markets|Bets)(?:\[\d{1,6}\])?(?:\.(?:Bets|Markets))?)['\"]",raw)))
     types=sorted(set(re.findall(r"actualType[\"']?\s*:\s*['\"](null|array|object|string|number|boolean|undefined)['\"]",raw)))
     fixtures=sorted(set(int(x) for x in re.findall(r"fixtureId[\"']?\s*:\s*([1-9][0-9]{0,15})",raw)))[:8]
-    frames=[{'source':m[0],'line':int(m[1]),'column':int(m[2])} for m in re.findall(r'/app/(apps/worker/src/[a-zA-Z0-9_.-]+\.(?:mjs|ts|js)):(\d{1,7}):(\d{1,7})',raw)][-16:]
+    frames=[{'source':m[0],'line':int(m[1]),'column':int(m[2])} for m in re.findall(r'/app/(apps/worker/src/[a-zA-Z0-9_.-]+\.(?:mjs|ts|js)|packages/feed-store/src/index\.ts):(\d{1,7}):(\d{1,7})',raw)][-16:]
     checkpoint=any(f['source'].endswith('/persistence.ts') for f in frames)
-    return {'backup':str(backup),'receiptPhase':entry.get('phase') if entry.get('phase') in ('prepared','stopped','configured','activated','rolled_back_stopped') else 'unknown','offlineRestoreVerified':entry.get('oomRestoreVerified') is True,'snapshotMemoryVerified':entry.get('snapshotMemoryVerified') is True,'preservedSpoolHash':entry.get('preservedSpoolHash') if re.fullmatch('[0-9a-f]{64}',str(entry.get('preservedSpoolHash',''))) else None,'failureOrigin':'checkpoint_restore' if checkpoint else 'not_proven','validationDetails':details,'fieldPaths':fields,'actualTypes':types,'fixtureIds':fixtures,'stackFrames':frames,'privateLog':summary,'checkpointImageBuild':checkpoint_build_log_summary(backup),'distributionState':'not_queried_saved_stop_evidence_only','readOnly':True,'providerRequests':0,'workerRestarted':False}
+    origin='checkpoint_restore' if checkpoint else 'snapshot_application' if any(f['source'].endswith('/state.ts') for f in frames) else 'projection_serialization' if any(f['source'].startswith('packages/feed-store/') for f in frames) else 'snapshot_parser_or_conversion' if any(f['source'].endswith('/full-snapshot.ts') for f in frames) else 'not_proven'
+    exceptions=sorted(set(re.findall(r'\b(OperationError|SyntaxError|TypeError|RangeError|Error):',raw)))
+    known_messages=[message for message in ['Invalid checkpoint envelope','Invalid saved TRADE state; original file preserved','Unsupported TRADE checkpoint; original file preserved','Invalid outright checkpoint; original file preserved','Duplicate outright checkpoint identity','Private checkpoint incremental memory guard; original preserved','duplicate fixture','fixture count limit'] if message in raw]
+    return {'backup':str(backup),'receiptPhase':entry.get('phase') if entry.get('phase') in ('prepared','stopped','configured','activated','rolled_back_stopped') else 'unknown','offlineRestoreVerified':entry.get('oomRestoreVerified') is True,'snapshotMemoryVerified':entry.get('snapshotMemoryVerified') is True,'preservedSpoolHash':entry.get('preservedSpoolHash') if re.fullmatch('[0-9a-f]{64}',str(entry.get('preservedSpoolHash',''))) else None,'failureOrigin':origin,'exceptionTypes':exceptions,'knownExceptionMessages':known_messages,'validationDetails':details,'fieldPaths':fields,'actualTypes':types,'fixtureIds':fixtures,'stackFrames':frames,'privateLog':summary,'checkpointImageBuild':checkpoint_build_log_summary(backup),'distributionState':'not_queried_saved_stop_evidence_only','readOnly':True,'providerRequests':0,'workerRestarted':False}
 
 def archive_oom_locks(directory,backup,progress,workers):
     require(progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137,'OOM_LOCK_OWNER_NOT_CONFIRMED')

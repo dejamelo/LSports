@@ -22,6 +22,19 @@ class OomRecovery(unittest.TestCase):
     receipt.unlink()
     with self.assertRaisesRegex(Exception,'REHEARSAL_RECEIPT_NOT_UNIQUE'):NS['preserved_rehearsal_report'](str(backup))
    finally:NS.update(old)
+ def test_exception_extraction_uses_pinned_attempt_not_legacy_log(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);backup=root/'adl-partitioned-upgrade-example';backup.mkdir(mode=0o700);secure=root/'secure';secure.mkdir()
+   (backup/'oom-restore.private.log').write_text("Error: Snapshot completo rechazado: item_size_limit\n at /app/apps/worker/src/persistence.ts:58:20")
+   name='oom-restore-attempt-a96a05e850a6dd169.private.log';(backup/name).write_text("OperationError: Snapshot completo rechazado: invalid_timestamp SECRET_TOKEN\n at /app/apps/worker/src/full-snapshot.ts:78:12")
+   (secure/'partitioned-upgrade-example.json').write_text(json.dumps({'backup':str(backup),'phase':'stopped'}))
+   old={k:NS.get(k) for k in ('BACKUPS','SECURE')};NS.update(BACKUPS=root,SECURE=secure)
+   try:
+    result=NS['preserved_rehearsal_report'](str(backup),name)
+    self.assertEqual(result['validationDetails'],['invalid_timestamp']);self.assertEqual(result['exceptionTypes'],['OperationError']);self.assertEqual(result['failureOrigin'],'snapshot_parser_or_conversion');self.assertNotIn('SECRET_TOKEN',json.dumps(result));self.assertTrue(result['privateLog']['requestedLogFound'])
+    (backup/'oom-restore.latest.json').write_text(json.dumps({'name':'oom-restore-attempt-'+'a'*16+'.private.log'}));(backup/('oom-restore-attempt-'+'a'*16+'.private.log')).write_bytes((backup/name).read_bytes())
+    result=NS['preserved_rehearsal_report'](str(backup),'oom-restore-attempt-'+'b'*17+'.private.log');self.assertFalse(result['privateLog']['requestedLogFound']);self.assertEqual(result['validationDetails'],['invalid_timestamp'])
+   finally:NS.update(old)
  def test_build_log_reports_source_resolution_without_secrets_or_mutation(self):
   with tempfile.TemporaryDirectory() as tmp:
    backup=Path(tmp);backup.chmod(0o700);context=backup/('checkpoint-fix-'+'a'*24);context.mkdir();dockerfile=context/'Dockerfile';dockerfile.write_text('FROM sha256:'+'b'*64+'\nUSER node\n')

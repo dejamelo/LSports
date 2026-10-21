@@ -79,7 +79,9 @@ export async function run(args){
     const mac=rows.find(r=>r.operation==='cutover.audit');
     if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
-    const report=await remote('worker_exit_report',{handoff,rehearsalBackup:ledger.steps.throughput_image?.result?.backup},true);
+    const rehearsalLog=process.env.ADL_REHEARSAL_LOG;
+    if(rehearsalLog!==undefined&&!/^oom-restore-attempt-[0-9a-f]{16,32}\.private\.log$/.test(rehearsalLog))throw Error('INVALID_REHEARSAL_LOG_NAME');
+    const report=await remote('worker_exit_report',{handoff,rehearsalBackup:ledger.steps.throughput_image?.result?.backup,...(rehearsalLog?{rehearsalLog}:{})},true);
     const {writeProtectedReport}=await import('./distribution-validation.mjs');
     const reportFile=path.join(folder,`worker-exit-${pid}-${parent}.json`);
     await writeProtectedReport(reportFile,JSON.stringify(report,null,2));

@@ -128,3 +128,17 @@ probe after copy-only correction, restored 16,329 fixtures as UID/GID 1000 under
 metadata remained unchanged. Tests assert probe/restore share Docker arguments,
 and a failed probe never runs restore or starts the worker. The real AWS backup
 and namespace view remain to be validated by the single resume command.
+
+## Exclusive attempt exception report
+
+The report's summary selected the exclusive attempt log, but exception/detail
+extraction still read the old `oom-restore.private.log`. This reporting defect is
+fixed: summary, validation detail and stack all use the same selected file and
+its tail SHA-256 is cross-checked. `ADL_REHEARSAL_LOG` pins a safe attempt basename
+for `--worker-exit-report`; it does not run a rehearsal or change permissions.
+If a transcribed basename is absent, the protected latest pointer is used and
+`requestedLogFound:false` plus the actual `attemptLog` make that explicit.
+The report only prints known exception classes/messages, source locations and
+allowlisted validation details/field types. It does not print raw stderr/payload.
+A regression uses different historical and exclusive validation failures and
+asserts the exclusive failure is reported without secrets or historical frames.
