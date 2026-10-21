@@ -59,19 +59,28 @@ export function maskEventAvailability(event:EventFeed['events'][number],reasons:
 }
 // Bounded serialization: no whole-document string/Buffer alongside the projection.
 // Atomic fsync+rename and caller serialization remain unchanged.
+// Explicit lazy arrays retain the public JSON schema without retaining all rows.
+export const jsonItems = (items: () => Iterable<unknown>) => ({ [Symbol.iterator]: items });
 export async function writeJsonObject(file: Awaited<ReturnType<typeof open>>, value: Record<string, unknown>,masks?:AvailabilityBlocks) {
   let pending:string[]=[],bytes=0;
   const flush=async()=>{if(!bytes)return;await file.writeFile(pending.join(''));pending=[];bytes=0;};
-  const put=async(text:string)=>{pending.push(text);bytes+=Buffer.byteLength(text);if(bytes>=256*1024)await flush();};
-  await put('{');let first=true;
-  for(const [key,entry] of Object.entries(value)){
-    if(entry===undefined)continue;
-    await put((first?'':',')+JSON.stringify(key)+':');first=false;
-    if(Array.isArray(entry)){
-      await put('[');for(let i=0;i<entry.length;i++)await put((i?',':'')+JSON.stringify(key==='events'&&entry[i]&&masks?maskEventAvailability(entry[i],masks[entry[i].source as keyof AvailabilityBlocks]):entry[i]??null));await put(']');
-    }else await put(JSON.stringify(entry));
-  }
-  await put('}');await flush();
+  const put=async(text:string)=>{pending.push(text);bytes+=Buffer.byteLength(text);if(bytes>=64*1024)await flush();};
+  const write=async(entry:any,key='',depth=0):Promise<void>=>{
+    if(depth>128)throw Error('projection_depth_limit');
+    if(entry===null||typeof entry!=='object'){await put(JSON.stringify(entry)??'null');return;}
+    if(typeof entry.toJSON==='function'){await write(entry.toJSON(key),key,depth+1);return;}
+    if(Array.isArray(entry)||(Object.getPrototypeOf(entry)===Object.prototype&&typeof entry[Symbol.iterator]==='function')){
+      await put('[');let first=true;
+      for(const item of entry){if(!first)await put(',');first=false;
+        await write(key==='events'&&item&&masks?maskEventAvailability(item,masks[item.source as keyof AvailabilityBlocks]):item,'',depth+1);}
+      await put(']');return;
+    }
+    await put('{');let first=true;
+    for(const name of Object.keys(entry)){const item=entry[name];if(item===undefined)continue;
+      if(!first)await put(',');first=false;await put(JSON.stringify(name)+':');await write(item,name,depth+1);}
+    await put('}');
+  };
+  await write(value);await flush();
 }
 // One local worker writes a single atomic projection; API only reads. Never store credentials here.
 export function createPublisher(path = statePath()) {

@@ -1,4 +1,4 @@
-import {maskEventAvailability,type AvailabilityBlocks} from '@lsports/feed-store';
+import {jsonItems,maskEventAvailability,type AvailabilityBlocks} from '@lsports/feed-store';
 import { timestampOrder } from './timestamp-contract.js';
 import { SettlementType, OutrightScoreStatus } from "trade360-nodejs-sdk";
 import { marketStatusLabel, settlementLabel } from "@lsports/contracts";
@@ -83,6 +83,7 @@ const defined = <T extends object>(value: T) =>
   ) as Partial<T>;
 export class TradeState {
   // Opt-in worker publication cache: immutable event projections; never raw SDK rows.
+  private projectionCaptured=new WeakSet<Row>();
   private projectionCache=new WeakMap<Row,{context:string;event:SportEvent}>();
   restoration?:import("@lsports/contracts").EventFeed["restoration"];
   rows: Record<Lane, Map<number | string, Row>> = {
@@ -167,6 +168,7 @@ export class TradeState {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
         this.rows[lane].set(key, row);
       }
+      if(this.projectionCaptured.has(row)){row=structuredClone(row);this.rows[lane].set(key,row);}
       this.projectionCache.delete(row);
       if(observation){
         const at=new Date(observation.receivedAt).toISOString();
@@ -316,7 +318,7 @@ export class TradeState {
   }
   beginPartitionedSnapshot(lane:Lane){
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
-    for(const row of this.rows[lane].values())if(!row.outright){this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+    for(const [key,original] of this.rows[lane])if(!original.outright){const row=this.projectionCaptured.has(original)?structuredClone(original):original;this.rows[lane].set(key,row);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
   }
   finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
     this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));
@@ -340,6 +342,63 @@ export class TradeState {
       if(m&&(m.processingBacklog??m.backlog)>0&&(m.oldestProcessingAgeMs??m.oldestAgeMs)>5000)reasons.push('processing_backlog');
       result[lane]=reasons;
     }return result;
+  }
+  // Freeze row references, not their full projected graph. Only one fixture is projected at a time, with the existing validation/quote rules.
+  // Internal publication payload: lazy arrays are consumed by writeJsonObject, not JSON.stringify.
+  projection(now = Date.now()): EventFeed {
+    const captured = Object.create(this) as TradeState;
+    captured.rows={prematch:new Map(this.rows.prematch),inplay:new Map(this.rows.inplay)};
+    for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.projectionCaptured.add(row);
+    captured.connections=structuredClone(this.connections);
+    captured.metrics=structuredClone(this.metrics);
+    const empty=Object.create(captured) as TradeState;
+    empty.rows={prematch:new Map(),inplay:new Map()};
+    const base=empty.feed(now);
+    const live=new Set<string>();
+    for(const [id,row] of captured.rows.inplay){
+      const status=(row.livescore&&row.livescore.at>=(row.fixture?.at||0)?row.livescore.value.scoreboard?.status:undefined)??row.fixture?.value.status;
+      if(row.fixture&&status===2)live.add(String(id));
+    }
+    function* parts(onlyOutright=false){
+      for(const lane of ['prematch','inplay'] as const)for(const [id,row] of captured.rows[lane]){
+        if(onlyOutright&&!row.outright)continue;
+        const view=Object.create(captured) as TradeState;
+        view.rows={prematch:new Map(),inplay:new Map()};view.rows[lane].set(id,row);
+        const part=view.feed(now,false,false);
+        if(lane==='prematch'&&live.has(String(id)))part.events=[];
+        yield {lane,part};
+      }
+    }
+    // Coverage is a bounded pass; arrays below are generated only as written.
+    let horse=false;
+    for(const lane of ['prematch','inplay'] as const)Object.assign(base.coverage![lane],{
+      rowsStored:0,rowsWithoutFixture:0,rowsPublished:0,rowsHiddenAsDuplicate:0,
+      outrightMarketRowsWithoutFixture:0,eventsWithMarkets:0,eventsWithSelections:0,eventsWithSelectableOdds:0});
+    for(const {lane,part} of parts()){
+      const c=part.coverage![lane],target=base.coverage![lane];
+      for(const key of ['rowsStored','rowsWithoutFixture','outrightMarketRowsWithoutFixture'] as const)target[key]+=c[key]??0;
+      target.rowsPublished+=part.events.length;
+      target.rowsHiddenAsDuplicate+=(c.rowsPublished-part.events.length);
+      target.eventsWithMarkets+=part.events.filter(e=>e.markets?.length).length;
+      target.eventsWithSelections+=part.events.filter(e=>e.markets?.some(m=>m.selections.length)).length;
+      target.eventsWithSelectableOdds+=part.events.filter(e=>e.markets?.some(m=>m.selections.some(s=>s.available))).length;
+      horse ||= part.horseRacing?.status==='observed';
+    }
+    if(horse)base.horseRacing={status:'observed',message:'Se observaron eventos de Hípica en el paquete.'};
+    (base as any).events=jsonItems(function*(){for(const {part} of parts())yield* part.events;});
+    (base as any).outrightDiagnostics=jsonItems(function*(){for(const {part} of parts(true))yield* part.outrightDiagnostics||[];});
+    (base as any).ticketVersionRecoveries=jsonItems(function*(){
+      for(const lane of ['prematch','inplay'] as const)for(const [key,row] of captured.rows[lane])
+        for(const [betKey,r] of row.timestampRecovery||[]){const marketId=betKey.slice(0,betKey.indexOf(':'));
+          yield {auditId:r.auditId,eventId:`${lane}:${key}`,marketId:`${lane}:${key}:${marketId}`,selectionId:`${lane}:${key}:${betKey}`,previousVersion:r.previousVersion,baselineVersion:r.baselineVersion};}
+    });
+    (base as any).ticketOutcomes=jsonItems(function*(){
+      for(const lane of ['prematch','inplay'] as const)for(const [key,row] of captured.rows[lane])
+        for(const market of row.markets.values())for(const bet of market.bets||[]){
+          const at=row.betAt.get(`${market.id}:${bet.id}`);if(!Number.isInteger(bet.settlement)||at===undefined)continue;
+          yield {eventId:`${lane}:${key}`,marketId:`${lane}:${key}:${market.id}`,selectionId:`${lane}:${key}:${market.id}:${bet.id}`,settlement:bet.settlement!,updatedAt:new Date(at).toISOString()};}
+    });
+    return base;
   }
   feed(now = Date.now(),useCache=false,deferAvailability=false): EventFeed {
     const blocks=this.availabilityBlocks();

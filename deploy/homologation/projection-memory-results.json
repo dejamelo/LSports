@@ -1,0 +1,60 @@
+{
+  "awsValidated": false,
+  "source": "synthetic_dense_not_supplier_backup",
+  "rows": 16329,
+  "markets": 195948,
+  "selections": 2351376,
+  "inputBytes": 516000000,
+  "structuredJsonBytes": 377276686,
+  "containerLimitBytes": 4294967296,
+  "nodeMaxOldSpaceMiB": 2560,
+  "effectiveHeapLimitBytes": 2885681152,
+  "restoreSerializeFullReadbackPassed": true,
+  "maxRSSBytes": 2269126656,
+  "sampledHeapPeakBytes": 1874865336,
+  "elapsedMs": 325674,
+  "perEventContentComparison": {
+    "status": "passed",
+    "rows": 16329,
+    "maxRSSBytes": 2248437760,
+    "sampledHeapPeakBytes": 1920506664,
+    "elapsedMs": 318745,
+    "logSha256": "5204abb78d86a1136d2909850b5c3c166b77607ff47778dedcf0e05b5b3cc390",
+    "outputBytes": 915036878
+  },
+  "baseline": {
+    "sameFixtureAndLimits": true,
+    "rowsBeforeFailure": 16329,
+    "stage": "projection.serialize",
+    "fatal": "javascript_heap_out_of_memory",
+    "lastGCHeapUsedMiB": 2546.5,
+    "oldWholeProjectionMethod": "feed(now,true,true)",
+    "note": "Same recursive writer; failure reproduced while constructing old aggregate projection, before writing.",
+    "exitCode": 139
+  },
+  "unitTests": {
+    "schemaPersistenceStateCoverage": 26,
+    "streamedWriterAndProjection": 5,
+    "ticketRegression": 6,
+    "executor": {
+      "passed": 14,
+      "dockerOptInSkipped": 1
+    },
+    "oomCollector": 14
+  },
+  "concurrentIngressSmoke": {
+    "sourceMessagesPerSecond": 69,
+    "durationMs": 10007,
+    "burstMessages": 300,
+    "snapshotBytes": 8388608,
+    "messages": 990,
+    "received": 990,
+    "acknowledged": 990,
+    "processed": 990,
+    "checkpointed": 990,
+    "finalBacklog": 0,
+    "replayRows": 2,
+    "awsValidated": false,
+    "limit": "Separate small-snapshot smoke, not the dense 516MB container run."
+  }
+}

@@ -102,7 +102,11 @@ class Upgrade(unittest.TestCase):
      self.assertEqual(len(rehearsal_calls),1)
      read_calls=[c for c in calls if c[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in c)]
      self.assertEqual(len(read_calls),2)
-     self.assertEqual(read_calls[-1][:-2],rehearsal_calls[0][:rehearsal_calls[0].index('--max-old-space-size=2560')])
+     prefix=rehearsal_calls[0][:rehearsal_calls[0].index('--max-old-space-size=2560')]
+     out_index=next(i for i,v in enumerate(prefix) if 'target=/output' in v)
+     self.assertEqual(prefix[out_index-1],'--mount');del prefix[out_index-1:out_index+1]
+     self.assertEqual(read_calls[-1][:-2],prefix)
+     self.assertTrue(any('projection.readback' in str(v) for v in rehearsal_calls[0]))
      self.assertEqual(read_calls[-1][read_calls[-1].index('--user')+1],'node')
      self.assertTrue(any('rehearsal-'+digest[:24]+',target=/recovery,readonly' in str(v) for v in rehearsal_calls[0]))
      self.assertEqual((Path(json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_bytes())['backup'])/('rehearsal-'+digest[:24])/'trade-feed.json').read_bytes(),(volume/'trade-feed.json').read_bytes())

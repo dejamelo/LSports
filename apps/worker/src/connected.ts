@@ -77,9 +77,8 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0,loopWindowStart=Date.now();
     const save = coalescedPersistence(()=>operation("file.persist", "local", async () => {
-        const started=performance.now();const feed = state.feed(Date.now(),true,true),capturedBlocks=state.availabilityBlocks();
-        tenantTickets?.reconcile(feed);
-        ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
+        const started=performance.now();const feed = state.projection(),capturedBlocks=state.availabilityBlocks();
+        tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
         const {regular,...saved}=checkpoint(state,false);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
         await persistRegularCheckpoint(path,state);
@@ -98,7 +97,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         console.info(
           JSON.stringify({
             operation: "feed.coverage",
-            coverage: state.feed(Date.now(),true,true).coverage,
+            coverage: state.projection().coverage,
           }),
         );
       }
@@ -593,7 +592,7 @@ export async function session(
           status: fullCompleted?"full_snapshot_recovered":partitionCompleted?"partitioned_snapshot_recovered":rows === undefined ? "snapshot_deferred" : "snapshot_recovered",
           ...(partitionCompleted?{events:state.connections[lane].snapshotEvents,partitioned:!fullCompleted,fullSnapshot:fullCompleted}:rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
           snapshotAudit: api.snapshotAudit?.(),
-          coverage: state.feed(Date.now(),true,true).coverage?.[lane],
+          coverage: state.projection().coverage?.[lane],
         }),
       );
     };
