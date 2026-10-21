@@ -238,18 +238,21 @@ def upgrade_partitioned(request):
                 require(not rp.is_symlink() and rp.is_file() and rp.stat().st_uid==os.geteuid() and rp.stat().st_size<=1024*1024,'UPGRADE_RECEIPT_UNVERIFIED')
                 value=json.loads(rp.read_bytes())
                 if value.get('backup')==prior_backup and value.get('phase')=='stopped' and value.get('snapshotMemoryVerified') and not value.get('oomRestoreVerified'):previous.append(value)
+            superseded={r['checkpointParserSourceDigest'] for r in previous if r.get('checkpointParserSourceDigest')}
+            previous=[r for r in previous if r.get('digest') not in superseded]
             require(len(previous)==1,'CHECKPOINT_REPAIR_SOURCE_NOT_UNIQUE')
             backup=source_backup
             old=previous[0];require(not any(w['running'] for w in states('worker')),'CHECKPOINT_REPAIR_REQUIRES_STOPPED_WORKER')
-            old_files={}
-            for name in files:
-                fp=source_backup/'context'/'overlay'/name
-                require(fp.is_file() and not fp.is_symlink(),'CHECKPOINT_REPAIR_SOURCE_UNVERIFIED');old_files[name]=fp.read_text()
+            image_info=json.loads(run(['docker','image','inspect',old['image']]))[0]
+            require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'CHECKPOINT_REPAIR_IMAGE_UNVERIFIED')
+            # The backup/context is the original image's source. Later parser
+            # layers must be compared to their own verified prepared image.
+            export="const fs=require('node:fs');let result={};for(const name of "+json.dumps(sorted(files))+"){result[name]=fs.readFileSync('/app/'+name,'utf8')}console.log(JSON.stringify(result))"
+            old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',old['image'],'-e',export],timeout=30))
+            require(set(old_files)==set(files) and all(isinstance(v,str) and len(v.encode())<256*1024 for v in old_files.values()),'CHECKPOINT_REPAIR_SOURCE_UNVERIFIED')
             require(hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old['digest'],'CHECKPOINT_REPAIR_SOURCE_DIGEST_MISMATCH')
             changed={name for name in files if files[name]!=old_files[name]}
             require(changed and changed<= {'apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts'},'CHECKPOINT_REPAIR_DIFF_NOT_ALLOWED')
-            image_info=json.loads(run(['docker','image','inspect',old['image']]))[0]
-            require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'CHECKPOINT_REPAIR_IMAGE_UNVERIFIED')
             context=source_backup/('checkpoint-fix-tagged-'+digest[:24]);context.mkdir(mode=0o700,exist_ok=True)
             for name in changed:
                 target=context/'overlay'/name;target.parent.mkdir(parents=True,exist_ok=True,mode=0o755)
@@ -500,7 +503,12 @@ def upgrade_partitioned(request):
                     spool_hash=snapshot_file_hash(spool) if spool else None
                     if progress.get('preservedSpoolHash'):require(progress['preservedSpoolHash']==spool_hash,'PRESERVED_SPOOL_CHANGED_NO_START')
                     progress['preservedSpoolHash']=spool_hash;save(progress)
-                    rehearsal=backup/('rehearsal-'+digest[:24]);rehearsal.mkdir(mode=0o700,exist_ok=True)
+                    rehearsal_name=progress.get('rehearsalDirectory')
+                    prior_name='rehearsal-'+str(progress.get('checkpointParserSourceDigest',''))[:24]
+                    if rehearsal_name is None:rehearsal_name=prior_name if re.fullmatch('rehearsal-[0-9a-f]{24}',prior_name) and (backup/prior_name).is_dir() else 'rehearsal-'+digest[:24]
+                    require(isinstance(rehearsal_name,str) and re.fullmatch('rehearsal-[0-9a-f]{24}',rehearsal_name),'REHEARSAL_DIRECTORY_NAME_UNVERIFIED')
+                    rehearsal=backup/rehearsal_name;require(not rehearsal.is_symlink(),'REHEARSAL_DIRECTORY_UNVERIFIED');rehearsal.mkdir(mode=0o700,exist_ok=True)
+                    progress['rehearsalDirectory']=rehearsal_name;save(progress)
                     sources=[(backup/name,rehearsal/name,sha) for name,sha in progress.get('dataBackupHashes',{}).items()]
                     if spool:sources.append((spool,rehearsal/spool.relative_to(directory),spool_hash))
                     missing=sum(src.stat().st_size for src,dst,sha in sources if not dst.exists())

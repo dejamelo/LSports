@@ -117,9 +117,12 @@ class Upgrade(unittest.TestCase):
    root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();backup=backups/'adl-partitioned-upgrade-test';backup.mkdir(mode=0o700)
    files={name:'old source' for name in NS['PARTITION_FILES']};old_digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
    for name,source in files.items():
-    fp=backup/'context'/'overlay'/name;fp.parent.mkdir(parents=True,exist_ok=True);fp.write_text(source)
-   proof={'backup':str(backup),'digest':old_digest,'phase':'stopped','image':'prepared-image','snapshotMemoryVerified':True,'oomRestoreVerified':False,'supplierStoppedBeforeConsumer':True,'dataBackupHashes':{'trade-feed.json':'a'*64},'preservedSpoolHash':'b'*64}
+    fp=backup/'context'/'overlay'/name;fp.parent.mkdir(parents=True,exist_ok=True);fp.write_text('older original context, not prepared leaf')
+   proof={'backup':str(backup),'digest':old_digest,'phase':'stopped','image':'prepared-image','checkpointParserSourceDigest':'f'*64,'rehearsalDirectory':'rehearsal-'+'d'*24,'snapshotMemoryVerified':True,'oomRestoreVerified':False,'supplierStoppedBeforeConsumer':True,'dataBackupHashes':{'trade-feed.json':'a'*64},'preservedSpoolHash':'b'*64}
    receipt=secure/('partitioned-upgrade-'+old_digest[:24]+'.json');receipt.write_text(json.dumps(proof));(secure/'deployment.json').write_text('{}')
+   ancestor={k:v for k,v in proof.items() if k!='checkpointParserSourceDigest'};ancestor['digest']='f'*64
+   (secure/('partitioned-upgrade-'+'f'*24+'.json')).write_text(json.dumps(ancestor))
+   old_files=dict(files)
    files['apps/worker/src/full-snapshot.ts']='fixed parser';digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();image='adl-worker-partitioned:'+digest[:24]
    calls=[]
    def run(args,**kw):
@@ -127,6 +130,7 @@ class Upgrade(unittest.TestCase):
     if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':'sha256:'+'c'*64,'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':old_digest if args[3]=='prepared-image' else digest}}}]).encode()
     if args[:2]==['docker','tag']:return b''
     if args[:2]==['docker','build']:return b''
+    if args[:2]==['docker','run'] and any('readFileSync' in str(a) for a in args):return json.dumps(old_files).encode()
     if args[:2]==['docker','run']:return b'snapshot-memory-offline-ok'
     raise AssertionError(args)
    keys=('SECURE','BACKUPS','run','partition_base','control_status','model','states','require');old={k:NS.get(k) for k in keys}
@@ -135,7 +139,7 @@ class Upgrade(unittest.TestCase):
     out=io.StringIO()
     with contextlib.redirect_stdout(out):code=NS['upgrade_partitioned']({'phase':'prepare','files':files,'snapshotMemoryRepair':True,'checkpointRepairBackup':str(backup)})
     self.assertEqual(code,0,out.getvalue());result=json.loads(out.getvalue().splitlines()[-1]);self.assertEqual(result['backup'],str(backup));self.assertEqual(result['image'],image)
-    new=json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_text());self.assertEqual(new['phase'],'stopped');self.assertTrue(new['supplierStoppedBeforeConsumer']);self.assertEqual(new['dataBackupHashes'],proof['dataBackupHashes']);self.assertFalse(new['oomRestoreVerified']);self.assertEqual(json.loads(receipt.read_text()),proof)
+    new=json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_text());self.assertEqual(new['phase'],'stopped');self.assertEqual(new.get('rehearsalDirectory'),proof.get('rehearsalDirectory'));self.assertTrue(new['supplierStoppedBeforeConsumer']);self.assertEqual(new['dataBackupHashes'],proof['dataBackupHashes']);self.assertFalse(new['oomRestoreVerified']);self.assertEqual(json.loads(receipt.read_text()),proof)
     self.assertEqual(len([c for c in calls if c[:2]==['docker','build']]),1);self.assertFalse(any('up' in c or 'kill' in c or 'stop' in c for c in calls))
     build=next(c for c in calls if c[:2]==['docker','build']);self.assertEqual(build[2:4],['--builder','default'])
     dockerfile=Path(build[-1])/'Dockerfile';self.assertTrue(dockerfile.read_text().startswith('FROM adl-partition-base:'));self.assertNotIn('FROM sha256:',dockerfile.read_text())

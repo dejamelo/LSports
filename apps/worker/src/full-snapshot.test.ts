@@ -108,3 +108,14 @@ test('checkpoint envelope is streamed by nested fixture; per-fixture and malform
   }
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('checkpoint metadata streams aggregates but rejects malformed grammar, giant scalar and excessive nesting',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-metadata-')),file=join(dir,'body');
+ try{
+  const base='"mode":"connected","events":[],"workerCheckpoint":{"version":1,"outright":[]}';
+  await writeFile(file,'{'+base+',"ticketOutcomes":'+JSON.stringify(Array.from({length:100},()=>({description:'x'.repeat(80)})))+'}');await walkSnapshot(file,async()=>{},128,'events');
+  for(const bad of ['[1,]','{"a":}','{"a":true,}','{"a" 1}','[true false]','"'+'x'.repeat(200)+'"','['.repeat(130)+'0'+']'.repeat(130)]){
+   await writeFile(file,'{'+base+',"ticketOutcomes":'+bad+'}');await assert.rejects(walkSnapshot(file,async()=>{},128,'events'));
+  }
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

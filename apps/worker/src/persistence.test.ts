@@ -221,3 +221,18 @@ test('embedded checkpoint larger than record cap streams fixtures and commits on
   await assert.rejects(restore(sentinel,path));assert.equal(sentinel.rows.prematch.size,0);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('large root projection collections are validated incrementally, not as one checkpoint item', {timeout:120000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-root-metadata-')),path=join(dir,'feed.json');
+ try{
+  const {open,stat}=await import('node:fs/promises');const original=seed(),file=await open(path,'w');
+  try{
+   await file.writeFile(JSON.stringify({mode:'connected',events:[],workerCheckpoint:checkpoint(original)}).slice(0,-1)+',"ticketOutcomes":[');
+   for(let i=0;i<140;i++)await file.writeFile((i?',':'')+JSON.stringify({auditId:String(i),description:'x'.repeat(256*1024)}));
+   await file.writeFile(']}');
+  }finally{await file.close();}
+  assert.ok((await stat(path)).size>32*1024**2);const state=new TradeState();
+  assert.equal((await restore(state,path)).rows,4);assert.ok([...state.rows.prematch.values()].every(r=>r.restored));
+  await writeFile(path,',oops',{flag:'a'});const untouched=new TradeState();await assert.rejects(restore(untouched,path));assert.equal(untouched.rows.prematch.size,0);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

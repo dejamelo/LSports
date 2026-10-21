@@ -42,6 +42,15 @@ export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void
  const rawValue=async(first:string,max=limit)=>{let n=first.length;const pieces=[first];let depth=first==='{'||first==='['?1:0;
   while(depth){if(offset>=batch.length)await fill();while(offset<batch.length&&depth){const t=batch[offset++];n+=t.length;if(n>max)fail('item_size_limit');pieces.push(t);if(t==='{'||t==='[')depth++;if(t==='}'||t===']')depth--;if(depth>128)fail('nesting_limit');if(depth<0)fail('invalid_json');}}
   try{const text=pieces.join('');if(Buffer.byteLength(text)>max)fail('item_size_limit');return IdSafeJsonParser.parse(text);}catch{return fail('invalid_json');}};
+ // Projection metadata is not a fixture. Validate its complete JSON grammar
+ // without retaining entire ticket/diagnostic collections beside recovered rows.
+ const metadataValue=async(first:string,depth=0):Promise<void>=>{
+  if(depth>128)fail('nesting_limit');
+  if(first==='['){let token=await take();if(token===']')return;for(;;){await metadataValue(token,depth+1);token=await take();if(token===']')return;if(token!==',')fail('invalid_body_separator');token=await take();}}
+  if(first==='{'){let token=await take();if(token==='}')return;for(;;){if(Buffer.byteLength(token)>limit)fail('item_size_limit');let key:unknown;try{key=JSON.parse(token);}catch{fail('invalid_root_key');}if(typeof key!=='string')fail('invalid_root_key');if(await take()!==':')fail('invalid_root_colon');await metadataValue(await take(),depth+1);token=await take();if(token==='}')return;if(token!==',')fail('invalid_root_separator');token=await take();}}
+  if(Buffer.byteLength(first)>limit)fail('item_size_limit');
+  try{JSON.parse(first);}catch{fail('invalid_json');}
+ };
  // A persisted workerCheckpoint is an envelope, not a snapshot fixture.
  // Bound each fixture independently, including legacy embedded regular rows.
  const privateCheckpoint=async(first:string)=>{
@@ -64,7 +73,7 @@ export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void
   let key:unknown;try{key=JSON.parse(next);}catch{fail('invalid_root_key');}if(typeof key!=='string'||key.length>64||keys.size>=64||keys.has(key))fail('duplicate_or_invalid_root_key');keys.add(key as string);if(await take()!==':')fail('invalid_root_colon');
   let first=await take();if(key===(checkpoint||'Body')){
    body=true;if(first!=='[')fail('body_not_array');first=await take();if(first!==']')for(;;){await onRow(await rawValue(first));first=await take();if(first===']')break;if(first!==',')fail('invalid_body_separator');first=await take();}
-  }else{const value=checkpoint==='events'&&key==='workerCheckpoint'?await privateCheckpoint(first):await rawValue(first,checkpoint?limit:64*1024);if(key===(checkpoint==='regular'?'version':checkpoint==='events'?'workerCheckpoint':'Header'))header=value;else if(checkpoint||['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
+  }else{const value=checkpoint==='events'&&key==='workerCheckpoint'?await privateCheckpoint(first):checkpoint&&key!=='mode'&&key!=='version'?(await metadataValue(first),undefined):await rawValue(first,checkpoint?limit:64*1024);if(key===(checkpoint==='regular'?'version':checkpoint==='events'?'workerCheckpoint':'Header'))header=value;else if(checkpoint||['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
   next=await take();if(next==='}')break;if(next!==',')fail('invalid_root_separator');next=await take();if(next==='}')fail('trailing_comma');
  }if(offset<batch.length||!(await it.next()).done)fail('trailing_json');
  if(checkpoint){if(!body||checkpoint==='regular'&&header!==1||checkpoint==='events'&&rootErrors.mode!=='connected')throw Error('Invalid checkpoint envelope');return {header,mode:rootErrors.mode};}

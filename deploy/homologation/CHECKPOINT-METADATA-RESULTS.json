@@ -1,0 +1,39 @@
+{
+  "awsValidated": false,
+  "protectedBackupRestorePending": true,
+  "confirmedCurrentFailure": {
+    "attemptLog": "oom-restore-attempt-a96a05e850a6d169.private.log",
+    "exception": "OperationError",
+    "detail": "item_size_limit",
+    "phase": "checkpoint_restore",
+    "source": "full-snapshot.ts:67:100",
+    "exactRootField": "not_reported"
+  },
+  "reproduction": {
+    "baseline": "item_size_limit",
+    "patched": "complete",
+    "sameRecordCap": true,
+    "syntheticRootCollection": "ticketOutcomes_not_proven_actual_field"
+  },
+  "regressions": {
+    "workerParserAndRestore": 23,
+    "result": "passed",
+    "includesRootCollectionOver32MiB": true,
+    "malformedJsonRejected": true,
+    "partialRestoreNotCommitted": true
+  },
+  "coldCopyReplay": {
+    "test": "cold_dense_replay",
+    "status": "ok",
+    "rows": 16329,
+    "appliedRows": 16329,
+    "replayedRawRows": 2,
+    "duplicateRows": 1,
+    "checkpointed": 2,
+    "writes": 8,
+    "cgroupPeakBytes": 2855313408,
+    "awsValidated": false,
+    "providerRequests": 0,
+    "snapshotSource": "synthetic_validated_rows_not_supplier_HTTP"
+  }
+}

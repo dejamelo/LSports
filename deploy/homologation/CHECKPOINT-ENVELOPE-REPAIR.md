@@ -142,3 +142,39 @@ The report only prints known exception classes/messages, source locations and
 allowlisted validation details/field types. It does not print raw stderr/payload.
 A regression uses different historical and exclusive validation failures and
 asserts the exclusive failure is reported without secrets or historical frames.
+
+## Root projection metadata aggregate
+
+The uploaded full report selected `oom-restore-attempt-a96a05e850a6d169.private.log`
+from the protected latest pointer. The requested name had one extra `d`.
+Its 1,587-byte log was not truncated (SHA-256
+cde2c046cf9af49f35457fbda88f12a8990e3f8344925ae18efdcfff0567e44c).
+The original exception is OperationError/item_size_limit, persistence.ts:58:20
+via full-snapshot.ts:67:100 -> rawValue at 43:132. This is the generic root-value
+branch, not the already fixed privateCheckpoint envelope branch. The exact root
+key is not in that report. Historical build source-resolution errors and the
+old container's OOM/137 are not this attempt's failure. There is no independent
+attempt timestamp in the report; correspondence is to the protected latest
+pointer, not an independently inferred wall-clock time.
+
+Root projection collections still went through aggregate rawValue with the
+32 MiB fixture-record cap. Reproduced before/after on a synthetic ticketOutcomes
+collection (not claimed to be the actual field). The reader now validates all
+unused projection metadata incrementally, including complete object/array JSON
+grammar and token/depth limits. Actual checkpoint fixtures still undergo the
+same per-record and business validation. No file is rewritten or record purged;
+restored trading/settlement state comes from the existing private checkpoint,
+as before. Unknown malformed metadata and oversized scalar tokens still fail.
+
+Parser derivation now chooses the last verified receipt in the source chain and
+reads its exact sources from its verified prepared image, rather than comparing
+a newer parser image to the original backup/context. It retains the same backup,
+stop evidence and hash-verified working copy when present. The original source
+context and previous images/receipts are preserved. Read-access proof and full
+copied-data rehearsal remain mandatory before start.
+
+23 parser/restore tests passed, plus sustained-ingress/replay regressions. Cold
+recovery on a separate synthetic copy under 4 GiB restored/reconciled 16,329 rows,
+replayed two durable rows including one duplicate, checkpointed them and drained
+the inbox; cgroup peak 2,855,313,408 bytes. No AWS or supplier calls were made.
+The real protected backup still must pass the remote full rehearsal.
