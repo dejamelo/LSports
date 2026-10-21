@@ -94,11 +94,40 @@ class Upgrade(unittest.TestCase):
     self.assertEqual(model(NS['partition_base'](after))['services']['worker']['environment']['LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'],'128');self.assertEqual(json.loads(migration.read_bytes())['journals'],['preserved'])
     code,result=invoke('prepare');self.assertEqual(code,0,result);code,result=invoke('activate');self.assertEqual(code,0,result);self.assertTrue(result['reused']);
     if oom:
+     rehearsal_calls=[c for c in calls if c[:2]==['docker','run'] and any('oom-checkpoint-restore-ok' in str(v) for v in c)]
+     self.assertEqual(len(rehearsal_calls),1)
+     self.assertTrue(any('rehearsal-'+digest[:24]+',target=/recovery,readonly' in str(v) for v in rehearsal_calls[0]))
+     self.assertEqual((Path(json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_bytes())['backup'])/('rehearsal-'+digest[:24])/'trade-feed.json').read_bytes(),(volume/'trade-feed.json').read_bytes())
      code,verified=invoke('activate',verify_only=True);self.assertEqual(code,0,verified);self.assertTrue(verified['offlineRestoreVerified'])
     self.assertEqual(len([c for c in calls if 'up' in c]),1);self.assertEqual(len([c for c in calls if c[:2]==['docker','build']]),1)
     self.assertTrue(all(c[-1]=='worker' and '--no-deps' in c and '--pull' in c for c in calls if 'up' in c))
     if supplier:
      code,result=invoke('rollback');self.assertEqual(code,0,result);self.assertFalse(running);self.assertEqual(selected,'base');self.assertTrue(result['oldWorkerKeptStopped']);self.assertEqual(journal.read_bytes(),journal_before);self.assertTrue(all(c[-1]=='worker' and '--no-deps' in c for c in calls if 'create' in c));code,result=invoke('rollback');self.assertEqual(code,0,result);self.assertTrue(result['reused']);self.assertEqual(len([c for c in calls if 'create' in c]),1)
+   finally:NS.update(old)
+ def test_checkpoint_parser_derives_prepared_image_reuses_stop_and_immutable_backup(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();backup=backups/'adl-partitioned-upgrade-test';backup.mkdir(mode=0o700)
+   files={name:'old source' for name in NS['PARTITION_FILES']};old_digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+   for name,source in files.items():
+    fp=backup/'context'/'overlay'/name;fp.parent.mkdir(parents=True,exist_ok=True);fp.write_text(source)
+   proof={'backup':str(backup),'digest':old_digest,'phase':'stopped','image':'prepared-image','snapshotMemoryVerified':True,'oomRestoreVerified':False,'supplierStoppedBeforeConsumer':True,'dataBackupHashes':{'trade-feed.json':'a'*64},'preservedSpoolHash':'b'*64}
+   receipt=secure/('partitioned-upgrade-'+old_digest[:24]+'.json');receipt.write_text(json.dumps(proof));(secure/'deployment.json').write_text('{}')
+   files['apps/worker/src/full-snapshot.ts']='fixed parser';digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();image='adl-worker-partitioned:'+digest[:24]
+   calls=[]
+   def run(args,**kw):
+    calls.append(args)
+    if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':'sha256:'+'c'*64,'Config':{'Labels':{'eu.adl.partitioned.patch':old_digest if args[3]=='prepared-image' else digest}}}]).encode()
+    if args[:2]==['docker','build']:return b''
+    if args[:2]==['docker','run']:return b'snapshot-memory-offline-ok'
+    raise AssertionError(args)
+   keys=('SECURE','BACKUPS','run','partition_base','control_status','model','states','require');old={k:NS.get(k) for k in keys}
+   NS.update(require=lambda ok,reason:None if reason=='ROOT_REQUIRED' else old['require'](ok,reason),SECURE=secure,BACKUPS=backups,run=run,partition_base=lambda _:[],control_status=lambda:200,model=lambda _:{'services':{'worker':{'mem_limit':4294967296}}},states=lambda _:[{'running':False}])
+   try:
+    out=io.StringIO()
+    with contextlib.redirect_stdout(out):code=NS['upgrade_partitioned']({'phase':'prepare','files':files,'snapshotMemoryRepair':True,'checkpointRepairBackup':str(backup)})
+    self.assertEqual(code,0,out.getvalue());result=json.loads(out.getvalue().splitlines()[-1]);self.assertEqual(result['backup'],str(backup));self.assertEqual(result['image'],image)
+    new=json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_text());self.assertEqual(new['phase'],'stopped');self.assertTrue(new['supplierStoppedBeforeConsumer']);self.assertEqual(new['dataBackupHashes'],proof['dataBackupHashes']);self.assertFalse(new['oomRestoreVerified']);self.assertEqual(json.loads(receipt.read_text()),proof)
+    self.assertEqual(len([c for c in calls if c[:2]==['docker','build']]),1);self.assertFalse(any('up' in c or 'kill' in c or 'stop' in c for c in calls))
    finally:NS.update(old)
  def test_confirmed_oom_resume_backs_up_and_validates_without_signalling_dead_worker(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True,throughput=True,spool=True,parser=True,durable=True,oom=True)
  def test_durable_ingress_image_gate_preserves_single_activation_and_rollback(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True,throughput=True,spool=True,parser=True,durable=True)

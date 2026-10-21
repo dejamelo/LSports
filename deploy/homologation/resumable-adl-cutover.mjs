@@ -213,7 +213,7 @@ export async function run(args){
     if(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])){ledger.spoolMemoryBefore??={validation:ledger.lastValidation,upgrade:ledger.steps.throughput_upgrade,evidence:ledger.recoveryThroughputLatestEvidence};await save();}
     const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true}:distributionMode?{fixCommit:'2aa06f7'}:{};
     if(durableMode)repairOptions.durableIngress=true;
-    if(snapshotMemoryRepair)repairOptions.snapshotMemoryRepair=true;
+    if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
     const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
     if(snapshotMemoryRepair&&prepared.offlineSnapshotMemoryVerified!==true)throw Error('SNAPSHOT_MEMORY_OFFLINE_UNVERIFIED');

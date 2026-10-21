@@ -70,6 +70,8 @@ def preserved_rehearsal_report(expected_backup):
         require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_size<=1024*1024,'REHEARSAL_RECEIPT_UNVERIFIED')
         entry=json.loads(path.read_bytes())
         if entry.get('backup')==str(backup):receipts.append(entry)
+    superseded={r['checkpointParserSourceDigest'] for r in receipts if r.get('checkpointParserSourceDigest')}
+    receipts=[r for r in receipts if r.get('digest') not in superseded]
     require(len(receipts)==1,'REHEARSAL_RECEIPT_NOT_UNIQUE')
     entry=receipts[0];summary=oom_restore_log_summary(backup)
     raw=read_tail(backup/'oom-restore.private.log').decode(errors='replace') if summary['present'] else ''
@@ -140,6 +142,40 @@ def upgrade_partitioned(request):
         require(snapshot_memory_bytes(before['services']['worker']['mem_limit'])==4294967296,'UPGRADE_REQUIRES_EXISTING_FOUR_GIB_LIMIT')
         def save(p):
             tmp=SECURE/(receipt_path.name+'.tmp');private(tmp,json.dumps(p).encode());durable_replace(tmp,receipt_path)
+        # A failed preserved-data rehearsal has already stopped distribution and
+        # protected the data. Derive only the parser fix from that prepared image.
+        prior_backup=request.get('checkpointRepairBackup')
+        if not receipt_path.exists() and request.get('snapshotMemoryRepair') and prior_backup:
+            source_backup=Path(prior_backup)
+            require(source_backup.parent==BACKUPS and not source_backup.is_symlink() and source_backup.is_dir() and source_backup.stat().st_uid==os.geteuid() and source_backup.stat().st_mode&0o077==0,'CHECKPOINT_REPAIR_BACKUP_UNVERIFIED')
+            previous=[]
+            for rp in SECURE.glob('partitioned-upgrade-*.json'):
+                require(not rp.is_symlink() and rp.is_file() and rp.stat().st_uid==os.geteuid() and rp.stat().st_size<=1024*1024,'UPGRADE_RECEIPT_UNVERIFIED')
+                value=json.loads(rp.read_bytes())
+                if value.get('backup')==prior_backup and value.get('phase')=='stopped' and value.get('snapshotMemoryVerified') and not value.get('oomRestoreVerified'):previous.append(value)
+            require(len(previous)==1,'CHECKPOINT_REPAIR_SOURCE_NOT_UNIQUE')
+            old=previous[0];require(not any(w['running'] for w in states('worker')),'CHECKPOINT_REPAIR_REQUIRES_STOPPED_WORKER')
+            old_files={}
+            for name in files:
+                fp=source_backup/'context'/'overlay'/name
+                require(fp.is_file() and not fp.is_symlink(),'CHECKPOINT_REPAIR_SOURCE_UNVERIFIED');old_files[name]=fp.read_text()
+            require(hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old['digest'],'CHECKPOINT_REPAIR_SOURCE_DIGEST_MISMATCH')
+            changed={name for name in files if files[name]!=old_files[name]}
+            require(changed and changed<= {'apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts'},'CHECKPOINT_REPAIR_DIFF_NOT_ALLOWED')
+            image_info=json.loads(run(['docker','image','inspect',old['image']]))[0]
+            require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'CHECKPOINT_REPAIR_IMAGE_UNVERIFIED')
+            context=source_backup/('checkpoint-fix-'+digest[:24]);context.mkdir(mode=0o700,exist_ok=True)
+            for name in changed:
+                target=context/'overlay'/name;target.parent.mkdir(parents=True,exist_ok=True,mode=0o755);private(target,files[name].encode());os.chmod(target,0o644)
+            for folder in (context/'overlay').rglob('*'):
+                if folder.is_dir():os.chmod(folder,0o755)
+            os.chmod(context/'overlay',0o755)
+            image='adl-worker-partitioned:'+digest[:24]
+            private(context/'Dockerfile',('FROM '+image_info['Id']+'\nUSER root\nCOPY --chown=node:node overlay/ /app/\nLABEL eu.adl.partitioned.patch="'+digest+'"\nUSER node\n').encode())
+            stage='partitioned_upgrade.checkpoint_parser_image'
+            run(['docker','build','--network','none','--pull=false','-t',image,str(context)],timeout=240,log=source_backup/'checkpoint-fix-build.private.log')
+            progress={**old,'digest':digest,'image':image,'snapshotMemoryVerified':False,'oomRestoreVerified':False,'checkpointParserSourceDigest':old['digest']}
+            save(progress)
         if receipt_path.exists():
             require(receipt_path.is_file() and not receipt_path.is_symlink(),'UPGRADE_RECEIPT_UNVERIFIED');progress=json.loads(receipt_path.read_bytes());require(progress['digest']==digest,'UPGRADE_DIGEST_MISMATCH');backup=Path(progress['backup'])
             image_info=json.loads(run(['docker','image','inspect',progress['image']]))[0]
@@ -359,19 +395,34 @@ def upgrade_partitioned(request):
                     spool_hash=snapshot_file_hash(spool) if spool else None
                     if progress.get('preservedSpoolHash'):require(progress['preservedSpoolHash']==spool_hash,'PRESERVED_SPOOL_CHANGED_NO_START')
                     progress['preservedSpoolHash']=spool_hash;save(progress)
+                    rehearsal=backup/('rehearsal-'+digest[:24]);rehearsal.mkdir(mode=0o700,exist_ok=True)
+                    sources=[(backup/name,rehearsal/name,sha) for name,sha in progress.get('dataBackupHashes',{}).items()]
+                    if spool:sources.append((spool,rehearsal/spool.relative_to(directory),spool_hash))
+                    missing=sum(src.stat().st_size for src,dst,sha in sources if not dst.exists())
+                    require(shutil.disk_usage(backup).free>=missing+512*1024**2,'REHEARSAL_COPY_DISK_HEADROOM_INSUFFICIENT')
+                    for src,dst,sha in sources:
+                        require(src.is_file() and not src.is_symlink() and snapshot_file_hash(src)==sha,'REHEARSAL_SOURCE_HASH_MISMATCH')
+                        dst.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+                        if not dst.exists():
+                            shutil.copyfile(src,dst);os.chmod(dst,0o600)
+                            with dst.open('rb') as fd:os.fsync(fd.fileno())
+                        require(dst.is_file() and not dst.is_symlink() and snapshot_file_hash(dst)==sha,'REHEARSAL_COPY_HASH_MISMATCH')
+                    previous_log=backup/'oom-restore.private.log'
+                    archived_log=backup/('oom-restore-before-'+digest[:24]+'.private.log')
+                    if previous_log.exists() and not archived_log.exists():shutil.copyfile(previous_log,archived_log);os.chmod(archived_log,0o600)
                     spool_path='/recovery/'+str(spool.relative_to(directory)) if spool else None
                     code="import{restore}from'/app/apps/worker/src/persistence.ts';import{TradeState}from'/app/apps/worker/src/state.ts';import{walkSnapshot,convertSnapshotRow,fullSnapshotMemory}from'/app/apps/worker/src/full-snapshot.ts';import{writeJsonObject}from'/app/packages/feed-store/src/index.ts';import{open}from'node:fs/promises';const s=new TradeState();const r=await restore(s,'/recovery/trade-feed.json');let sourceSnapshotRehearsed=false,rows=0;const spool="+json.dumps(spool_path)+";if(spool){const ids=new Set();await walkSnapshot(spool,async raw=>{fullSnapshotMemory();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId))throw Error('duplicate fixture');ids.add(row.fixtureId);rows++;if(rows>50000)throw Error('fixture count limit')});s.beginPartitionedSnapshot('prematch');await walkSnapshot(spool,async raw=>{fullSnapshotMemory();s.apply('prematch',[{...convertSnapshotRow(raw),marketRecovery:true}],Date.now(),{source:'snapshot',receivedAt:Date.now()})});s.finishPartitionedSnapshot('prematch',ids);fullSnapshotMemory();const feed=s.feed(Date.now(),true,true),out=await open('/dev/null','w');try{await writeJsonObject(out,feed,s.availabilityBlocks())}finally{await out.close()}sourceSnapshotRehearsed=true;}console.log(JSON.stringify({operation:'offline.restore',rows:r.rows,sourceSnapshotRehearsed,snapshotRows:rows,rssBytes:process.memoryUsage().rss}));console.log('oom-checkpoint-restore-ok');"
                     stage='partitioned_upgrade.oom_restore'
                     emit(operation='cutover.aws',stage='partitioned_upgrade.oom_restore',status='running',readOnly=True,workerStarted=False,posnetChanged=False)
-                    output=run(['docker','run','--rm','--network','none','--memory','4g','--cpus','2','--read-only','--mount','type=bind,source='+str(directory)+',target=/recovery,readonly','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--max-old-space-size=2560','--import','tsx','--input-type=module','-e',code],timeout=780,log=backup/'oom-restore.private.log')
+                    output=run(['docker','run','--rm','--network','none','--memory','4g','--cpus','2','--read-only','--mount','type=bind,source='+str(rehearsal)+',target=/recovery,readonly','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--max-old-space-size=2560','--import','tsx','--input-type=module','-e',code],timeout=780,log=backup/'oom-restore.private.log')
                     require(b'oom-checkpoint-restore-ok' in output,'OOM_CHECKPOINT_RESTORE_FAILED_ORIGINALS_PRESERVED')
                     if spool:require(snapshot_file_hash(spool)==spool_hash,'PRESERVED_SPOOL_CHANGED_DURING_REHEARSAL')
-                    progress['oomRestoreVerified']=True;progress['preservedSpoolRehearsed']=spool is not None;save(progress)
+                    progress['oomRestoreVerified']=True;progress['rehearsalCopyVerified']=True;progress['preservedSpoolRehearsed']=spool is not None;save(progress)
             if not (backup/'migration.before.json').exists():private(backup/'migration.before.json',migration_receipt.read_bytes())
             require(snapshot_host_memory()>=6*1024**3,'HOST_HEADROOM_CHANGED_DURING_UPGRADE')
             if request.get('verifyOnly'):
                 require(request.get('snapshotMemoryRepair') and progress.get('oomRestoreVerified'),'INVALID_VERIFY_ONLY_PHASE')
-                emit(operation='cutover.aws',stage='partitioned_upgrade.persistence_verified',status='ok',offlineRestoreVerified=True,preservedSpoolRehearsed=progress.get('preservedSpoolRehearsed',False),inboxes=progress.get('inboxIntegrity'),workerStarted=False,backup=str(backup),posnetChanged=False);return 0
+                emit(operation='cutover.aws',stage='partitioned_upgrade.persistence_verified',status='ok',offlineRestoreVerified=True,rehearsalCopyVerified=progress.get('rehearsalCopyVerified',False),preservedSpoolRehearsed=progress.get('preservedSpoolRehearsed',False),inboxes=progress.get('inboxIntegrity'),workerStarted=False,backup=str(backup),posnetChanged=False);return 0
             overlay=SECURE/('compose.partitioned-'+digest[:24]+'.json');content=json.dumps({'services':{'worker':{'image':progress['image'],'environment':{'LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT':'true',**({'NODE_OPTIONS':'--max-old-space-size=2560'} if request.get('snapshotMemoryRepair') else {})}}}}).encode()
             if overlay.exists():require(overlay.read_bytes()==content,'UPGRADE_OVERLAY_CHANGED')
             else:private(overlay,content)

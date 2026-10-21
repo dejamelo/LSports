@@ -1,6 +1,6 @@
 import { validTrace, validMarketEvidence } from "./settlement-evidence.js";
 import { constants } from 'node:fs';
-import { copyFile, readFile, open, rename, mkdir, lstat } from 'node:fs/promises';
+import { copyFile, open, rename, mkdir, lstat } from 'node:fs/promises';
 import {getHeapStatistics} from 'node:v8';
 import {dirname} from 'node:path';
 import {walkSnapshot} from './full-snapshot.js';
@@ -56,8 +56,7 @@ export async function restore(state: TradeState, path: string) {
   let value: unknown;
   try {
     const metadata=await walkSnapshot(path,async()=>{},32*1024**2,'events') as {header?:unknown;mode?:unknown};
-    if(metadata.header!==undefined)value={mode:metadata.mode,events:[],workerCheckpoint:metadata.header};
-    else value=JSON.parse(await readFile(path,'utf8')); // Legacy projection only.
+    value={mode:metadata.mode,events:[],...(metadata.header!==undefined?{workerCheckpoint:metadata.header}:{})};
   } catch(error) {
     if((error as NodeJS.ErrnoException).code==='ENOENT')return {source:'missing',rows:0};
     throw error;
@@ -121,7 +120,10 @@ export async function restore(state: TradeState, path: string) {
       });
       rows++;
     };
-    for(const entry of saved.outright)restoreEntry(entry,false);
+    await walkSnapshot(path,async()=>{},32*1024**2,'events',async(entry,regular)=>{
+      if(regular&&saved.regularExternal===true)throw new Error('Conflicting embedded regular checkpoint; original preserved');
+      restoreEntry(entry,regular);
+    });
     if(saved.regularExternal===true){
       const sidePath=path+'.regular-checkpoint.json',info=await lstat(sidePath);
       if(!info.isFile()||info.isSymbolicLink()||info.size>2*1024**3)throw new Error('Private regular checkpoint identity guard; original preserved');
@@ -130,8 +132,9 @@ export async function restore(state: TradeState, path: string) {
   } else {
     // Migrate the previous UI-only projection. Preserve all participants and exposed markets;
     // provider-specific data absent from that old format cannot be reconstructed.
-    for (const event of value.events as EventFeed['events']) {
-      if (!object(event) || event.kind !== 'outright') continue;
+    await walkSnapshot(path,async raw=>{
+      const event=raw as EventFeed['events'][number];
+      if (!object(event) || event.kind !== 'outright') return;
       const match = typeof event.id === 'string' && /^(prematch|inplay):outright:(\d+):(\d+)$/.exec(event.id);
       if (!match || !validId(Number(match[2])) || !validId(Number(match[3])))
         throw new Error('Invalid legacy outright identity; original file preserved');
@@ -168,7 +171,7 @@ export async function restore(state: TradeState, path: string) {
           lastMarketMessageAt: d.lastMarketMessageAt };
       }
       rows++;
-    }
+    },32*1024**2,'events');
     // Preserve the original projection before its one-way migration. No overwrite of an older backup.
     try { await copyFile(path, `${path}.pre-checkpoint.bak`, constants.COPYFILE_EXCL); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }

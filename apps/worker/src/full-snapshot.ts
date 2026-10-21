@@ -35,19 +35,36 @@ async function* tokens(file:string,max:number){let primitive='',quoted=false,esc
   await yieldTurn();
  }if(quoted)fail('truncated_string');if(primitive)yield [primitive];
 }
-export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes,checkpoint?:'regular'|'events'){
+export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes,checkpoint?:'regular'|'events',onCheckpointRow?:(row:unknown,regular:boolean)=>Promise<void>){
  const it=tokens(file,limit)[Symbol.asyncIterator]();let batch:string[]=[],offset=0;
  const fill=async()=>{const next=await it.next();if(next.done)fail('truncated_json');batch=next.value as string[];offset=0;};
  const take=async()=>{if(offset>=batch.length)await fill();return batch[offset++];};
  const rawValue=async(first:string,max=limit)=>{let n=first.length;const pieces=[first];let depth=first==='{'||first==='['?1:0;
   while(depth){if(offset>=batch.length)await fill();while(offset<batch.length&&depth){const t=batch[offset++];n+=t.length;if(n>max)fail('item_size_limit');pieces.push(t);if(t==='{'||t==='[')depth++;if(t==='}'||t===']')depth--;if(depth>128)fail('nesting_limit');if(depth<0)fail('invalid_json');}}
   try{const text=pieces.join('');if(Buffer.byteLength(text)>max)fail('item_size_limit');return IdSafeJsonParser.parse(text);}catch{return fail('invalid_json');}};
+ // A persisted workerCheckpoint is an envelope, not a snapshot fixture.
+ // Bound each fixture independently, including legacy embedded regular rows.
+ const privateCheckpoint=async(first:string)=>{
+  if(first!=='{')fail('invalid_checkpoint_object');
+  const result:Record<string,unknown>={},seen=new Set<string>();let next=await take();
+  while(next!=='}'){
+   let key:unknown;try{key=JSON.parse(next);}catch{fail('invalid_root_key');}
+   if(typeof key!=='string'||key.length>64||seen.size>=64||seen.has(key as string))fail('duplicate_or_invalid_root_key');
+   seen.add(key as string);if(await take()!==':')fail('invalid_root_colon');const first=await take();
+   if(key==='regular'||key==='outright'){
+    if(first!=='[')fail('body_not_array');result[key]=[];let token=await take();
+    if(token!==']')for(;;){const row=await rawValue(token);await onCheckpointRow?.(row,key==='regular');token=await take();if(token===']')break;if(token!==',')fail('invalid_body_separator');token=await take();}
+   }else result[key as string]=await rawValue(first,64*1024);
+   next=await take();if(next==='}')break;if(next!==',')fail('invalid_root_separator');next=await take();if(next==='}')fail('trailing_comma');
+  }
+  return result;
+ };
  let header:unknown,body=false;const rootErrors:Record<string,unknown>={};const keys=new Set<string>();
  try{if(await take()!=='{')fail('root_not_object');let next=await take();while(next!=='}'){
   let key:unknown;try{key=JSON.parse(next);}catch{fail('invalid_root_key');}if(typeof key!=='string'||key.length>64||keys.size>=64||keys.has(key))fail('duplicate_or_invalid_root_key');keys.add(key as string);if(await take()!==':')fail('invalid_root_colon');
   let first=await take();if(key===(checkpoint||'Body')){
    body=true;if(first!=='[')fail('body_not_array');first=await take();if(first!==']')for(;;){await onRow(await rawValue(first));first=await take();if(first===']')break;if(first!==',')fail('invalid_body_separator');first=await take();}
-  }else{const value=await rawValue(first,checkpoint?limit:64*1024);if(key===(checkpoint==='regular'?'version':checkpoint==='events'?'workerCheckpoint':'Header'))header=value;else if(checkpoint||['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
+  }else{const value=checkpoint==='events'&&key==='workerCheckpoint'?await privateCheckpoint(first):await rawValue(first,checkpoint?limit:64*1024);if(key===(checkpoint==='regular'?'version':checkpoint==='events'?'workerCheckpoint':'Header'))header=value;else if(checkpoint||['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
   next=await take();if(next==='}')break;if(next!==',')fail('invalid_root_separator');next=await take();if(next==='}')fail('trailing_comma');
  }if(offset<batch.length||!(await it.next()).done)fail('trailing_json');
  if(checkpoint){if(!body||checkpoint==='regular'&&header!==1||checkpoint==='events'&&rootErrors.mode!=='connected')throw Error('Invalid checkpoint envelope');return {header,mode:rootErrors.mode};}

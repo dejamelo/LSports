@@ -1,0 +1,67 @@
+{
+  "awsValidated": false,
+  "realProtectedBackupTestedHere": false,
+  "constrainedContainer": {
+    "memoryBytes": 4294967296,
+    "swapDisabled": true,
+    "cpus": 2,
+    "v8HeapMiB": 2560,
+    "network": "none"
+  },
+  "load": {
+    "cgroupPeakBytes": 3885125632,
+    "persistenceMaxMs": 41819,
+    "persistenceMeanMs": 3771,
+    "test": "durable_ingress_load",
+    "status": "ok",
+    "snapshotBytes": 516000000,
+    "syntheticPaddingBytes": 406786403,
+    "structuredJsonBytes": 109213597,
+    "snapshotStages": [
+      "waiting_http",
+      "download",
+      "validate",
+      "apply",
+      "complete"
+    ],
+    "sourceRate": 69,
+    "messageBytes": 8518,
+    "snapshotMarkets": 130632,
+    "snapshotSelections": 1045056,
+    "mainMaxEventLoopDelayMs": 10050,
+    "burstMessages": 3000,
+    "durationMs": 180004.291782,
+    "messages": 15420,
+    "received": 15420,
+    "acknowledged": 15420,
+    "processed": 15420,
+    "checkpointed": 15420,
+    "peakBacklog": 8369,
+    "maxRss": 2737885184,
+    "maxIngressEventLoopDelayMs": 511,
+    "writes": 59,
+    "restartReplayRows": 0,
+    "replayTested": false,
+    "finalBacklog": 0,
+    "awsValidated": false
+  },
+  "coldReplay": {
+    "test": "cold_dense_replay",
+    "status": "ok",
+    "rows": 16329,
+    "appliedRows": 16329,
+    "replayedRawRows": 2,
+    "duplicateRows": 1,
+    "checkpointed": 2,
+    "writes": 8,
+    "cgroupPeakBytes": 2963333120,
+    "awsValidated": false,
+    "providerRequests": 0,
+    "snapshotSource": "synthetic_validated_rows_not_supplier_HTTP"
+  },
+  "limitations": [
+    "Synthetic snapshot has 109213597 structured JSON bytes and 406786403 padding bytes; not a preserved supplier response.",
+    "Real backup rehearsal is mandatory remotely before activation.",
+    "Main event loop peak 10050 ms and persistence peak 41819 ms remain; this test does not prove 30-minute broker stability."
+  ]
+}

@@ -201,3 +201,23 @@ test('incremental private checkpoint and projection preserve full rows; truncate
   assert.equal(await readFile(path+'.regular-checkpoint.json','utf8'),original.slice(0,-2));
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('embedded checkpoint larger than record cap streams fixtures and commits only a fully valid document', {timeout:120000}, async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-embedded-')),path=join(dir,'feed.json');
+ try{
+  const {open,stat}=await import('node:fs/promises');const {createHash}=await import('node:crypto');
+  const {createReadStream}=await import('node:fs');
+  const hash=async()=>{const h=createHash('sha256');for await(const chunk of createReadStream(path))h.update(chunk);return h.digest('hex');};
+  const file=await open(path,'w');
+  try{
+   await file.writeFile('{"mode":"connected","events":[],"workerCheckpoint":{"version":1,"outright":[],"regular":[');
+   for(let i=0;i<140;i++)await file.writeFile((i?',':'')+JSON.stringify({lane:'prematch',fixtureId:i+1,fixture:{value:{name:'x'.repeat(256*1024)},at:1700000000000},markets:[],marketAt:[],betAt:[]}));
+   await file.writeFile(']}}');
+  }finally{await file.close();}
+  assert.ok((await stat(path)).size>32*1024**2);const before=await hash();
+  const state=new TradeState();assert.equal((await restore(state,path)).rows,140);
+  assert.equal(state.rows.prematch.size,140);assert.ok([...state.rows.prematch.values()].every(r=>r.restored));assert.equal(await hash(),before);
+  await writeFile(path,',"bad":true}',{flag:'a'});const sentinel=new TradeState();
+  await assert.rejects(restore(sentinel,path));assert.equal(sentinel.rows.prematch.size,0);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

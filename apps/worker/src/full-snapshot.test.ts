@@ -91,3 +91,20 @@ test('dense tokens cross chunks while durable consumer progress and timer turns 
  const clock=setInterval(()=>timerTurns++,1);const consumer=setInterval(()=>{chain=chain.then(async()=>{const delivery=++received;await save();assert.ok(durable>=delivery);assert.ok(JSON.parse(await readFile(join(dir,'journal'),'utf8')).captured>=delivery);acks++;});},5);
  try{let rows=0;await walkSnapshot(file,async raw=>{convertSnapshotRow(raw);rows++;});assert.equal(rows,200);assert.ok(timerTurns>1);clearInterval(consumer);await chain;assert.ok(acks>0);}finally{clearInterval(clock);clearInterval(consumer);await chain;await rm(dir,{recursive:true,force:true});}
 });
+
+test('checkpoint envelope is streamed by nested fixture; per-fixture and malformed-envelope guards remain',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-private-envelope-')),file=join(dir,'body');
+ try{
+  const fixture={fixtureId:1,padding:'x'.repeat(80)};
+  const document={mode:'connected',events:[],workerCheckpoint:{version:1,regular:[fixture,fixture,fixture],outright:[fixture]}};
+  await writeFile(file,JSON.stringify(document));let regular=0,outright=0;
+  const metadata=await walkSnapshot(file,async()=>{},128,'events',async(_,r)=>{r?regular++:outright++;}) as any;
+  assert.equal(regular,3);assert.equal(outright,1);assert.deepEqual(metadata.header,{version:1,regular:[],outright:[]});
+  await writeFile(file,JSON.stringify({...document,workerCheckpoint:{...document.workerCheckpoint,regular:[{padding:'x'.repeat(300)}]}}));
+  await assert.rejects(walkSnapshot(file,async()=>{},128,'events'));
+  for(const workerCheckpoint of ['{"version":1,"outright":[],"regular":[],"regular":[]}','{"version":1,"outright":[],"regular":{}}','{"version":1,"outright":[],"regular":[],}']){
+   await writeFile(file,'{"mode":"connected","events":[],"workerCheckpoint":'+workerCheckpoint+'}');
+   await assert.rejects(walkSnapshot(file,async()=>{},128,'events'));
+  }
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
