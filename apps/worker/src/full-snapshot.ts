@@ -1,6 +1,7 @@
 /** Ordinary vendor HTTP JSON, streamed to a private bounded disk spool, NOT a new vendor streaming API.
  * Validate the entire envelope before applying any rows. Replay one SDK-converted fixture at a time.
  */
+import {createHash} from 'node:crypto';
 import {request as httpRequest} from 'node:http';
 import {request as httpsRequest} from 'node:https';
 import {createReadStream,createWriteStream} from 'node:fs';
@@ -149,4 +150,22 @@ export async function fullSnapshot(options:{timestamp?:number;url:string;credent
   progress('complete');
   return {ids,rows,bytes,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString()};
  }catch(error){if(timedOut)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',timeoutMs:limits.totalMs,message:'Tiempo máximo de descarga snapshot excedido; baseline bloqueado.'});if(error instanceof OperationError&&httpStatus!==undefined&&error.diagnostic.httpStatus===undefined)throw new OperationError({...error.diagnostic,httpStatus});throw error;}finally{clearTimeout(timer);abort.abort();await rm(dir,{recursive:true,force:true});}
+}
+
+// Run in a fresh offline process: no restored TradeState or projected graph is
+// needed to check the complete generated document against the writer's receipt.
+export async function verifyProjectionFile(path:string,expected:{sha256:string;bytes:number;rows:number;eventSha256:string}){
+ if(!/^[a-f0-9]{64}$/.test(expected.sha256)||!/^[a-f0-9]{64}$/.test(expected.eventSha256)||!Number.isSafeInteger(expected.bytes)||expected.bytes<1||!Number.isSafeInteger(expected.rows)||expected.rows<0)throw Error('projection_receipt_invalid');
+ fullSnapshotMemory();
+ const hash=createHash('sha256'),events=createHash('sha256');let bytes=0,rows=0;
+ for await(const chunk of createReadStream(path,{highWaterMark:64*1024})){hash.update(chunk);bytes+=chunk.length;}
+ if(bytes!==expected.bytes||hash.digest('hex')!==expected.sha256)throw Error('projection_readback_digest_mismatch');
+ await walkSnapshot(path,async raw=>{
+  const event=raw as {id?:unknown;markets?:unknown;selections?:unknown};
+  if(typeof event.id!=='string'||!Array.isArray(event.markets)||!Array.isArray(event.selections))throw Error('projection_readback_invalid');
+  events.update(JSON.stringify(event)+'\n');rows++;
+ },undefined,'events');
+ if(events.digest('hex')!==expected.eventSha256)throw Error('projection_readback_content_mismatch');
+ if(rows!==expected.rows)throw Error('projection_readback_count_mismatch');
+ return {rows,bytes,sha256:expected.sha256,integrityVerified:true};
 }

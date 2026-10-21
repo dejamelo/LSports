@@ -4,6 +4,8 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_readback_failure_resumes_without_repeating_serialization(self):
+  self.test_prepare_activate_reuse_preserves_every_non_worker_field(oom=True,readback_fails=True)
  @unittest.skipUnless(os.environ.get('ADL_OFFLINE_PROOF_IMAGE'),'opt-in isolated Docker proof')
  def test_real_docker_proof_and_both_previous_harness_failures(self):
   image=os.environ['ADL_OFFLINE_PROOF_IMAGE'];repo=HERE.resolve().parents[1]
@@ -27,7 +29,8 @@ class Upgrade(unittest.TestCase):
    log=backup/'durable-ingress-test.private.log';log.write_bytes(b'PRIVATE_SECRET ERR_INPUT_TYPE_NOT_ALLOWED INBOX_CAPACITY_EXCEEDED')
    summary=NS['durable_ingress_log_summary'](backup)
    self.assertEqual(summary['signals'],['worker_inherited_input_type','inbox_disk_reserve_unavailable']);self.assertNotIn('PRIVATE_SECRET',json.dumps(summary))
- def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False,distribution=False,full=False,supplier=False,nullable=False,throughput=False,spool=False,parser=False,durable=False,oom=False,read_access_fails=False):
+ def test_prepare_activate_reuse_preserves_every_non_worker_field(self,resume_stopped=False,distribution=False,full=False,supplier=False,nullable=False,throughput=False,spool=False,parser=False,durable=False,oom=False,read_access_fails=False,readback_fails=False):
+  readback_attempts=2 if readback_fails else 1
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();releases=root/'releases';release=releases/('a'*40);release.mkdir(parents=True);volume=root/'volume';volume.mkdir()
    evidence=backups/'adl-snapshot-shape-example';evidence.mkdir(mode=0o700);raw=json.dumps({'FixtureId':20563979,'Fixture':{'Status':1},'Markets':None}).encode();(evidence/'rejected-row.private.json').write_bytes(raw);(evidence/'rejected-row.private.json').chmod(0o600);(evidence/'report.json').write_text(json.dumps({'rawRowSha256':hashlib.sha256(raw).hexdigest(),'rawRowBytes':len(raw),'rejection':{'path':'Markets','actualType':'null'},'sdk':{'conversion':'succeeded','markets':{'type':'null'}}}));(evidence/'report.json').chmod(0o600)
@@ -48,6 +51,9 @@ class Upgrade(unittest.TestCase):
     if args[:3]==['docker','image','inspect']:return json.dumps([images[args[3]]]).encode()
     if args[:2]==['docker','tag']:images[args[3]]=images['base'];return b''
     if args[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in args):return json.dumps({'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000],'opened':not read_access_fails,'readBytes':0 if read_access_fails else 1,'code':'EACCES' if read_access_fails else None,'chain':[]}).encode()
+    if args[:2]==['docker','run'] and readback_fails and any('verifyProjectionFile' in str(v) for v in args):raise subprocess.CalledProcessError(1,args)
+    if args[:2]==['docker','run'] and any('projection-serialize-ok' in str(v) for v in args):
+     target=next(v for v in args if 'target=/output' in str(v));folder=Path(target.split('source=')[1].split(',target=')[0]);(folder/'receipt.json').write_text('{}');return b'projection-serialize-ok'
     if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok throughput-offline-ok spool-memory-offline-ok snapshot-throughput-offline-ok planned-distribution-stop-ok durable-ingress-offline-ok snapshot-memory-offline-ok oom-checkpoint-restore-ok' if '--input-type=module' in args or any(str(a).endswith('-proof.mjs') for a in args) else json.dumps(hashes).encode()
     if args[:2]==['docker','build']:images[image]={'Id':'sha256:'+('c'*64),'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':digest}}};return b''
     if args[:2]==['docker','inspect']:
@@ -57,8 +63,8 @@ class Upgrade(unittest.TestCase):
     if 'up' in args:running=True;selected=image;return b''
     if 'create' in args:running=False;selected='base';return b''
     raise AssertionError('Unexpected operation')
-   keys=('SECURE','BACKUPS','RELEASES','run','model','states','control_status','snapshot_host_memory','shutil','os','verify_oom_inboxes','archive_oom_locks');old={k:NS.get(k) for k in keys}
-   NS.update(verify_oom_inboxes=lambda directory:[{'lane':'prematch','pendingRows':13526}],archive_oom_locks=lambda *args:None,SECURE=secure,BACKUPS=backups,RELEASES=releases,run=run,model=model,states=states,control_status=lambda:200,snapshot_host_memory=lambda:12*1024**3,shutil=types.SimpleNamespace(**{**NS['shutil'].__dict__,'disk_usage':lambda _:types.SimpleNamespace(free=10*1024**3)}),os=types.SimpleNamespace(**{**os.__dict__,'geteuid':lambda:0}))
+   keys=('SECURE','BACKUPS','RELEASES','run','model','states','control_status','snapshot_host_memory','shutil','os','verify_oom_inboxes','archive_oom_locks','oom_restore_log_summary');old={k:NS.get(k) for k in keys}
+   NS.update(oom_restore_log_summary=lambda backup:{'present':False},verify_oom_inboxes=lambda directory:[{'lane':'prematch','pendingRows':13526}],archive_oom_locks=lambda *args:None,SECURE=secure,BACKUPS=backups,RELEASES=releases,run=run,model=model,states=states,control_status=lambda:200,snapshot_host_memory=lambda:12*1024**3,shutil=types.SimpleNamespace(**{**NS['shutil'].__dict__,'disk_usage':lambda _:types.SimpleNamespace(free=10*1024**3)}),os=types.SimpleNamespace(**{**os.__dict__,'geteuid':lambda:0}))
    def invoke(phase,base_hashes=hashes,verify_only=False):
     out=io.StringIO();request={'phase':phase,'files':files,'baseHashes':base_hashes,'handoff':handoff,'freshAuditAt':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')}
     if distribution:request['fixCommit']='2aa06f7'
@@ -83,12 +89,14 @@ class Upgrade(unittest.TestCase):
     if resume_stopped:
      progress_file=next(secure.glob('partitioned-upgrade-*.json'));progress=json.loads(progress_file.read_bytes());progress['phase']='stop_requested';progress_file.write_text(json.dumps(progress));running=False
     if oom:
+     if readback_fails:
+      code,failed=invoke('activate',verify_only=True);self.assertEqual(code,2);self.assertEqual(failed['stage'],'partitioned_upgrade.projection_readback');self.assertFalse(running);self.assertIn('offlineRehearsal',failed);readback_fails=False
      code,verified=invoke('activate',verify_only=True)
      if read_access_fails:
       self.assertEqual(code,2);self.assertEqual(verified['reason'],'REHEARSAL_READ_ACCESS_NOT_VERIFIED_NO_START');self.assertFalse(any('oom-checkpoint-restore-ok' in str(a) for c in calls for a in c));self.assertFalse(any('up' in c for c in calls));return
-     self.assertEqual(code,0,verified);self.assertTrue(verified['offlineRestoreVerified']);self.assertFalse(running);self.assertFalse(any('up' in c for c in calls));self.assertEqual(len([c for c in calls if any('oom-checkpoint-restore-ok' in str(a) for a in c)]),1)
+     self.assertEqual(code,0,verified);self.assertTrue(verified['offlineRestoreVerified']);self.assertFalse(running);self.assertFalse(any('up' in c for c in calls));self.assertEqual(len([c for c in calls if any('oom-checkpoint-restore-ok' in str(a) for a in c)]),readback_attempts)
     code,result=invoke('activate');self.assertEqual(code,0,result);self.assertTrue(running);self.assertEqual(selected,image);
-    if oom:self.assertEqual(len([c for c in calls if any('oom-checkpoint-restore-ok' in str(a) for a in c)]),1)
+    if oom:self.assertEqual(len([c for c in calls if any('oom-checkpoint-restore-ok' in str(a) for a in c)]),readback_attempts)
     self.assertEqual(journal.read_bytes(),journal_before);self.assertEqual(regular.read_bytes(),regular_before);self.assertEqual((Path(result['backup'])/regular.name).read_bytes(),regular_before)
     if full and not oom:
      stop=next(i for i,c in enumerate(calls) if c[:2]==['docker','run'] and any('planned-distribution-stop-ok' in str(x) for x in c))
@@ -98,15 +106,17 @@ class Upgrade(unittest.TestCase):
     self.assertEqual(model(NS['partition_base'](after))['services']['worker']['environment']['LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'],'128');self.assertEqual(json.loads(migration.read_bytes())['journals'],['preserved'])
     code,result=invoke('prepare');self.assertEqual(code,0,result);code,result=invoke('activate');self.assertEqual(code,0,result);self.assertTrue(result['reused']);
     if oom:
-     rehearsal_calls=[c for c in calls if c[:2]==['docker','run'] and any('oom-checkpoint-restore-ok' in str(v) for v in c)]
+     rehearsal_calls=[c for c in calls if c[:2]==['docker','run'] and any('projection-serialize-ok' in str(v) for v in c)]
      self.assertEqual(len(rehearsal_calls),1)
      read_calls=[c for c in calls if c[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in c)]
-     self.assertEqual(len(read_calls),2)
+     self.assertEqual(len(read_calls),2*readback_attempts)
      prefix=rehearsal_calls[0][:rehearsal_calls[0].index('--max-old-space-size=2560')]
      out_index=next(i for i,v in enumerate(prefix) if 'target=/output' in v)
      self.assertEqual(prefix[out_index-1],'--mount');del prefix[out_index-1:out_index+1]
      self.assertEqual(read_calls[-1][:-2],prefix)
-     self.assertTrue(any('projection.readback' in str(v) for v in rehearsal_calls[0]))
+     readbacks=[c for c in calls if c[:2]==['docker','run'] and any('verifyProjectionFile' in str(v) for v in c)]
+     self.assertEqual(len(readbacks),readback_attempts);self.assertTrue(any('target=/output,readonly' in str(v) for v in readbacks[0]))
+     self.assertFalse(any('const s=new TradeState' in str(v) for v in readbacks[0]))
      self.assertEqual(read_calls[-1][read_calls[-1].index('--user')+1],'node')
      self.assertTrue(any('rehearsal-'+digest[:24]+',target=/recovery,readonly' in str(v) for v in rehearsal_calls[0]))
      self.assertEqual((Path(json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_bytes())['backup'])/('rehearsal-'+digest[:24])/'trade-feed.json').read_bytes(),(volume/'trade-feed.json').read_bytes())

@@ -72,3 +72,41 @@ is separately required by the real-copy deployment gate.
 The exact strengthened executor rehearsal also passed full event-content comparison:
 318745 ms; max RSS 2248437760 bytes; sampled heap peak 1920506664 bytes.
 This used the same 4 GiB/2560 MiB limits and no provider network access.
+
+## Readback repair after 253fd05
+
+The real copy passed serialization but hit the preventive memory guard during
+readback. The guard is unchanged: `32 MiB * 8 + 64 MiB = 335,544,320 bytes` of
+headroom, where headroom is `floor(min(V8 heap limit - heap used, available memory))`.
+The reported maximum RSS cannot establish either operand at the time of rejection.
+
+The old readback was per-fixture, not a retained second complete projection. It
+nevertheless kept the entire restored source state and captured row maps alive while
+parsing the output and reconstructing expected events in that same process. A large
+real state can leave insufficient room for the guard's reservation even after the
+whole-projection allocation was removed.
+
+Now the restore/apply/serialize container exits before the readback container starts.
+The second container uses the same immutable image, non-root user, 4 GiB/2560 MiB
+limits and guard, with both input and generated output read-only. It has no TradeState.
+The writer records a streaming SHA-256 of all encoded bytes and a separate canonical
+source-event SHA-256 (one bounded event at a time, before incremental encoding).
+The new verifier hashes every file byte, validates all JSON including metadata, parses
+one event at a time, recomputes the canonical event digest and checks total event count.
+This checks all event contents without rebuilding the resident source state or retaining
+an expected event collection. Corruption, valid-but-different event content and wrong
+counts are rejected. The receipt itself is hashed in protected progress before readback.
+
+Serialization verification is resumable: if readback fails, its next attempt reuses the
+verified receipt/output for the same source digest instead of repeating restore/apply.
+Separate exclusive private logs and a current-attempt pointer identify each process.
+Exact budget operands and limiting factor are emitted before the unchanged guard.
+Only both successful stages permit worker activation. No memory cap was raised.
+
+The new complete two-container cycle passed locally on the dense synthetic fixture:
+serialization max RSS 2317795328 bytes;
+readback max RSS 289718272 bytes; 16329 events and
+915036878 output bytes verified, including canonical source-event digest.
+Before readback, guard budget was 335544320 bytes and measured headroom
+was 2861162976 bytes (limiting factor: heap).
+No AWS real-copy validation has been claimed.

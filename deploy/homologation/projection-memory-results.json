@@ -56,5 +56,43 @@
     "replayRows": 2,
     "awsValidated": false,
     "limit": "Separate small-snapshot smoke, not the dense 516MB container run."
+  },
+  "isolatedReadbackRepair": {
+    "awsValidated": false,
+    "source": "same_synthetic_dense_fixture",
+    "serializationMaxRSSBytes": 2317795328,
+    "serializationElapsedMs": 286989,
+    "readback": {
+      "operation": "offline.projection_readback",
+      "rows": 16329,
+      "bytes": 915036878,
+      "sha256": "ee7664691fa6f58a5c94ef9bc6616762230366d2ec0bd55c2ab460eacae9cc8e",
+      "integrityVerified": true,
+      "rssBytes": 289718272,
+      "maxRSSBytes": 289718272
+    },
+    "budget": {
+      "operation": "offline.memory_budget",
+      "stage": "projection.readback",
+      "lane": "prematch",
+      "limitBytes": 33554432,
+      "budgetBytes": 335544320,
+      "headroomBytes": 2861162976,
+      "memory": {
+        "heapLimitBytes": 2885681152,
+        "heapUsedBytes": 24518176,
+        "heapHeadroomBytes": 2861162976,
+        "availableMemoryBytes": 4216782848,
+        "limitingFactor": "heap"
+      },
+      "allowed": true
+    },
+    "containerLimitBytes": 4294967296,
+    "nodeMaxOldSpaceMiB": 2560,
+    "sequentialContainers": true,
+    "canonicalEventDigestVerified": true,
+    "executorTestsPassed": 15,
+    "executorDockerOptInSkipped": 1,
+    "corruptionCountAndContentMismatchTestsPassed": true
   }
 }

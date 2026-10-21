@@ -50,3 +50,18 @@ test('outright diagnostics and version recovery remain identical in streamed pro
  try{await createPublisher(path)(s.projection(now));assert.deepEqual(JSON.parse(await readFile(path,'utf8')),JSON.parse(JSON.stringify(s.feed(now))));}
  finally{await rm(dir,{recursive:true,force:true});}
 });
+test('streamed receipt verifies all bytes and rejects corruption/count mismatch',async()=>{
+ const {open,writeFile}=await import('node:fs/promises');
+ const {writeJsonObject}=await import('@lsports/feed-store');
+ const {verifyProjectionFile}=await import('./full-snapshot.js');
+ const dir=await mkdtemp(join(tmpdir(),'projection-receipt-')),path=join(dir,'feed.json');
+ try{
+  const state=new TradeState();state.apply('prematch',[{fixtureId:1,fixture:{status:1},markets:[]}],1700000000000);
+  const f=await open(path,'w');const receipt=await writeJsonObject(f,state.projection());await f.close();
+  assert.equal((await verifyProjectionFile(path,{...receipt,rows:1})).rows,1);
+  await assert.rejects(verifyProjectionFile(path,{...receipt,rows:2}),/count_mismatch/);
+  await assert.rejects(verifyProjectionFile(path,{...receipt,rows:1,eventSha256:'0'.repeat(64)}),/content_mismatch/);
+  const body=await readFile(path,'utf8');await writeFile(path,body.replace('Evento 1','Evento 2'));
+  await assert.rejects(verifyProjectionFile(path,{...receipt,rows:1}),/digest_mismatch/);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
