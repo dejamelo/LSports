@@ -63,3 +63,13 @@ build argv. Arbitrary log text, registry addresses and credentials are excluded.
 The failed context remains intact; the fixed context uses `checkpoint-fix-tagged-*`
 and checks existing file contents on retry. No worker or distribution operation
 is performed by this report. Read the actual remote log before resuming.
+
+The subsequent protected report confirmed source resolution of
+`docker.io/library/sha256` for the failed AWS attempt. The resume additionally
+pins `docker build --builder default` so the build uses the daemon-local image
+store instead of an externally selected buildx builder. The local build of the
+two parser files using this exact builder/flags completed. Import smoke passed
+with the current feed-store/contracts dependencies mounted; this is not an AWS
+restoration proof. The previous build log is archived before retry. Preparation
+emits the verified base image ID, local tag and builder without credentials.
+The copied-backup restore remains the mandatory next remote gate before start.

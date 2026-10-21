@@ -92,7 +92,7 @@ def checkpoint_build_log_summary(backup):
         dockerfile=directory/'Dockerfile';require(dockerfile.is_file() and not dockerfile.is_symlink() and dockerfile.stat().st_size<4096,'BUILD_DOCKERFILE_UNVERIFIED')
         source=dockerfile.read_text();first=source.splitlines()[0] if source else ''
         match=re.fullmatch(r'FROM (sha256:[0-9a-f]{64}|adl-partition-base:[0-9a-f]{64})',first)
-        contexts.append({'context':str(directory),'dockerfileSha256':hashlib.sha256(source.encode()).hexdigest(),'baseReference':match[1] if match else 'unrecognized_not_printed','command':['docker','build','--network','none','--pull=false','-t','adl-worker-partitioned:'+directory.name[-24:],str(directory)]})
+        contexts.append({'context':str(directory),'dockerfileSha256':hashlib.sha256(source.encode()).hexdigest(),'baseReference':match[1] if match else 'unrecognized_not_printed','command':['docker','build',*(['--builder','default'] if 'tagged-' in directory.name else []),'--network','none','--pull=false','-t','adl-worker-partitioned:'+directory.name[-24:],str(directory)]})
     return {'present':True,'stage':'partitioned_upgrade.checkpoint_parser_image','logBytes':path.stat().st_size,'tailTruncated':path.stat().st_size>128*1024,'records':records[-12:],'recognizedError':bool(records),'contexts':contexts[-4:],'privateLogSha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False,'readOnly':True}
 
 def preserved_rehearsal_report(expected_backup):
@@ -217,7 +217,16 @@ def upgrade_partitioned(request):
             if target.exists():require(target.is_file() and not target.is_symlink() and target.read_bytes()==dockerfile,'CHECKPOINT_REPAIR_DOCKERFILE_CHANGED')
             else:private(target,dockerfile)
             stage='partitioned_upgrade.checkpoint_parser_image'
-            run(['docker','build','--network','none','--pull=false','-t',image,str(context)],timeout=240,log=source_backup/'checkpoint-fix-build.private.log')
+            log=source_backup/'checkpoint-fix-build.private.log'
+            archived=source_backup/'checkpoint-fix-build.before-tagged.private.log'
+            if log.exists() and not archived.exists():
+                require(log.is_file() and not log.is_symlink() and log.stat().st_uid==os.geteuid(),'BUILD_LOG_NOT_PROTECTED')
+                shutil.copyfile(log,archived);os.chmod(archived,0o600)
+                with archived.open('rb') as fd:os.fsync(fd.fileno())
+            emit(operation='cutover.aws',stage='partitioned_upgrade.checkpoint_parser_image.preflight',status='collected',baseImageId=image_info['Id'],baseReference=tag,builder='default',pull=False,workerStarted=False,posnetChanged=False)
+            # The default Docker driver shares this daemon's local image store;
+            # an externally selected buildx builder may not have the prepared base.
+            run(['docker','build','--builder','default','--network','none','--pull=false','-t',image,str(context)],timeout=240,log=log)
             progress={**old,'digest':digest,'image':image,'snapshotMemoryVerified':False,'oomRestoreVerified':False,'checkpointParserSourceDigest':old['digest']}
             save(progress)
         if receipt_path.exists():

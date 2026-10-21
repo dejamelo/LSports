@@ -129,6 +129,8 @@ class Upgrade(unittest.TestCase):
     self.assertEqual(code,0,out.getvalue());result=json.loads(out.getvalue().splitlines()[-1]);self.assertEqual(result['backup'],str(backup));self.assertEqual(result['image'],image)
     new=json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_text());self.assertEqual(new['phase'],'stopped');self.assertTrue(new['supplierStoppedBeforeConsumer']);self.assertEqual(new['dataBackupHashes'],proof['dataBackupHashes']);self.assertFalse(new['oomRestoreVerified']);self.assertEqual(json.loads(receipt.read_text()),proof)
     self.assertEqual(len([c for c in calls if c[:2]==['docker','build']]),1);self.assertFalse(any('up' in c or 'kill' in c or 'stop' in c for c in calls))
+    build=next(c for c in calls if c[:2]==['docker','build']);self.assertEqual(build[2:4],['--builder','default'])
+    dockerfile=Path(build[-1])/'Dockerfile';self.assertTrue(dockerfile.read_text().startswith('FROM adl-partition-base:'));self.assertNotIn('FROM sha256:',dockerfile.read_text())
    finally:NS.update(old)
  def test_confirmed_oom_resume_backs_up_and_validates_without_signalling_dead_worker(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True,throughput=True,spool=True,parser=True,durable=True,oom=True)
  def test_durable_ingress_image_gate_preserves_single_activation_and_rollback(self):self.test_prepare_activate_reuse_preserves_every_non_worker_field(full=True,distribution=True,supplier=True,nullable=True,throughput=True,spool=True,parser=True,durable=True)
