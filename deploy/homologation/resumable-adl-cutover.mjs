@@ -47,6 +47,10 @@ async function helperPreflightReport(stage){
  emit({stage:'helper_preflight_report',status:'collected',readOnly:true,providerRequests:0,workerRestarted:false,ledgerChanged:false,posnetChanged:false});
 }
 async function protectedJson(file){const info=await fs.lstat(file);if(!info.isFile()||info.isSymbolicLink()||info.uid!==process.getuid()||(info.mode&0o077)||info.size>2*1024*1024)throw Error('PROGRESS_FILE_UNVERIFIED');return JSON.parse(await fs.readFile(file,'utf8'));}
+export function startupFailure(error){
+ const reason=/^[A-Z][A-Z0-9_]{2,120}$/.test(error.message||'')?error.message:'PRIVATE_OPERATION_FAILED';
+ return {reason,exceptionType:['Error','TypeError','SyntaxError','RangeError'].includes(error.name)?error.name:'Error',...( /^[A-Z][A-Z0-9_]{1,40}$/.test(error.code||'')?{errorCode:error.code}:{}),...( ['mkdir','lstat','open','read','write','rename','listen'].includes(error.syscall)?{syscall:error.syscall}:{})};
+}
 export function recoveryMode(mode){
  const snapshotMemoryRepair=['--snapshot-memory-repair','--snapshot-memory-rollback'].includes(mode);
  return {snapshotMemoryRepair,durableMode:mode==='--durable-ingress-repair'||mode==='--durable-ingress-rollback'||snapshotMemoryRepair,durableRollback:mode==='--durable-ingress-rollback'||mode==='--snapshot-memory-rollback'};
@@ -59,14 +63,14 @@ export async function run(args){
   if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--worker-exit-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--feed-validation-resume','--recovery-progress','--pipeline-report','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   if(args[4]==='--helper-preflight-report'){stage='remote_consumer_gate';await helperPreflightReport(stage);return;}
-  lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
-  const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
+  stage='executor_lease';lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
+  stage='progress_directory';const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
   if(directory.isSymbolicLink()||!directory.isDirectory()||directory.uid!==process.getuid()||(directory.mode&0o077))throw Error('PROGRESS_DIRECTORY_NOT_PROTECTED');
   progress=path.join(folder,`execution-${pid}-${parent}.json`);
-  try{ledger=await protectedJson(progress);}catch(error){if(error.code!=='ENOENT')throw error;ledger={version:1,ownerPid:Number(pid),parentPid:Number(parent),steps:{},authorization:'Explicit user approval: non-cooperative termination of verified worker after protected persisted-state backup; no SIGKILL; migrate to AWS within existing budget.'};}
+  stage='progress_load';try{ledger=await protectedJson(progress);}catch(error){if(error.code!=='ENOENT')throw error;ledger={version:1,ownerPid:Number(pid),parentPid:Number(parent),steps:{},authorization:'Explicit user approval: non-cooperative termination of verified worker after protected persisted-state backup; no SIGKILL; migrate to AWS within existing budget.'};}
   if(ledger.version!==1||ledger.ownerPid!==Number(pid)||ledger.parentPid!==Number(parent))throw Error('PROGRESS_IDENTITY_MISMATCH');
   save=async()=>{const tmp=progress+'.'+process.pid+'.tmp';const file=await fs.open(tmp,'wx',0o600);try{await file.writeFile(JSON.stringify(ledger));await file.sync();}finally{await file.close();}await fs.rename(tmp,progress);};
-  if(args[4]!=='--worker-exit-report'){
+  stage='executor_revision';if(args[4]!=='--worker-exit-report'){
   ledger.lastExecutorCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();if(!ledger.initialExecutorCommit)ledger.initialExecutorCommit=ledger.lastExecutorCommit;
   await save();
   }
@@ -325,8 +329,8 @@ export async function run(args){
   }
   stage='feed_validation';await validateFeeds(remote,handoff,ledger,save,progress);
  }catch(error){
-  if(ledger&&save){ledger.lastFailure={stage,at:new Date().toISOString(),reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED',...(error.helperExit?{helperExit:error.helperExit}:{})};try{await save();}catch{}}
-  emit({stage,status:'blocked',reason:/^[A-Z_]+$/.test(error.message)?error.message:'PRIVATE_OPERATION_FAILED',...(error.helperExit?{helperExit:error.helperExit}:{}),progressFile:progress,localExitConfirmed:ledger?.steps?.local_exit?.status==='ok',awsStartConfirmed:ledger?.steps?.aws_start?.status==='ok',note:'See concrete sanitized child stage. Completed results and backups preserved. No blind signal replay, Mac restart or provider cooldown reset.'});process.exitCode=2;
+  if(ledger&&save){ledger.lastFailure={stage,at:new Date().toISOString(),...startupFailure(error),...(error.helperExit?{helperExit:error.helperExit}:{})};try{await save();}catch{}}
+  emit({stage,status:'blocked',...startupFailure(error),...(error.helperExit?{helperExit:error.helperExit}:{}),progressFile:progress,localExitConfirmed:ledger?.steps?.local_exit?.status==='ok',awsStartConfirmed:ledger?.steps?.aws_start?.status==='ok',note:'See concrete sanitized child stage. Completed results and backups preserved. No blind signal replay, Mac restart or provider cooldown reset.'});process.exitCode=2;
  }
 finally{if(lease)await new Promise(resolve=>lease.close(resolve));}
 }
