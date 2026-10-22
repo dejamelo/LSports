@@ -287,6 +287,51 @@ def verify_oom_inboxes(directory):
         finally:db.close()
     require(len(result)==2,'EXPECTED_BOTH_DURABLE_INBOXES');return result
 
+def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None):
+    now=now or time.monotonic;sleep=sleep or time.sleep;began=now();observations=[];previous=None;last_change=began
+    while True:
+        point=sample();require(type(point.get('running')) is bool,'STOP_OBSERVATION_STATE_UNVERIFIED');point['observationElapsedSeconds']=round(now()-began,1)
+        fingerprint=json.dumps({'files':point.get('files'),'records':point.get('records')},sort_keys=True)
+        changed=previous is not None and fingerprint!=previous
+        if changed:last_change=now()
+        point['progressSincePreviousSample']=changed;point['assessment']='exited' if not point['running'] else 'observable_progress' if changed else 'no_new_observable_progress'
+        observations.append(point);record({'samples':observations,'forceStopEvidenceVerified':False,'note':'Log/file inactivity does not prove a deadlock; live inbox/checkpoint consistency has not been verified for forced termination.'})
+        if not point['running']:return observations
+        elapsed=now()-began
+        if elapsed>=timeout:raise RuntimeError('UPGRADE_STOP_OBSERVATION_DEADLINE_NO_MORE_SIGNALS')
+        if previous is not None and now()-last_change>=90:raise RuntimeError('UPGRADE_STOP_NO_OBSERVABLE_PROGRESS_NO_MORE_SIGNALS')
+        previous=fingerprint;sleep(min(interval,timeout-elapsed))
+
+def upgrade_stop_sample(progress):
+    workers=states('worker');require(len(workers)==1 and workers[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
+    worker=workers[0];info=json.loads(run(['docker','inspect',worker['id']]))[0]
+    require(info['Image']==progress['baseImageId'] and info['HostConfig']['Memory']==4294967296,'STOP_IMAGE_IDENTITY_CHANGED')
+    end=datetime.datetime.now(datetime.timezone.utc);begin=end-datetime.timedelta(minutes=10)
+    timeline=existing_recovery_timeline(workers,{'fromUTC':begin.isoformat().replace('+00:00','Z'),'toUTC':end.isoformat().replace('+00:00','Z')})
+    records=[r for r in timeline.get('records',[]) if r.get('operation') in ('file.persist','snapshot.events','feed.coverage','worker.shutdown')][-12:]
+    files=[]
+    for mount in info.get('Mounts',[]):
+        if mount.get('Destination')!='/app/.runtime/feed' or mount.get('Type')!='volume':continue
+        volumes=json.loads(run(['docker','volume','inspect',mount['Name']]))
+        require(len(volumes)==1 and (volumes[0].get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','STOP_VOLUME_UNVERIFIED')
+        root=Path(volumes[0]['Mountpoint']);require(not root.is_symlink(),'STOP_VOLUME_SYMLINK')
+        for target in sorted(root.glob('trade-feed.json*'))[:100]:
+            try:
+                if target.is_symlink() or not target.is_file():continue
+                st=target.stat()
+            except FileNotFoundError:continue
+            kind='inbox_wal' if target.name.endswith('.inbox.sqlite-wal') else 'inbox' if target.name.endswith('.inbox.sqlite') else 'checkpoint_tmp' if '.tmp' in target.name else 'checkpoint' if target.name in ('trade-feed.json','trade-feed.json.regular-checkpoint.json') else None
+            if kind:files.append({'kind':kind,'lane':'prematch' if '.prematch.' in target.name else 'inplay' if '.inplay.' in target.name else None,'bytes':st.st_size,'modifiedNs':st.st_mtime_ns})
+    result={'atUTC':end.isoformat().replace('+00:00','Z'),'containerId':worker['id'],'running':worker['running'],'exitCode':worker.get('exitCode'),'oomKilled':worker.get('oomKilled'),'files':files,'records':records,'finishedAtUTC':info.get('State',{}).get('FinishedAt'),'signalsSent':0,'distributionOperations':0}
+    persisted=[r for r in records if r.get('operation')=='file.persist'];completed=[r for r in persisted if r.get('lastCompletedAtUTC')]
+    result['persistenceStage']=persisted[-1].get('stage','completed' if persisted[-1].get('lastCompletedAtUTC') else 'unknown') if persisted else 'not_observed'
+    result['lastCompletedPersistence']=completed[-1] if completed else None
+    result['stopRequestedAtUTC']=progress.get('stopRequestedAtUTC')
+    stopped=progress.get('supplierStoppedAtUTC')
+    if stopped:
+        result['distributionStoppedAtUTC']=stopped;result['elapsedSinceDistributionStopSeconds']=round((end-timeline_timestamp(stopped,'supplierStoppedAtUTC')).total_seconds(),1)
+    return result
+
 def upgrade_partitioned(request):
     stage='partitioned_upgrade.input';backup=None
     try:
@@ -294,6 +339,9 @@ def upgrade_partitioned(request):
         files=request['files'];require(set(files)==PARTITION_FILES,'UPGRADE_FILE_LIST_UNVERIFIED')
         require(all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'UPGRADE_SOURCE_SIZE_LIMIT')
         digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt_path=SECURE/('partitioned-upgrade-'+digest[:24]+'.json')
+        if request.get('resumeBackup'):
+            expected=Path(request['resumeBackup']);require(expected.parent==BACKUPS and re.fullmatch('adl-partitioned-upgrade-[A-Za-z0-9_-]+',expected.name) and expected.is_dir() and not expected.is_symlink() and expected.stat().st_uid==os.geteuid() and expected.stat().st_mode&0o077==0 and receipt_path.is_file() and not receipt_path.is_symlink(),'RESUME_PREPARED_RECEIPT_REQUIRED')
+            saved=json.loads(receipt_path.read_bytes());require(saved.get('digest')==digest and saved.get('backup')==str(expected),'RESUME_BACKUP_OR_IMAGE_MISMATCH')
         meta=json.loads((SECURE/'deployment.json').read_bytes());base=partition_base(meta);before=model(base)
         require(control_status()==200,'API_NOT_HEALTHY')
         require(snapshot_memory_bytes(before['services']['worker']['mem_limit'])==4294967296,'UPGRADE_REQUIRES_EXISTING_FOUR_GIB_LIMIT')
@@ -547,13 +595,19 @@ def upgrade_partitioned(request):
                 progress['supplierStoppedBeforeConsumer']=True;progress['supplierStoppedAtUTC']=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z');save(progress)
             progress['oldContainer']=worker_states[0]['id']
             if worker_states[0]['running']:
-                progress['phase']='stop_requested';save(progress)
+                progress['phase']='stop_requested';progress['stopRequestedAtUTC']=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z');save(progress)
                 stage='partitioned_upgrade.graceful_stop';run(['docker','kill','--signal','SIGTERM',worker_states[0]['id']])
             else:
                 progress['phase']='stopped';save(progress)
         if progress['phase']=='stop_requested':
-            deadline=time.time()+90
-            while time.time()<deadline and any(c['running'] for c in states('worker')):time.sleep(1)
+            stage='partitioned_upgrade.stop_observation'
+            current=states('worker');require(len(current)==1 and current[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
+            if current[0]['running']:
+                def observed(report):
+                    progress['shutdownObservation']=report;save(progress)
+                    emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='observing',backup=str(backup),**report['samples'][-1],forceStopEvidenceVerified=False,posnetChanged=False)
+                watch_upgrade_stop(lambda:upgrade_stop_sample(progress),observed)
+            else:emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='exited',container=current[0],backup=str(backup),signalsSent=0,posnetChanged=False)
             require(not any(c['running'] for c in states('worker')),'UPGRADE_GRACEFUL_STOP_PENDING_NO_MORE_SIGNALS');progress['phase']='stopped';save(progress)
         stage='partitioned_upgrade.persistence'
         api=states('api');require(len(api)==1 and api[0]['health']=='healthy','API_NOT_HEALTHY');api_info=json.loads(run(['docker','inspect',api[0]['id']]))[0]

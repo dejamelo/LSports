@@ -56,7 +56,7 @@ export async function run(args){
  if(durableMode)args=[...args.slice(0,4),durableRollback?'--recovery-throughput-rollback':'--snapshot-throughput-repair'];
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--worker-exit-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--feed-validation-resume','--recovery-progress','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--worker-exit-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--feed-validation-resume','--recovery-progress','--pipeline-report','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   if(args[4]==='--helper-preflight-report'){stage='remote_consumer_gate';await helperPreflightReport(stage);return;}
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
@@ -77,6 +77,18 @@ export async function run(args){
    const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,action==='upgrade_partitioned'&&extra.snapshotMemoryRepair?900000:360000,false,quiet,{stage,action});
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
+   if(args[4]==='--pipeline-report'){
+    stage='pipeline_report';
+    if(!['local_exit','journal_export','journal_import','aws_start','throughput_upgrade'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('PIPELINE_REPORT_REQUIRES_COMPLETED_UPGRADE');
+    const macRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);const mac=macRows.find(r=>r.operation==='cutover.audit');
+    if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
+    const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','durable-ingress.mjs','durable-ingress.d.mts'].map(n=>'apps/worker/src/'+n);names.push('packages/contracts/src/index.ts','packages/feed-store/src/index.ts');
+    const {createHash}=await import('node:crypto');const sourceSets={};
+    for(const ref of ['6f6b8928aee8dadab7b9be1f9dd2755f7c8fa46f',runtimeRef]){const full=(await command('git',['rev-parse',ref],undefined,10000,true)).trim();sourceSets[full]={};for(const name of names)sourceSets[full][name]=createHash('sha256').update(await command('git',['show',full+':'+name],undefined,10000,true)).digest('hex');}
+    const {writeProtectedReport}=await import('./distribution-validation.mjs');const {observeRecovery}=await import('./recovery-progress.mjs');
+    await observeRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,path.join(folder,`pipeline-${pid}-${parent}.json`),writeProtectedReport,{identityRequest:{expectedImage:persistenceExpectedImage(ledger,{}),sourceSets}});return;
+   }
    if(args[4]==='--worker-exit-report'){
     stage='worker_exit_report';
     if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('REPORT_REQUIRES_COMPLETED_CUTOVER');
@@ -230,6 +242,7 @@ export async function run(args){
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||''))throw Error('EXPECTED_CURRENT_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'){const image=persistenceExpectedImage(ledger);repairOptions.livePersistenceRepair=true;repairOptions.expectedLiveImage=image;}
+    if(snapshotMemoryRepair&&process.env.ADL_RESUME_BACKUP){if(!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(process.env.ADL_RESUME_BACKUP))throw Error('RESUME_BACKUP_UNVERIFIED');repairOptions.resumeBackup=process.env.ADL_RESUME_BACKUP;}
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
     const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
     if(snapshotMemoryRepair&&prepared.offlineSnapshotMemoryVerified!==true)throw Error('SNAPSHOT_MEMORY_OFFLINE_UNVERIFIED');

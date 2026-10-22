@@ -1,7 +1,7 @@
 import {setTimeout as delay} from 'node:timers/promises';
 const lanes=['prematch','inplay'];
 export function sampleRecovery(status){
- const result={at:status.checkpointReader?.observedAtUTC||new Date().toISOString(),workerRunning:status.workers?.length===1&&status.workers[0].running===true,lanes:{}};
+ const result={at:status.checkpointReader?.observedAtUTC||new Date().toISOString(),workerRunning:status.workers?.length===1&&status.workers[0].running===true,lanes:{},persistedFormat:status.persistedFormat,timeline:status.timeline};
  for(const lane of lanes){
   const l=status.lanes?.[lane]||{},start=Date.parse(l.session?.startedAt);
   const logs=(status.timeline?.records||[]).filter(r=>r.lane===lane&&r.operation==='snapshot.events'&&r.status==='full_spool_progress'&&Date.parse(r.loggedAtUTC)>=start);
@@ -28,16 +28,17 @@ export function recoveryRates(samples,lane){
  const consistent=intervals.every(i=>i.dt>0&&i.drop>0);
  return {...base,windowSeconds:seconds,receivePerSecond:rate('received'),ackPerSecond:rate('acknowledged'),processPerSecond:rate('processed'),checkpointPerSecond:rate('checkpointed'),netDrainPerSecond:net,snapshotAdvanced,assessment:net>0?'DRAINING':net<0?'BACKLOG_GROWING':rate('processed')>0?'PROCESSING_WITHOUT_NET_DRAIN':'NO_PROCESSING_ADVANCE',etaSeconds:net>0&&consistent?Math.ceil(last.metrics.processingBacklog/net):null,etaAssumption:'Observed arrival/service rates remain constant; excludes future snapshot/reconciliation work.'};
 }
-export async function observeRecovery(remote,handoff,ledger,save,reportPath,writeReport,{wait=delay,now=Date.now}={}){
+export async function observeRecovery(remote,handoff,ledger,save,reportPath,writeReport,{wait=delay,now=Date.now,identityRequest}={}){
  const samples=[];
  for(let i=0;i<3;i++){
-  const end=now();const status=await remote('status',{handoff,timelineWindow:{fromUTC:new Date(end-10*60000).toISOString(),toUTC:new Date(end).toISOString()}});
-  const sample=sampleRecovery(status);samples.push(sample);
+  const identity=identityRequest?await remote('pipeline_identity',identityRequest):undefined;const end=now();const status=await remote('status',{handoff,timelineWindow:{fromUTC:new Date(end-10*60000).toISOString(),toUTC:new Date(end).toISOString()}});
+  const sample=sampleRecovery(status);if(identity)sample.identity=identity;samples.push(sample);
+  if(identity)console.log(JSON.stringify({operation:'cutover.pipeline_identity',sample:i+1,worker:identity.worker,expectedImage:identity.expectedImage,composeImage:identity.composeImage,expectedImageId:identity.expectedImageId,containerImageId:identity.containerImageId,failedChecks:identity.failedChecks,receipt:identity.receipt,sourceMatches:Object.fromEntries(Object.entries(identity.sourceComparisons||{}).map(([ref,v])=>[ref,v.allMatch])),cgroupMemory:identity.cgroupMemory}));
   ledger.recoveryProgressObservation={status:'measuring',samples,reportPath};await save();
   console.log(JSON.stringify({operation:'cutover.recovery_progress',sample:i+1,at:sample.at,workerRunning:sample.workerRunning,lanes:Object.fromEntries(lanes.map(l=>[l,{phase:sample.lanes[l].phase,snapshot:sample.lanes[l].snapshot,processingBacklog:sample.lanes[l].metrics.processingBacklog,processed:sample.lanes[l].metrics.processed,checkpointed:sample.lanes[l].metrics.checkpointed}]))}));
   if(!sample.workerRunning)break;
   if(i<2)await wait(60000);
  }
- const result={readOnly:true,workerRestarted:false,providerRequests:0,posnetChanged:false,macWorkerStopped:true,workerRunning:samples.at(-1).workerRunning,samples: samples.length,lanes:Object.fromEntries(lanes.map(l=>[l,recoveryRates(samples,l)])),persistence:samples.at(-1).persistence,ackMeaning:'durable_inbox_receipt_not_processing_completion',reportPath};
- await writeReport(reportPath,JSON.stringify({...result,observations:samples},null,2));ledger.recoveryProgressObservation={status:'collected',...result};await save();console.log(JSON.stringify({operation:'cutover.recovery_progress',...result}));return result;
+ const result={readOnly:true,workerRestarted:false,providerRequests:0,posnetChanged:false,macWorkerStopped:true,workerRunning:samples.at(-1).workerRunning,samples: samples.length,...(identityRequest?{identity:samples.at(-1).identity,persistedFormat:samples.at(-1).persistedFormat}:{}),lanes:Object.fromEntries(lanes.map(l=>[l,recoveryRates(samples,l)])),persistence:samples.at(-1).persistence,ackMeaning:'durable_inbox_receipt_not_processing_completion',reportPath};
+ await writeReport(reportPath,JSON.stringify({...result,observations:samples},null,2));ledger.recoveryProgressObservation={status:'collected',...result};await save();console.log(JSON.stringify({operation:'cutover.recovery_progress',...result,...(identityRequest?{identity:undefined}: {})}));return result;
 }

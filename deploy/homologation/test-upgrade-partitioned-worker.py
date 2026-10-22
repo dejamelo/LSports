@@ -27,6 +27,22 @@ class Upgrade(unittest.TestCase):
   with contextlib.redirect_stdout(output):
    with self.assertRaises(Exception):NS['verify_live_persistence_identity'](worker,request,'PRIVATE_DO_NOT_PRINT')
   record=json.loads(output.getvalue());self.assertEqual(record['failedChecks'],['imageReferenceMatches']);self.assertEqual(record['expectedImage'],image);self.assertEqual(record['composeImage'],'unverified_reference');self.assertNotIn('PRIVATE_DO_NOT_PRINT',output.getvalue())
+ def test_shutdown_observer_progress_then_exit_never_sends_signals(self):
+  clock=[0];saved=[];count=[0]
+  def sample():
+   count[0]+=1;return {'running':count[0]<3,'files':[{'bytes':count[0]}],'records':[]}
+  result=NS['watch_upgrade_stop'](sample,saved.append,now=lambda:clock[0],sleep=lambda sec:clock.__setitem__(0,clock[0]+sec))
+  self.assertEqual(len(result),3);self.assertEqual(result[-1]['assessment'],'exited');self.assertTrue(result[1]['progressSincePreviousSample']);self.assertTrue(all(r['forceStopEvidenceVerified'] is False for r in saved))
+ def test_shutdown_no_evidence_is_not_called_a_proven_deadlock(self):
+  clock=[0];saved=[]
+  with self.assertRaisesRegex(RuntimeError,'UPGRADE_STOP_NO_OBSERVABLE_PROGRESS_NO_MORE_SIGNALS'):
+   NS['watch_upgrade_stop'](lambda:{'running':True,'files':[],'records':[]},saved.append,now=lambda:clock[0],sleep=lambda sec:clock.__setitem__(0,clock[0]+sec))
+  self.assertEqual(clock[0],90);self.assertIn('does not prove a deadlock',saved[-1]['note']);self.assertFalse(saved[-1]['forceStopEvidenceVerified'])
+ def test_shutdown_progress_has_a_finite_deadline(self):
+  clock=[0];saved=[]
+  with self.assertRaisesRegex(RuntimeError,'UPGRADE_STOP_OBSERVATION_DEADLINE_NO_MORE_SIGNALS'):
+   NS['watch_upgrade_stop'](lambda:{'running':True,'files':[{'bytes':clock[0]}]},saved.append,timeout=30,now=lambda:clock[0],sleep=lambda sec:clock.__setitem__(0,clock[0]+sec))
+  self.assertEqual(clock[0],30)
  def test_readback_failure_resumes_without_repeating_serialization(self):
   self.test_prepare_activate_reuse_preserves_every_non_worker_field(oom=True,readback_fails=True)
  @unittest.skipUnless(os.environ.get('ADL_OFFLINE_PROOF_IMAGE'),'opt-in isolated Docker proof')
@@ -110,7 +126,7 @@ class Upgrade(unittest.TestCase):
     if supplier:
      rollback=Path(result['backup'])/'rollback.worker.private.json';self.assertEqual(rollback.stat().st_mode&0o777,0o600);self.assertEqual(set(json.loads(rollback.read_bytes())['services']),{'worker'})
     if resume_stopped:
-     progress_file=next(secure.glob('partitioned-upgrade-*.json'));progress=json.loads(progress_file.read_bytes());progress['phase']='stop_requested';progress_file.write_text(json.dumps(progress));running=False
+     progress_file=next(secure.glob('partitioned-upgrade-*.json'));progress=json.loads(progress_file.read_bytes());progress['phase']='stop_requested';progress['oldContainer']='old-worker';progress_file.write_text(json.dumps(progress));running=False
     if oom:
      if readback_fails:
       code,failed=invoke('activate',verify_only=True);self.assertEqual(code,2);self.assertEqual(failed['stage'],'partitioned_upgrade.projection_readback');self.assertFalse(running);self.assertIn('offlineRehearsal',failed);readback_fails=False

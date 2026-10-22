@@ -14,6 +14,12 @@ exec((HERE/'resume-adl-api.py').read_text().split("if __name__=='__main__':")[0]
 exec((HERE/'execute-adl-cutover-aws.py').read_text().split("if __name__=='__main__':")[0],NS)
 
 class Cutover(unittest.TestCase):
+ def test_checkpoint_format_is_read_without_materializing_private_regular_state(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   p=Path(tmp)/'feed.json';p.write_text(json.dumps({'mode':'connected','events':[],'workerCheckpoint':{'version':1,'regularExternal':True,'regular':[{'private':'not returned'}]}}))
+   metadata,rows,_=NS['diagnostic_checkpoint'](p,lambda e:None);self.assertEqual(metadata['persistedFormat'],{'version':1,'regularExternal':True});self.assertNotIn('not returned',json.dumps(metadata));self.assertEqual(rows,0)
+   p.write_text('{"mode":"connected","events":[],"workerCheckpoint":{"version":1,"regular":[invalid]}}')
+   with self.assertRaises(RuntimeError):NS['diagnostic_checkpoint'](p,lambda e:None)
  def test_incremental_checkpoint_validates_skipped_data_and_keeps_one_event(self):
   with tempfile.TemporaryDirectory() as tmp:
    path=Path(tmp)/'trade-feed.json';seen=[]

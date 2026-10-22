@@ -18,3 +18,9 @@ test('three bounded read-only observations save progress without modifying compl
  let calls=0,waits=0,written=0;const ledger={steps:{journal_import:{status:'ok'}}};const log=console.log;console.log=()=>{};
  try{const result=await observeRecovery(async(action,extra)=>{assert.equal(action,'status');assert.ok(extra.timelineWindow);return status(calls++);},{},ledger,async()=>{},'/private/report',async()=>{written++;},{wait:async ms=>{assert.equal(ms,60000);waits++;}});assert.equal(result.samples,3);assert.equal(result.workerRestarted,false);assert.equal(waits,2);assert.equal(written,1);assert.equal(ledger.steps.journal_import.status,'ok');}finally{console.log=log;}
 });
+
+test('pipeline collector correlates identity and memory for each sample and preserves complete sanitized timeline',async()=>{
+ const calls=[],ledger={steps:{journal_import:{status:'ok'}}};let i=0,saved;const identity={worker:{running:true},sourceComparisons:{},failedChecks:['imageReferenceMatches'],cgroupMemory:{'memory.current':123}};const log=console.log;console.log=()=>{};
+ try{const result=await observeRecovery(async action=>{calls.push(action);if(action==='pipeline_identity')return identity;return {...status(i++),persistedFormat:{version:1,regularExternal:true},timeline:{records:[{operation:'file.persist',stage:'regular_checkpoint',rssBytes:100}]}};},{},ledger,async()=>{},'/private/report',async(_p,text)=>saved=JSON.parse(text),{identityRequest:{expectedImage:'previous'},wait:async()=>{}});
+ assert.deepEqual(calls,['pipeline_identity','status','pipeline_identity','status','pipeline_identity','status']);assert.equal(saved.observations.length,3);assert.equal(saved.observations[2].identity.cgroupMemory['memory.current'],123);assert.equal(saved.observations[2].timeline.records[0].stage,'regular_checkpoint');assert.equal(result.persistedFormat.version,1);assert.equal(ledger.steps.journal_import.status,'ok');}finally{console.log=log;}
+});

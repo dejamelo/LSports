@@ -183,6 +183,40 @@ def api_private_log_summary(container):
         if token in text:signals.append(name)
     return {'exitCode':result.returncode,'signals':sorted(set(signals)),'sha256':hashlib.sha256(raw).hexdigest(),'rawLogPrinted':False}
 
+def pipeline_identity_report(request):
+    workers=states('worker');require(len(workers)==1,'PIPELINE_WORKER_COUNT_UNVERIFIED')
+    c=json.loads(run(['docker','inspect',workers[0]['id']]))[0];meta=json.loads((SECURE/'deployment.json').read_bytes());effective=model(partition_base(meta));worker=effective['services']['worker']
+    image=json.loads(run(['docker','image','inspect',c['Image']]))[0];label=(image.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')
+    expected=request.get('expectedImage');safe=lambda v:v if isinstance(v,str) and re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',v) else 'unverified_reference'
+    checks={'workerRunning':workers[0].get('running') is True,'workerNotOomKilled':workers[0].get('oomKilled') is False,'workerNameMatches':workers[0].get('name')=='/adl-homologation-worker-1','expectedImageFormat':safe(expected)!='unverified_reference','imageReferenceMatches':worker.get('image')==expected}
+    compose_image=json.loads(run(['docker','image','inspect',worker['image']]))[0]
+    checks['containerImageMatchesCompose']=c['Image']==compose_image['Id']
+    expected_id=None
+    if checks['expectedImageFormat']:
+        found=subprocess.run(['docker','image','inspect',expected],capture_output=True,timeout=15,check=False)
+        if found.returncode==0:expected_id=json.loads(found.stdout)[0]['Id']
+    checks['containerImageMatchesExpected']=expected_id is not None and expected_id==c['Image']
+    receipt_info={'present':False};receipt=None
+    if isinstance(label,str) and re.fullmatch('[0-9a-f]{64}',label):
+        p=SECURE/('partitioned-upgrade-'+label[:24]+'.json')
+        if p.is_file() and not p.is_symlink() and p.stat().st_uid==os.geteuid() and p.stat().st_mode&0o077==0 and p.stat().st_size<=2*1024**2:
+            receipt=json.loads(p.read_bytes());receipt_info={'present':True,'digestMatchesLabel':receipt.get('digest')==label,'image':safe(receipt.get('image')),'offlineRestoreVerified':receipt.get('oomRestoreVerified') is True,'phase':receipt.get('phase') if receipt.get('phase') in ('prepared','stopped','start_requested','running') else 'other','startedAtUTC':receipt.get('startAt')}
+    sets=request.get('sourceSets');require(isinstance(sets,dict) and 1<=len(sets)<=3,'PIPELINE_SOURCE_SETS_INVALID')
+    require(all(re.fullmatch('[0-9a-f]{40}',ref) and isinstance(values,dict) and set(values)==PARTITION_FILES and all(re.fullmatch('[0-9a-f]{64}',str(v)) for v in values.values()) for ref,values in sets.items()),'PIPELINE_SOURCE_HASHES_INVALID')
+    probe="const f=require('node:fs'),h=require('node:crypto');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(PARTITION_FILES))+".map(n=>[n,h.createHash('sha256').update(f.readFileSync('/app/'+n)).digest('hex')]))));"
+    if workers[0]['running']:hashes=json.loads(run(['docker','exec',workers[0]['id'],'node','-e',probe],timeout=20))
+    else:hashes={}
+    comparisons={ref:{'allMatch':hashes==values,'mismatches':[{'file':n,'expected':v,'found':hashes.get(n)} for n,v in values.items() if hashes.get(n)!=v]} for ref,values in sets.items()}
+    overrides=[]
+    for entry in meta.get('composeOverrides',[]):
+        p=Path(entry);require(p.parent==SECURE and p.is_file() and not p.is_symlink(),'PIPELINE_OVERRIDE_UNVERIFIED');overrides.append({'name':p.name,'sha256':snapshot_file_hash(p)})
+    readings={}
+    if workers[0]['running']:
+        probe="const f=require('node:fs');const result={};for(const n of ['memory.current','memory.peak','memory.max','memory.events'])try{const v=f.readFileSync('/sys/fs/cgroup/'+n,'utf8');result[n]=n==='memory.events'?Object.fromEntries(v.trim().split('\\n').map(s=>s.split(' ')).filter(([k])=>['oom','oom_kill','high','max'].includes(k)).map(([k,v])=>[k,Number(v)])):Number(v)}catch{}console.log(JSON.stringify(result));"
+        readings=json.loads(run(['docker','exec',workers[0]['id'],'node','-e',probe],timeout=15))
+    emit(operation='cutover.aws',stage='pipeline_identity',status='collected',readOnly=True,worker=workers[0],expectedImage=safe(expected),composeImage=safe(worker.get('image')),expectedImageId=expected_id,containerImageId=c['Image'],imagePatchDigest=label if isinstance(label,str) and re.fullmatch('[0-9a-f]{64}',label) else None,checks=checks,failedChecks=[k for k,v in checks.items() if not v],receipt=receipt_info,sourceComparisons=comparisons,overrides=overrides,workerConfiguration={'memoryLimitBytes':c.get('HostConfig',{}).get('Memory'),'nanoCpus':c.get('HostConfig',{}).get('NanoCpus'),'user':c.get('Config',{}).get('User'),'restartPolicy':c.get('HostConfig',{}).get('RestartPolicy',{}).get('Name')},cgroupMemory=readings,providerRequests=0,workerRestarted=False,posnetChanged=False,compatibilityProven=False)
+    return 0
+
 def api_health_report():
     containers=states('api'); reports=[]
     for c in containers:
@@ -224,6 +258,7 @@ def cutover_main():
         if action=='upgrade_partitioned':return upgrade_partitioned(request)
         if action=='preflight':return inspect_aws()
         if action=='api_health':return api_health_report()
+        if action=='pipeline_identity':return pipeline_identity_report(request)
         handoff=request['handoff'];audit=handoff['audit']
         require(action in ('import','start','status','startup_report','worker_exit_report','recover_start','recovery_evidence'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
@@ -647,6 +682,8 @@ def existing_recovery_timeline(consumers,window):
                     for k in ('bytes','validatedRows','appliedRows'):
                         if type(row.get(k)) is int and 0<=row[k]<=2**40:record[k]=row[k]
                     if row.get('stage') in ('waiting_http','download','validate','apply','complete'):record['stage']=row['stage']
+                elif op=='worker.shutdown':
+                    record.update(operation=op,status=row.get('status') if row.get('status') in ('ok','error') else 'unknown',lock=row.get('lock') if row.get('lock') in ('released','ownership_changed_preserved') else 'unknown')
                 elif op=='feed.coverage':
                     record.update(operation=op,lanes={})
                     for lane in ('prematch','inplay'):
@@ -771,6 +808,19 @@ def diagnostic_checkpoint(path,on_event):
                                 if separator==']':break
                                 require(separator==',','DIAGNOSTIC_SEPARATOR_EXPECTED')
                         else:reader.take()
+                    elif key=='workerCheckpoint':
+                        require(reader.take()=='{','DIAGNOSTIC_CHECKPOINT_OBJECT');format_fields={};reader.whitespace();private_seen=set()
+                        if reader.peek()!='}':
+                            while True:
+                                reader.whitespace();name=reader.string(True);require(name not in private_seen,'DIAGNOSTIC_CHECKPOINT_DUPLICATE_KEY');private_seen.add(name);reader.whitespace();require(reader.take()==':','DIAGNOSTIC_COLON_EXPECTED');reader.whitespace()
+                                value=reader.value(name in ('version','regularExternal'))
+                                if name=='version' and type(value) is int:format_fields[name]=value
+                                if name=='regularExternal' and type(value) is bool:format_fields[name]=value
+                                reader.whitespace();separator=reader.take()
+                                if separator=='}':break
+                                require(separator==',','DIAGNOSTIC_SEPARATOR_EXPECTED')
+                        else:reader.take()
+                        metadata['persistedFormat']=format_fields
                     elif key in ('connections','coverage','updatedAt','mode'):metadata[key]=reader.value(True)
                     else:reader.value(False)
                     reader.whitespace();separator=reader.take()
@@ -824,7 +874,7 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
     reader_info['readDurationMs']=int((time.time()-read_started)*1000);reader_info['observedAtUTC']=datetime.datetime.fromtimestamp(read_started,datetime.timezone.utc).isoformat()
     consumers=states('worker');result['workers']=consumers
     if any(c.get('state')=='exited' for c in consumers):result['workerFailure']=inspect_worker_failure(consumers)[0]
-    reader_info.update(sizeBytes=read_size,complete=True,maxRSSBytes=__import__('resource').getrusage(__import__('resource').RUSAGE_SELF).ru_maxrss*1024);result['checkpointReader']=reader_info
+    reader_info.update(sizeBytes=read_size,complete=True,maxRSSBytes=__import__('resource').getrusage(__import__('resource').RUSAGE_SELF).ru_maxrss*1024);result['checkpointReader']=reader_info;result['persistedFormat']=feed.get('persistedFormat',{})
     fields=('phase','session','lastSnapshotAt','lastSnapshotAttemptAt','lastSnapshotErrorAt','recoveryProgress','partitionRecovery')
     for lane in ('prematch','inplay'):
         source=feed.get('connections',{}).get(lane,{})
