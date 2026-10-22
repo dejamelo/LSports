@@ -306,6 +306,42 @@ def container_process_tree(container):
     require(len(rows)<=512 and any(r['hostPid']==root for r in rows),'PROCESS_TREE_ROOT_UNVERIFIED')
     return {'containerId':container,'initHostPid':root,'processes':rows,'nodeProcesses':[r for r in rows if r['executable'] in ('node','nodejs')],'completeContainerProcessList':True}
 
+def offline_rehearsal_disk_plan(backup,sources,progress,digest):
+    output=backup/('projection-rehearsal-'+digest[:24])
+    require(not output.is_symlink(),'REHEARSAL_OUTPUT_PATH_UNSAFE')
+    partial=output/'projection.json';receipt=output/'receipt.json'
+    input_bytes=sum(src.stat().st_size for src,dst,sha in sources)
+    missing=sum(src.stat().st_size for src,dst,sha in sources if not dst.exists())
+    partial_bytes=partial.stat().st_size if partial.is_file() and not partial.is_symlink() else 0
+    # Incomplete output is a lower bound, not the required final output size.
+    output_reserve=max(input_bytes*8,partial_bytes*2)
+    required=missing+output_reserve+4*1024**3
+    removed=[];prior=oom_restore_log_summary(backup)
+    if partial_bytes and not progress.get('projectionSerializationVerified') and not receipt.exists() and not receipt.is_symlink() and 'disk_full' in prior.get('signals',[]):
+        require(partial.is_file() and not partial.is_symlink() and partial.stat().st_nlink==1,'REHEARSAL_PARTIAL_OUTPUT_UNVERIFIED')
+        ids=run(['docker','ps','-aq']).decode().split()
+        containers=json.loads(run(['docker','inspect',*ids])) if ids else []
+        mounts=[Path(m['Source']).resolve() for c in containers for m in c.get('Mounts',[]) if m.get('Source')]
+        require(not any(output.resolve()==m or output.resolve() in m.parents or m in output.resolve().parents for m in mounts),'REHEARSAL_PARTIAL_OUTPUT_MOUNTED_NO_CLEANUP')
+        removed.append({'path':str(partial),'logicalBytes':partial_bytes,'allocatedBytes':partial.stat().st_blocks*512,'reason':'incomplete_output_without_receipt_after_disk_full'})
+        partial.unlink()
+    usage=shutil.disk_usage(backup);short=max(0,required-usage.free)
+    filesystem=json.loads(run(['findmnt','--json','--target',str(backup),'--output','SOURCE,TARGET,FSTYPE,SIZE,AVAIL','--bytes']))
+    block_devices=json.loads(run(['lsblk','--json','--bytes','--output','NAME,SIZE,TYPE,PKNAME,SERIAL,MOUNTPOINTS']))
+    copies=[]
+    for folder in sorted(backup.iterdir()):
+        if folder.is_symlink() or not folder.is_dir():continue
+        allocated=0
+        for root,dirs,files in os.walk(folder,followlinks=False):
+            dirs[:]=[d for d in dirs if not (Path(root)/d).is_symlink()]
+            for name in files:allocated+=(Path(root)/name).lstat().st_blocks*512
+        copies.append({'path':str(folder),'allocatedBytes':allocated,'preserved':True})
+    gib=(short+1024**3-1)//1024**3
+    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'suggestedFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':'conservative planning reserve, not measured complete serialization peak','removed':removed,'copies':copies}
+    private(backup/'offline-rehearsal-disk-plan.json',json.dumps(report).encode())
+    emit(operation='cutover.aws',stage='partitioned_upgrade.offline_disk',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
+    require(short==0,'OFFLINE_REHEARSAL_DISK_EXPANSION_REQUIRED_NO_START')
+
 def pre_exit_disk_plan(backup,total,hashes,proof,previous_original):
     # Working SQLite may have changed after replay. Only byte-identical, unreferenced
     # copies are disposable; retained outputs, logs and pristine copies are evidence.
@@ -955,7 +991,7 @@ def upgrade_partitioned(request):
                     sources=[(backup/name,rehearsal/name,sha) for name,sha in progress.get('dataBackupHashes',{}).items()]
                     if spool:sources.append((spool,rehearsal/spool.relative_to(directory),spool_hash))
                     missing=sum(src.stat().st_size for src,dst,sha in sources if not dst.exists())
-                    require(shutil.disk_usage(backup).free>=missing+512*1024**2,'REHEARSAL_COPY_DISK_HEADROOM_INSUFFICIENT')
+                    offline_rehearsal_disk_plan(backup,sources,progress,digest)
                     for src,dst,sha in sources:
                         require(src.is_file() and not src.is_symlink() and snapshot_file_hash(src)==sha,'REHEARSAL_SOURCE_HASH_MISMATCH')
                         dst.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
