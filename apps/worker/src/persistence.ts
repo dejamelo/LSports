@@ -4,7 +4,7 @@ import { copyFile, open, rename, mkdir, lstat } from 'node:fs/promises';
 import {getHeapStatistics} from 'node:v8';
 import {dirname} from 'node:path';
 import {walkSnapshot} from './full-snapshot.js';
-import {writeJsonObject,writeJsonRecord} from '@lsports/feed-store';
+import {jsonItems,writeJsonObject,writeJsonRecord} from '@lsports/feed-store';
 import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
 import { TradeState, type Row } from './state.js';
@@ -30,6 +30,20 @@ export function checkpoint(state: TradeState, includeRegular=true) {
     }))) };
 }
 
+// Internal writer payload: emitted arrays are lazy; wire/checkpoint schema is unchanged.
+const mapItems=(value:Map<any,any>|undefined)=>value?jsonItems(function*(){yield* value;}):undefined;
+function streamedRow(lane:Lane,key:string|number,row:Row,outright=false){return {
+ lane,fixtureId:outright?Number(String(key).split(':').at(-1)):Number(key),fixture:row.fixture,
+ ...(outright?{outright:row.outright,outrightScore:row.outrightScore}:{}),livescore:row.livescore,
+ markets:mapItems(row.markets),marketAt:mapItems(row.marketAt),betAt:mapItems(row.betAt),betOrder:mapItems(row.betOrder),marketReceipt:row.marketReceipt,
+ deferredTimestampBets:mapItems(row.deferredTimestampBets),timestampRecovery:mapItems(row.timestampRecovery),settlementAudit:mapItems(row.settlementAudit),settlementMarkets:mapItems(row.settlementMarkets),
+};}
+// Use under publicationTurn/state.exclusive, exactly like streamed regular persistence.
+export function streamCheckpoint(state:TradeState){
+ const rows={prematch:new Map(state.rows.prematch),inplay:new Map(state.rows.inplay)};
+ return {version:1,regular:[],outright:jsonItems(function*(){for(const lane of ['prematch','inplay'] as const)for(const[key,row]of rows[lane])if(row.outright)yield streamedRow(lane,key,row,true);})};
+}
+
 // Stable private sidecar may be ahead of the public feed after a crash; replay remains
 // idempotent and restored prices remain blocked. ACK is sent only after BOTH writes.
 export async function persistRegularCheckpoint(path:string,regular:ReturnType<typeof checkpoint>['regular']|TradeState){
@@ -42,7 +56,7 @@ export async function persistRegularCheckpoint(path:string,regular:ReturnType<ty
       const captured=(['prematch','inplay'] as const).flatMap(lane=>[...regular.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({lane,key,row})));
       for(const {lane,key,row} of captured){
         if(!first)await file.writeFile(',');first=false;
-        await writeJsonRecord(file,{lane,fixtureId:Number(key),fixture:row.fixture,livescore:row.livescore,markets:[...row.markets],marketAt:[...row.marketAt],betAt:[...row.betAt],betOrder:row.betOrder?[...row.betOrder]:undefined,marketReceipt:row.marketReceipt,deferredTimestampBets:row.deferredTimestampBets?[...row.deferredTimestampBets]:undefined,timestampRecovery:row.timestampRecovery?[...row.timestampRecovery]:undefined,settlementAudit:row.settlementAudit?[...row.settlementAudit]:undefined,settlementMarkets:row.settlementMarkets?[...row.settlementMarkets]:undefined});
+        await writeJsonRecord(file,streamedRow(lane,key,row));
       }
       await file.writeFile(']}');
     }else await writeJsonObject(file,{version:1,regular});

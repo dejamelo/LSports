@@ -65,32 +65,42 @@ export const jsonItems = (items: () => Iterable<unknown>) => ({ [Symbol.iterator
 export async function writeJsonObject(file: Awaited<ReturnType<typeof open>>, value: Record<string, unknown>,masks?:AvailabilityBlocks) {
   let pending:string[]=[],bytes=0,total=0;const hash=createHash('sha256'),eventHash=createHash('sha256');
   const flush=async()=>{if(!bytes)return;const text=pending.join('');hash.update(text);total+=Buffer.byteLength(text);await file.writeFile(text);pending=[];bytes=0;};
-  const put=async(text:string)=>{pending.push(text);bytes+=Buffer.byteLength(text);if(bytes>=64*1024)await flush();};
-  const write=async(entry:any,key='',depth=0):Promise<void>=>{
+  function* write(entry:any,key='',depth=0):Generator<string>{
     if(depth>128)throw Error('projection_depth_limit');
-    if(entry===null||typeof entry!=='object'){await put(JSON.stringify(entry)??'null');return;}
-    if(typeof entry.toJSON==='function'){await write(entry.toJSON(key),key,depth+1);return;}
+    if(entry===null||typeof entry!=='object'){yield (JSON.stringify(entry)??'null');return;}
+    if(typeof entry.toJSON==='function'){yield* write(entry.toJSON(key),key,depth+1);return;}
+    // Native encode only tiny leaves/tuples, never an index array or record.
+    // This keeps streaming CPU cost bounded as well as its allocation peak.
+    const scalar=(v:any)=>v===null||typeof v==='number'||typeof v==='boolean'||typeof v==='string'&&v.length<=256||v===undefined;
+    if(!(key==='events'&&depth===1)){
+      if(Array.isArray(entry)&&entry.length<=4&&entry.every(scalar)){yield JSON.stringify(entry);return;}
+      if(!Array.isArray(entry)&&typeof entry[Symbol.iterator]!=='function'){
+        const keys=Object.keys(entry);if(keys.length<=24){let size=0,small=true;for(const k of keys){const v=entry[k];size+=k.length+(typeof v==='string'?v.length:32);if(size>4096||!(scalar(v)||v instanceof Date)){small=false;break;}}if(small){yield JSON.stringify(entry);return;}}
+      }
+    }
     if(Array.isArray(entry)||(Object.getPrototypeOf(entry)===Object.prototype&&typeof entry[Symbol.iterator]==='function')){
-      await put('[');let first=true;
-      for(const item of entry){if(!first)await put(',');first=false;
+      yield ('[');let first=true;
+      for(const item of entry){if(!first)yield (',');first=false;
         const projected=(key==='events'&&depth===1)&&item&&masks?maskEventAvailability(item,masks[item.source as keyof AvailabilityBlocks]):item;
         // Canonical source-event digest, independent of the incremental encoder.
         // One bounded fixture string, never the complete projection.
-        if((key==='events'&&depth===1)){const text=JSON.stringify(projected);if(Buffer.byteLength(text)>16*1024*1024)throw Error('projection_record_limit');eventHash.update(text+'\n');await put(text);}
-        else await write(projected,'',depth+1);}
-      await put(']');return;
+        if((key==='events'&&depth===1)){const text=JSON.stringify(projected);if(Buffer.byteLength(text)>16*1024*1024)throw Error('projection_record_limit');eventHash.update(text+'\n');yield (text);}
+        else yield* write(projected,'',depth+1);}
+      yield (']');return;
     }
-    await put('{');let first=true;
+    yield ('{');let first=true;
     for(const name of Object.keys(entry)){const item=entry[name];if(item===undefined)continue;
-      if(!first)await put(',');first=false;await put(JSON.stringify(name)+':');await write(item,name,depth+1);}
-    await put('}');
+      if(!first)yield (',');first=false;yield (JSON.stringify(name)+':');yield* write(item,name,depth+1);}
+    yield ('}');
   };
-  await write(value);await flush();return {sha256:hash.digest('hex'),bytes:total,eventSha256:eventHash.digest('hex')};
+  for(const token of write(value)){pending.push(token);bytes+=Buffer.byteLength(token);if(bytes>=64*1024)await flush();}await flush();return {sha256:hash.digest('hex'),bytes:total,eventSha256:eventHash.digest('hex')};
 }
 // Private checkpoint contract bounds one fixture to 32 MiB, not the document.
-// Native serialization avoids a Promise and JS traversal per scalar.
+// Stream map entries and fields into bounded chunks; never stringify a full checkpoint record.
 export async function writeJsonRecord(file:Awaited<ReturnType<typeof open>>,record:Record<string,unknown>){
- const text=JSON.stringify(record);if(Buffer.byteLength(text)>32*1024*1024)throw Error('checkpoint_record_limit');await file.writeFile(text);
+ let bytes=0;
+ const bounded={writeFile:async(text:string)=>{bytes+=Buffer.byteLength(text);if(bytes>32*1024*1024)throw Error('checkpoint_record_limit');await file.writeFile(text);}};
+ await writeJsonObject(bounded as Awaited<ReturnType<typeof open>>,record);
 }
 // One local worker writes a single atomic projection; API only reads. Never store credentials here.
 export function createPublisher(path = statePath()) {

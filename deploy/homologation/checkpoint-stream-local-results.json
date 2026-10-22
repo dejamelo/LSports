@@ -1,0 +1,89 @@
+{
+  "scope": "offline synthetic profiles; not real g2uant6r acceptance",
+  "containerMemoryBytes": 4294967296,
+  "nodeOldSpaceMiB": 2560,
+  "cpuCount": 2,
+  "denseProfile": {
+    "stateRows": 17796,
+    "markets": 382762,
+    "bets": 2683572,
+    "betOrder": 2683572,
+    "outrightRows": 1457,
+    "writeProcessWallSeconds": 100.08,
+    "readbackProcessWallSeconds": 103.46
+  },
+  "results": {
+    "indexed-stream-checkpoint": {
+      "rows": 16329,
+      "rss": 2076270592,
+      "heapTotal": 1906630656,
+      "heapUsed": 1563352248,
+      "external": 8287068,
+      "arrayBuffers": 4013687,
+      "peak": 2080849920
+    },
+    "indexed-stream-readback": {
+      "integrity": {
+        "rows": 17786,
+        "bytes": 767240633,
+        "sha256": "affd9454b649349ccea86a638d3bd7ebb135301af8cdcb7ba9085b012e86df76",
+        "integrityVerified": true
+      },
+      "restoredRows": 17796,
+      "markets": 382762,
+      "bets": 2683572,
+      "orders": 2683572,
+      "outright": 1457,
+      "rssBytes": 1909215232,
+      "maxRSSBytes": 1909215232,
+      "awsValidated": false
+    },
+    "streaming-ingress-overlap": {
+      "cgroupPeakBytes": 1671835648,
+      "persistenceMaxMs": 3990,
+      "persistenceMeanMs": 727,
+      "test": "durable_ingress_load",
+      "status": "ok",
+      "snapshotBytes": 33554432,
+      "syntheticPaddingBytes": 5001517,
+      "structuredJsonBytes": 28552915,
+      "snapshotStages": [
+        "waiting_http",
+        "download",
+        "validate",
+        "apply",
+        "complete"
+      ],
+      "sourceRate": 69,
+      "messageBytes": 1050,
+      "snapshotMarkets": 24000,
+      "snapshotSelections": 288000,
+      "mainMaxEventLoopDelayMs": 383,
+      "burstMessages": 300,
+      "durationMs": 90003.69287,
+      "messages": 6510,
+      "received": 6510,
+      "acknowledged": 6510,
+      "processed": 6510,
+      "checkpointed": 6510,
+      "peakBacklog": 763,
+      "maxRss": 612663296,
+      "maxIngressEventLoopDelayMs": 202,
+      "writes": 154,
+      "restartReplayRows": 2,
+      "replayTested": true,
+      "finalBacklog": 0,
+      "awsValidated": false,
+      "finalBaselinePersisted": true,
+      "postSnapshotFreshUpdates": 0
+    }
+  },
+  "limitations": [
+    "Dense synthetic profile retained ~1.43GB heap before serialization, less than the real ~2.49GB; it does not prove the real fatal heap failure is resolved.",
+    "Dense write test covered bounded generator encoding; the later tiny-leaf native fast path has separate format/allocation-bound and paced-load tests.",
+    "Dense comparison harness uses explicit GC at restore/apply boundaries; real rehearsal and production do not.",
+    "Harness regular appliedRows=16329 excludes1457 added synthetic outrights; full readback independently verifies17786 visible rows and17796 restored rows.",
+    "Small overlap profile uses32MiB/2000 fixtures; it does not establish throughput with the complete real graph.",
+    "The real preserved checkpoint plus HTTP spool must pass full application, private/public serialization and readback before worker start."
+  ]
+}

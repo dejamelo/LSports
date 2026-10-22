@@ -28,12 +28,12 @@ test("connected mode never falls back to demo when state missing, stale or inval
     await rm(dir, { recursive: true, force: true });
   }
 });
-test('nested checkpoint arrays are written incrementally without stringify of an aggregate',async()=>{
+test('nested checkpoint arrays remain incremental with bounded native leaf encoding',async()=>{
   const {writeJsonObject,jsonItems}=await import('./index.js');
   const chunks:string[]=[],value={workerCheckpoint:{version:1,outright:jsonItems(function*(){for(let i=0;i<10000;i++)yield {fixtureId:i,markets:[{id:160,bets:[{id:'1',price:'2.1'}]}]};})}};
   const stringify=JSON.stringify;
   try{
-    JSON.stringify=((input:unknown,...rest:any[])=>{assert.ok(input===null||typeof input!=='object','aggregate stringify retains a full graph');return (stringify as any)(input,...rest);}) as typeof JSON.stringify;
+    JSON.stringify=((input:unknown,...rest:any[])=>{const encoded=(stringify as any)(input,...rest);if(input!==null&&typeof input==='object')assert.ok(Buffer.byteLength(encoded)<=32768,'unbounded aggregate stringify retains a full graph');return encoded;}) as typeof JSON.stringify;
     await writeJsonObject({writeFile:async(s:string)=>{assert.ok(Buffer.byteLength(s)<66000);chunks.push(s);}} as any,value);
   }finally{JSON.stringify=stringify;}
   const parsed=JSON.parse(chunks.join(''));

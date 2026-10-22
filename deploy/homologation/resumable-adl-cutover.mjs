@@ -78,7 +78,7 @@ export async function run(args){
   const source=await assembleRemoteHelper(here);
   const remote=async(action,extra={},quiet=false)=>{
    const invocation=await helperInvocation(here,source,{action,...extra});
-   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,action==='upgrade_partitioned'&&extra.finalizeAfterRecovery?4500000:action==='upgrade_partitioned'&&extra.snapshotMemoryRepair?900000:360000,false,quiet,{stage,action});
+   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,action==='upgrade_partitioned'&&extra.finalizeAfterRecovery?4500000:action==='upgrade_partitioned'&&extra.snapshotMemoryRepair?1800000:360000,false,quiet,{stage,action});
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
    if(args[4]==='--pipeline-report'){

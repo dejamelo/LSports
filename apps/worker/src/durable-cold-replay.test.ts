@@ -1,7 +1,7 @@
 /** Opt-in cold-process recovery using a synthetic checkpoint from the constrained load test. */
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {readFile,writeFile} from 'node:fs/promises';import {setTimeout as sleep} from 'node:timers/promises';
-import {restore,checkpoint,persistRegularCheckpoint} from './persistence.js';import {TradeState} from './state.js';
+import {restore,checkpoint,streamCheckpoint,persistRegularCheckpoint} from './persistence.js';import {TradeState} from './state.js';
 import {session,publicationTurn,coalescedPersistence} from './connected.js';import {createPublisher} from '@lsports/feed-store';
 import {openInbox,connectDurableMq} from './durable-ingress.mjs';
 test('cold restart: restore dense checkpoint, replay durable raw prefix, reconcile full baseline without the old heap', {skip:!process.env.ADL_COLD_FIXTURE_DIR,timeout:600000},async()=>{
@@ -11,7 +11,7 @@ test('cold restart: restore dense checkpoint, replay durable raw prefix, reconci
  const at=Date.now();const message={content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'cold-duplicate',ServerTimestamp:at},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'1',Price:'3.33',Status:1,IsChanged:1}]}]}]}})),properties:{headers:{MessageType:3}},fields:{redelivered:false}};
  const source=openInbox(inbox);source.append([message,message]);assert.equal(source.stats().backlog,2);source.close();
  const publish=createPublisher(path);let writes=0,latest:any,transport:any,appliedRows=0,fullDone=false;
- const save=coalescedPersistence(()=>publicationTurn(state,async()=>{await persistRegularCheckpoint(path,state);await publish(state.projection(Date.now(),false),{...checkpoint(state,false),regularExternal:true},state.availabilityBlocks());writes++;}));
+ const save=coalescedPersistence(()=>publicationTurn(state,async()=>{await persistRegularCheckpoint(path,state);await publish(state.projection(Date.now(),false),{...streamCheckpoint(state),regularExternal:true},state.availabilityBlocks());writes++;}));
  const pkg={lane:'prematch' as const,packageId:4511,username:'isolated',password:'isolated',hostname:'unused',vhost:'unused',queue:'unused',tls:false,port:5672};
  const api={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true}},async catalog(){return[]},async snapshot(){throw Error('unexpected')},async snapshotFull(sink:any){const ids=new Set<number>();for(const [id,row] of [...state.rows.prematch]){if(row.outright||typeof id!=='number')continue;sink.assertOpen();await sink.apply({fixtureId:id,fixture:row.fixture?.value,livescore:row.livescore?.value,markets:[...row.markets.values()]},at);ids.add(id);appliedRows++;}fullDone=true;return{ids,rows:ids.size,bytes:0}}};
  const abort=new AbortController();const task=session(pkg,{packages:[pkg],snapshotUrl:'http://127.0.0.1/unused',customersUrl:'http://127.0.0.1/unused',staleMs:300000,recoveryMs:300000},state,save,abort.signal,{connect:null as any,clientFactory:()=>api as any,durableConnect:async(p,db,metrics)=>{transport=await connectDurableMq(p,db,m=>{latest=m;metrics?.(m)},{offline:true});return transport;}},inbox);void task.catch(()=>{});

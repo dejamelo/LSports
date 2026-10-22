@@ -22,7 +22,7 @@ import {
   formatDiagnostic,
   OperationError,
 } from "./diagnostics.js";
-import { checkpoint, restore, persistRegularCheckpoint } from "./persistence.js";
+import { checkpoint,streamCheckpoint, restore, persistRegularCheckpoint } from "./persistence.js";
 import { connectMq } from "./mq.js";
 
 // Retain the first terminal cause, even when close/cleanup and retry replace phase/diagnostic.
@@ -87,7 +87,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         memoryStage('capture');
         const started=performance.now();const feed = state.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
         tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
-        const {regular,...saved}=checkpoint(state,false);
+        const {regular,...saved}=streamCheckpoint(state);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
         memoryStage('regular_checkpoint');await persistRegularCheckpoint(path,state);
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
