@@ -801,3 +801,34 @@ test('snapshot wait diagnostics cannot hide the original application failure',as
  const {snapshotApplyTurn}=await import('./connected.js');const expected=new Error('isolated application failure');
  await assert.rejects(snapshotApplyTurn(Promise.resolve(),new TradeState(),()=>{throw expected;},()=>{throw new Error('isolated logging failure');}),error=>error===expected);
 });
+
+test('publication capture releases the state gate during disk I/O while preserving a frozen checkpoint',async()=>{
+ const {publicationCaptureTurn}=await import('./connected.js');const state=new TradeState();state.apply('prematch',[{fixtureId:1,fixture:{status:1}}],1);
+ let began!:()=>void,release!:()=>void;const started=new Promise<void>(r=>began=r);const pending=publicationCaptureTurn(state,async stable=>{began();await new Promise<void>(r=>release=r);assert.equal(stable.rows.prematch.get(1)?.fixture?.value.status,1);});
+ await started;await state.publicationMutation(()=>state.apply('prematch',[{fixtureId:1,fixture:{status:2}}],2));assert.equal(state.rows.prematch.get(1)?.fixture?.value.status,2);release();await pending;
+ assert.equal(state.rows.prematch.get(1)?.fixture?.value.status,2);await state.publicationIdle();
+});
+test('publication capture cleans up failed writers and preserves external frozen projections',async()=>{
+ const {publicationCaptureTurn}=await import('./connected.js');const state=new TradeState();state.apply('prematch',[{fixtureId:1,fixture:{status:1}}],1);const view=state.projection();
+ await assert.rejects(publicationCaptureTurn(state,async()=>{throw Error('isolated disk failure');}));await state.publicationIdle();
+ await state.publicationMutation(()=>state.apply('prematch',[{fixtureId:1,fixture:{status:2}}],2));assert.equal(state.rows.prematch.get(1)?.fixture?.value.status,2);assert.ok(view);
+});
+
+test('captured checkpoint retains market versions and settlements while live state advances',async()=>{
+ const {checkpoint}=await import('./persistence.js');const state=new TradeState();
+ state.apply('prematch',[{fixtureId:1,fixture:{status:1},markets:[{id:1,status:1,bets:[{id:'1',price:'2.1',status:1,isChanged:0}]}]}],100);
+ const expected=structuredClone(checkpoint(state));const captured=await state.exclusive(()=>state.capturePublication());
+ try{await state.publicationMutation(()=>state.apply('prematch',[{fixtureId:1,markets:[{id:1,status:1,bets:[{id:'1',price:'3.2',status:1,isChanged:0}]}]}],200));assert.deepEqual(checkpoint(captured.state),expected);assert.notDeepEqual(checkpoint(state),expected);}finally{captured.release();}
+});
+
+test('heartbeat cannot queue repeated full writes while a snapshot is applying',async()=>{
+ const {heartbeatPublicationDue}=await import('./connected.js');const state=new TradeState();
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z',stage:'apply'}});
+ assert.equal(heartbeatPublicationDue(state,1000,6000),false);assert.equal(heartbeatPublicationDue(state,1000,61000),true);
+ state.set('prematch',{lastSnapshotErrorAt:'2026-10-22T20:01:00Z'});assert.equal(heartbeatPublicationDue(state,1000,6000),true);
+});
+
+test('heap reserve waits for publication completion without retaining the writer gate',async()=>{
+ const {spawnSync}=await import('node:child_process');const code=`import{TradeState}from'./apps/worker/src/state.ts';const s=new TradeState();const captured=await s.exclusive(()=>s.capturePublication());let mutated=false,waiting=false;const task=s.publicationMutation(()=>mutated=true,active=>waiting=active);await new Promise(r=>setTimeout(r,20));if(mutated||!waiting)throw Error('reserve not enforced');captured.release();await task;if(!mutated||waiting)throw Error('writer did not release reserve');console.log('heap-reserve-offline-ok');`;
+ const child=spawnSync(process.execPath,['--max-old-space-size=128','--import','tsx','--input-type=module','-e',code],{cwd:process.cwd(),encoding:'utf8',timeout:15000});assert.equal(child.status,0,child.stderr);assert.ok(child.stdout.includes('heap-reserve-offline-ok'));
+});

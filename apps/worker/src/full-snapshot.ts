@@ -36,8 +36,8 @@ async function* tokens(file:string,max:number){let primitive='',quoted=false,esc
   await yieldTurn();
  }if(quoted)fail('truncated_string');if(primitive)yield [primitive];
 }
-export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes,checkpoint?:'regular'|'events',onCheckpointRow?:(row:unknown,regular:boolean)=>Promise<void>){
- const it=tokens(file,limit)[Symbol.asyncIterator]();let batch:string[]=[],offset=0;
+export async function walkSnapshot(file:string,onRow:(raw:unknown,rawBytes:number)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes,checkpoint?:'regular'|'events',onCheckpointRow?:(row:unknown,regular:boolean)=>Promise<void>){
+ const it=tokens(file,limit)[Symbol.asyncIterator]();let batch:string[]=[],offset=0,lastItemBytes=0;
  const fill=async()=>{const next=await it.next();if(next.done)fail('truncated_json');batch=next.value as string[];offset=0;};
  const take=async()=>{if(offset>=batch.length)await fill();return batch[offset++];};
  const rawValue=async(first:string,max=limit)=>{
@@ -48,7 +48,7 @@ export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void
   while(depth){if(offset>=batch.length)await fill();while(offset<batch.length&&depth){const t=batch[offset++];n+=t.length;if(n>max)fail('item_size_limit');append(t);if(t==='{'||t==='[')depth++;if(t==='}'||t===']')depth--;if(depth>128)fail('nesting_limit');if(depth<0)fail('invalid_json');}}
   if(pieces.length)blocks.push(pieces.join(''));pieces=[];
   const text=blocks.join('');blocks.length=0;
-  if(Buffer.byteLength(text)>max)fail('item_size_limit');
+  lastItemBytes=Buffer.byteLength(text);if(lastItemBytes>max)fail('item_size_limit');
   if(checkpoint)fullSnapshotMemory();
   try{return IdSafeJsonParser.parse(text);}catch{return fail('invalid_json');}
  };
@@ -82,7 +82,7 @@ export async function walkSnapshot(file:string,onRow:(raw:unknown)=>Promise<void
  try{if(await take()!=='{')fail('root_not_object');let next=await take();while(next!=='}'){
   let key:unknown;try{key=JSON.parse(next);}catch{fail('invalid_root_key');}if(typeof key!=='string'||key.length>64||keys.size>=64||keys.has(key))fail('duplicate_or_invalid_root_key');keys.add(key as string);if(await take()!==':')fail('invalid_root_colon');
   let first=await take();if(key===(checkpoint||'Body')){
-   body=true;if(first!=='[')fail('body_not_array');first=await take();if(first!==']')for(;;){await onRow(await rawValue(first));first=await take();if(first===']')break;if(first!==',')fail('invalid_body_separator');first=await take();}
+   body=true;if(first!=='[')fail('body_not_array');first=await take();if(first!==']')for(;;){const row=await rawValue(first);await onRow(row,lastItemBytes);first=await take();if(first===']')break;if(first!==',')fail('invalid_body_separator');first=await take();}
   }else{const value=checkpoint==='events'&&key==='workerCheckpoint'?await privateCheckpoint(first):checkpoint&&key!=='mode'&&key!=='version'?(await metadataValue(first),undefined):await rawValue(first,checkpoint?limit:64*1024);if(key===(checkpoint==='regular'?'version':checkpoint==='events'?'workerCheckpoint':'Header'))header=value;else if(checkpoint||['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
   next=await take();if(next==='}')break;if(next!==',')fail('invalid_root_separator');next=await take();if(next==='}')fail('trailing_comma');
  }if(offset<batch.length||!(await it.next()).done)fail('trailing_json');
@@ -116,7 +116,7 @@ export function convertSnapshotRow(raw:unknown):TradeEvent{
  if(row.fixtureId!==r.FixtureId||!row.fixture||row.markets?.some(m=>!Number.isSafeInteger(m.id)||!m.id||m.bets?.some(b=>b.id===undefined||b.id===null||String(b.id).trim()==='')))return fail('sdk_row_mismatch');return row;
 }
 export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string};
-export async function fullSnapshot(options:{timestamp?:number;url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
+export async function fullSnapshot(options:{timestamp?:number;url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;applyBatch?:(rows:TradeEvent[],started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
  const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};if(!Number.isSafeInteger(limits.memoryWaitMs)||limits.memoryWaitMs<0||limits.memoryWaitMs>60000||!Number.isSafeInteger(limits.memoryRetryMs)||limits.memoryRetryMs<1||limits.memoryRetryMs>1000)throw Error('INVALID_SNAPSHOT_MEMORY_WAIT');fullSnapshotMemory();options.assertOpen();
  const space=await statfs(options.directory);if(Number(space.bavail)*Number(space.bsize)<limits.responseBytes+512*MiB)fail('disk_headroom');
  const dir=await mkdtemp(join(options.directory,'.full-snapshot-'));const file=join(dir,'response.private.json');
@@ -165,8 +165,18 @@ export async function fullSnapshot(options:{timestamp?:number;url:string;credent
   await memoryReady();
   progress('apply');
   // Envelope (including trailing Header/errors) and ALL rows verified before first application.
-  let lastApplyProgress=performance.now();
-  await walkSnapshot(file,async raw=>{options.assertOpen();await memoryReady();await options.apply(convertSnapshotRow(raw),started);appliedRows++;if(appliedRows===1||appliedRows%100===0||performance.now()-lastApplyProgress>=5000){lastApplyProgress=performance.now();progress('apply');}},limits.itemBytes);
+  let lastApplyProgress=performance.now(),lastPublishedApplied=0;let pending:TradeEvent[]=[],pendingBytes=0;
+  const flush=async()=>{if(!pending.length)return;await memoryReady();const batch=pending;pending=[];pendingBytes=0;
+   if(options.applyBatch)await options.applyBatch(batch,started);else for(const row of batch)await options.apply(row,started);
+   appliedRows+=batch.length;if(lastPublishedApplied===0||Math.floor(appliedRows/100)>Math.floor(lastPublishedApplied/100)||performance.now()-lastApplyProgress>=5000){lastApplyProgress=performance.now();lastPublishedApplied=appliedRows;progress('apply');}
+  };
+  await walkSnapshot(file,async(raw,rawBytes)=>{options.assertOpen();await memoryReady();
+   // At most 16 fixtures / 2 MiB encoded source per queued job; a large bounded
+   // fixture runs alone. Never accumulate an entire document or bypass ordering.
+   if(pending.length&&(pending.length>=16||pendingBytes+rawBytes>2*MiB))await flush();
+   pending.push(convertSnapshotRow(raw));pendingBytes+=rawBytes;
+   if(!options.applyBatch||pending.length>=16||pendingBytes>=2*MiB)await flush();
+  },limits.itemBytes);await flush();
   progress('complete');
   return {ids,rows,bytes,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString()};
  }catch(error){try{progress(lastStage);}catch{/* Progress reporting must not replace the original failure. */}if(timedOut)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',timeoutMs:limits.totalMs,message:'Tiempo máximo de descarga snapshot excedido; baseline bloqueado.'});if(error instanceof OperationError&&httpStatus!==undefined&&error.diagnostic.httpStatus===undefined)throw new OperationError({...error.diagnostic,httpStatus});throw error;}finally{clearTimeout(timer);abort.abort();await rm(dir,{recursive:true,force:true});}

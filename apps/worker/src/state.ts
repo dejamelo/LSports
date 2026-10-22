@@ -1,3 +1,4 @@
+import {getHeapStatistics} from 'node:v8';
 import {jsonItems,maskEventAvailability,type AvailabilityBlocks} from '@lsports/feed-store';
 import { timestampOrder } from './timestamp-contract.js';
 import { SettlementType, OutrightScoreStatus } from "trade360-nodejs-sdk";
@@ -103,6 +104,26 @@ export class TradeState {
     const result=this.mutationTail.then(operation);this.mutationTail=result.then(()=>{},()=>{});return result;
   }
   private projectionCaptured=new WeakSet<Row>();
+  private publicationCaptured=new WeakSet<Row>();
+  private publicationDone?:Promise<void>;
+  publicationIdle(){return this.publicationDone??Promise.resolve();}
+  async publicationMutation<T>(operation:()=>T,waiting?:(active:boolean)=>void):Promise<T>{
+    return this.exclusive(async()=>{
+      // The writer never needs this gate after capture: waiting here cannot
+      // deadlock publication. Do not build a second unbounded state graph.
+      if(this.publicationDone){const v=getHeapStatistics();if(v.heap_size_limit-v.used_heap_size<512*1024**2){waiting?.(true);console.info(JSON.stringify({operation:'state.publication_wait',stage:'heap_reserve',heapHeadroomBytes:v.heap_size_limit-v.used_heap_size,atUTC:new Date().toISOString()}));await this.publicationDone;waiting?.(false);}}
+      return operation();
+    });
+  }
+  capturePublication(){
+    if(this.publicationDone)throw Error('PUBLICATION_CAPTURE_OVERLAP');
+    const captured=Object.create(this) as TradeState;
+    captured.rows={prematch:new Map(this.rows.prematch),inplay:new Map(this.rows.inplay)};
+    captured.connections=structuredClone(this.connections);captured.metrics=structuredClone(this.metrics);
+    for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.add(row);
+    let done!:()=>void;this.publicationDone=new Promise<void>(resolve=>done=resolve);let released=false;
+    return {state:captured,release:()=>{if(released)return;released=true;for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.delete(row);this.publicationDone=undefined;done();}};
+  }
   private projectionCache=new WeakMap<Row,{context:string;event:SportEvent}>();
   restoration?:import("@lsports/contracts").EventFeed["restoration"];
   rows: Record<Lane, Map<number | string, Row>> = {
@@ -190,7 +211,7 @@ export class TradeState {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
         this.rows[lane].set(key, row);
       }
-      if(this.projectionCaptured.has(row)){row=structuredClone(row);this.rows[lane].set(key,row);}
+      if((this.projectionCaptured.has(row)||this.publicationCaptured.has(row))){row=structuredClone(row);this.rows[lane].set(key,row);}
       this.projectionCache.delete(row);
       if(observation){
         const at=new Date(observation.receivedAt).toISOString();
@@ -343,7 +364,7 @@ export class TradeState {
   }
   beginPartitionedSnapshot(lane:Lane){
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
-    for(const [key,original] of this.rows[lane])if(!original.outright){const row=this.projectionCaptured.has(original)?structuredClone(original):original;this.rows[lane].set(key,row);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+    for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;this.rows[lane].set(key,row);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
   }
   finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
     this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));

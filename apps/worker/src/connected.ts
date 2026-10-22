@@ -44,11 +44,20 @@ const transportEnd=(reason:"connection_closed"|"channel_closed"|"consumer_cancel
 export async function publicationTurn<T>(state:TradeState,persist:()=>Promise<T>){
  await nextTurn();return state.exclusive(persist);
 }
+// Only immutable capture holds the state gate. File I/O uses frozen row references.
+export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable:TradeState)=>Promise<T>){
+ await nextTurn();const captured=await state.exclusive(()=>state.capturePublication());
+ try{return await persist(captured.state);}finally{captured.release();}
+}
 // Preserve the same processing/FIFO barriers; expose which one is actually awaited.
-export async function snapshotApplyTurn<T>(processing:Promise<unknown>,state:Pick<TradeState,'exclusive'>,apply:()=>T|Promise<T>,observe:(phase:string,elapsedMs:number)=>void,intervalMs=10000):Promise<T>{
+export async function snapshotApplyTurn<T>(processing:Promise<unknown>,state:Pick<TradeState,'exclusive'|'publicationMutation'>,apply:()=>T|Promise<T>,observe:(phase:string,elapsedMs:number)=>void,intervalMs=10000):Promise<T>{
  let phase='processing_queue',completed=false;const began=performance.now();const report=(stage:string)=>{try{observe(stage,Math.ceil(performance.now()-began));}catch{/* Instrumentation must not replace an application failure. */}};const timer=setInterval(()=>report(phase),intervalMs);timer.unref();
- try{await processing;phase='state_exclusive';const result=await state.exclusive(()=>{phase='apply';return apply();});completed=true;return result;}
+ try{await processing;phase='state_exclusive';const result=await state.publicationMutation(()=>{phase='apply';return apply();},waiting=>{phase=waiting?'publication_heap_pressure':'state_exclusive';});completed=true;return result;}
  finally{clearInterval(timer);report(completed?'completed':'failed');}
+}
+export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,now=Date.now()){
+ const applying=Object.values(state.connections).some(c=>c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&Date.parse(c.lastSnapshotErrorAt||'')<Date.parse(c.fullSnapshot.startedAt||'') || c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&!c.lastSnapshotErrorAt);
+ return !applying||now-lastCompletedAt>=60000;
 }
 export function coalescedPersistence(persist:()=>Promise<void>){
  let tail:Promise<void>=Promise.resolve(),queued:Promise<void>|undefined;
@@ -87,18 +96,19 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     }
     const publish = createPublisher(path);
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
-    let writes=0,lastPersistLog=0,loopWindowStart=Date.now();
-    const save = coalescedPersistence(()=>publicationTurn(state,()=>operation("file.persist", "local", async () => {
+    let writes=0,lastPersistLog=0,lastCompletedPublication=0,loopWindowStart=Date.now();
+    const save = coalescedPersistence(()=>publicationCaptureTurn(state,stable=>operation("file.persist", "local", async () => {
         const memoryStage=(stage:string)=>{const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
         memoryStage('capture');
-        const started=performance.now();const feed = state.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
+        const started=performance.now();const feed = stable.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
         tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
-        const {regular,...saved}=streamCheckpoint(state);
+        const {regular,...saved}=streamCheckpoint(stable);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
-        memoryStage('regular_checkpoint');await persistRegularCheckpoint(path,state);
+        memoryStage('regular_checkpoint');await persistRegularCheckpoint(path,stable);
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
         const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
         memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks);
+        lastCompletedPublication=Date.now();
         const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
@@ -115,7 +125,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           }),
         );
       }
-      if (!writing)
+      if (!writing&&heartbeatPublicationDue(state,lastCompletedPublication))
         writing = save()
           .catch(() =>
             console.error("No se pudo guardar el estado local del worker."),
@@ -288,7 +298,7 @@ export async function session(
   signal.addEventListener("abort", abort, { once: true });
   let processing = Promise.resolve();let backgroundCommit:Promise<void>|undefined;let checkpointPending=0;
   let buffered: ConsumeMessage[] = [];
-  let bufferingForSnapshot = false;
+  let bufferingForSnapshot = false;let snapshotApplicationActive=false;
   let drainTimer:ReturnType<typeof setTimeout>|undefined;
   const seen = new Set<string>();
   const reportedShapes = new Set<string>();
@@ -355,7 +365,7 @@ export async function session(
         }
         if (!seen.has(decoded.guid)) {
           await operation("feed.apply", "local", async () =>
-            state.exclusive(()=>state.apply(lane, decoded.events, decoded.at,{source:"amqp",receivedAt:Number((msg.fields as unknown as {inboxReceived?:number}|undefined)?.inboxReceived)||Date.now()})),
+            state.publicationMutation(()=>state.apply(lane, decoded.events, decoded.at,{source:"amqp",receivedAt:Number((msg.fields as unknown as {inboxReceived?:number}|undefined)?.inboxReceived)||Date.now()})),
           );
         }
         if(decoded.events.length>0&&decoded.metadata.timestampSource!=='received_control')processedSourceFloor=Math.min(processedSourceFloor??Infinity,decoded.at);
@@ -365,7 +375,7 @@ export async function session(
         if(commit)await save();
         seen.add(decoded.guid);
         if (seen.size > 10000) seen.delete(seen.values().next().value!);
-        if(commit)await operation("amqp.ack", "amqp", async () => ackDelivery(msg));else {const retained=durable?{fields:{inboxId:(msg.fields as unknown as {inboxId:number}).inboxId}} as unknown as ConsumeMessage:msg;pendingAcks.push(retained);pendingMetadata.set(retained,decoded.metadata);}
+        if(commit)await operation("amqp.ack", "amqp", async () => ackDelivery(msg));else {const retained=durable?{fields:{inboxId:(msg.fields as unknown as {inboxId:number}).inboxId}} as unknown as ConsumeMessage:msg;pendingAcks.push(retained);if(pendingAcks.length===1)pendingMetadata.set(retained,decoded.metadata);}
         const shape = JSON.stringify([
           decoded.type,
           decoded.metadata.compression,
@@ -408,12 +418,13 @@ export async function session(
     };
     let drainScheduled=false;
     const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;
-      const enqueue=()=>{if(closed){drainScheduled=false;return;}
+      const enqueue=()=>{if(closed||snapshotApplicationActive){drainScheduled=false;return;}
       processing=processing.then(async()=>{
         drainScheduled=false;
-        while(!closed&&durable&&stageDelivery&&pendingAcks.length+checkpointPending>=8192)await backgroundCommit;
+        if(snapshotApplicationActive)return; // raw reception/SQLite ACK continue in the separate actor
+        while(!closed&&durable&&stageDelivery&&pendingAcks.length+checkpointPending>=32768)await backgroundCommit;
         if(closed)return;
-        const messages=buffered.splice(0,durable&&stageDelivery?Math.min(4096,Math.max(1,8192-pendingAcks.length-checkpointPending)):durable?4096:100);
+        const messages=buffered.splice(0,durable&&stageDelivery?Math.min(4096,Math.max(1,32768-pendingAcks.length-checkpointPending)):durable?4096:100);
         for(const msg of messages){await processMessage(msg,false);if(closed)break;if(durable&&stageDelivery)stageDelivery.call(channel,msg);}
         if(!closed&&durable&&stageDelivery)commitPending();
         else if(!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}
@@ -455,6 +466,7 @@ export async function session(
     let checkpointAnchorSeconds:number|undefined;
     const requireOpen=()=>{if(closed || signal.aborted)throw failure || transportEnd("worker_stopped");};
     const recover = async () => {
+     try{
       requireOpen();
       bufferingForSnapshot = false;
       state.set(lane, {
@@ -475,19 +487,19 @@ export async function session(
             if(timestampRecoveryPending){
               state.set(lane,{message:"Recuperando eventos y liquidaciones desde el checkpoint seguro; cuotas bloqueadas."});
               await api.snapshotFull({timestamp:recoveryAnchor,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,apply:async(row,at)=>{
-                const applied=processing.then(async()=>{requireOpen();await state.exclusive(()=>state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()}));});processing=applied;await applied;
+                const applied=processing.then(async()=>{requireOpen();await state.publicationMutation(()=>state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()}));});processing=applied;await applied;
               }});
               requireOpen();await processing;await save();timestampRecoveryPending=false;
               console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
             }
             const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
-            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(()=>state.beginPartitionedSnapshot(lane));await save();
-            const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows===1){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>{
-              const applied=snapshotApplyTurn(processing,state,()=>{requireOpen();return state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{
-                if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,atUTC:new Date().toISOString()}));
-              });
-              processing=applied;await applied;
-            }});
+            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();
+            const applySnapshotBatch=async(rows:import('./state.js').TradeEvent[],at:number)=>{
+              const prefix=processing;const applied=(async()=>{for(let index=0;index<rows.length;index++)await snapshotApplyTurn(index===0?prefix:Promise.resolve(),state,()=>{requireOpen();state.apply(lane,[{...rows[index],marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{
+                if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,atUTC:new Date().toISOString()}));
+              });})();processing=applied;await applied;
+            };
+            const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply')snapshotApplicationActive=true;state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
           }else if(lane==='prematch'&&api.snapshotPartitioned){
@@ -495,7 +507,7 @@ export async function session(
             let inventory=new Set<number>();
             // Inventory itself can wait through a cooldown. Do not retain 100 unacked
             // deliveries until begin(ids): that callback only runs AFTER inventory HTTP.
-            await state.exclusive(()=>state.beginPartitionedSnapshot(lane));await save();
+            await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();
             const prefix=buffered;buffered=[];
             const handoff=processing.then(async()=>{for(const msg of prefix){await processMessage(msg,!durable);if(closed)break;}if(durable&&!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}});
             processing=handoff;bufferingForSnapshot=false;await handoff;requireOpen();
@@ -504,18 +516,18 @@ export async function session(
               batch:async(batch,at)=>{
                 requireOpen();const capacity=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'64'},undefined,lane);
                 if(!capacity.allowed)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,message:'Memoria insuficiente para aplicar/persistir el lote; baseline incompleto.'});
-                const applied=processing.then(async()=>{requireOpen();await state.exclusive(()=>state.apply(lane,batch.map(event=>({...event,marketRecovery:true})),at,{source:'snapshot',receivedAt:Date.now()}));await save();});
+                const applied=processing.then(async()=>{requireOpen();for(const event of batch)await state.publicationMutation(()=>state.apply(lane,[{...event,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()}));await save();});
                 processing=applied;await applied;
               },
               progress:async progress=>{requireOpen();state.set(lane,{partitionRecovery:progress});await save();},
             });
             requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,inventory,api.snapshotAudit?.()));partitionCompleted=true;
             console.info(JSON.stringify({lane,operation:'snapshot.events',status:'partitioned_complete',...result}));
-          }else {await state.exclusive(()=>state.beginPartitionedSnapshot(lane));await save();rows=await api.snapshot();}
+          }else {await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();rows=await api.snapshot();}
           if (closed || signal.aborted) throw failure || new Error("Disconnected during recovery");
           if(rows!==undefined){
             const recovered=rows;
-            const applied=processing.then(async()=>{requireOpen();await state.exclusive(()=>{state.apply(lane,recovered.map(r=>({...r,marketRecovery:true})),started,{source:'snapshot',receivedAt:Date.now()});state.finishPartitionedSnapshot(lane,new Set(recovered.map(r=>r.fixtureId)),api.snapshotAudit?.(),started);});await save();});
+            const applied=processing.then(async()=>{requireOpen();for(const row of recovered)await state.publicationMutation(()=>state.apply(lane,[{...row,marketRecovery:true}],started,{source:'snapshot',receivedAt:Date.now()}));await state.exclusive(()=>state.finishPartitionedSnapshot(lane,new Set(recovered.map(r=>r.fixtureId)),api.snapshotAudit?.(),started));await save();});
             processing=applied;await applied;
           }
           regularSnapshotReady = true;
@@ -552,7 +564,7 @@ export async function session(
         try {
           const recovered = await action();
           if (closed || signal.aborted) throw failure || new Error("Disconnected during outright recovery");
-          await operation("feed.apply", "local", async () => state.exclusive(()=>state.apply(lane, recovered, startedOutright,{source:"snapshot",receivedAt:Date.now()})));
+          await operation("feed.apply", "local", async () => {for(const row of recovered)await state.publicationMutation(()=>state.apply(lane,[row],startedOutright,{source:"snapshot",receivedAt:Date.now()}));});
           outrightRecovery[counter] = recovered.length;
           attempt.lastSuccessAt=new Date().toISOString();
           if(name === "snapshot.outright.markets") outrightRecovery.timestampRejections = api.outrightTimestampRejections?.() || [];
@@ -611,6 +623,7 @@ export async function session(
           coverage: state.projection(Date.now(),false).coverage?.[lane],
         }),
       );
+     }finally{snapshotApplicationActive=false;if(buffered.length&&!closed)scheduleDrain();}
     };
     await recover();
     try {

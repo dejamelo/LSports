@@ -102,8 +102,8 @@ class Upgrade(unittest.TestCase):
     if 'up' in args:running=True;selected=image;return b''
     if 'create' in args:running=False;selected='base';return b''
     raise AssertionError('Unexpected operation')
-   keys=('SECURE','BACKUPS','RELEASES','run','model','states','control_status','snapshot_host_memory','shutil','os','verify_oom_inboxes','archive_oom_locks','oom_restore_log_summary');old={k:NS.get(k) for k in keys}
-   NS.update(oom_restore_log_summary=lambda backup:{'present':False},verify_oom_inboxes=lambda directory:[{'lane':'prematch','pendingRows':13526}],archive_oom_locks=lambda *args:None,SECURE=secure,BACKUPS=backups,RELEASES=releases,run=run,model=model,states=states,control_status=lambda:200,snapshot_host_memory=lambda:12*1024**3,shutil=types.SimpleNamespace(**{**NS['shutil'].__dict__,'disk_usage':lambda _:types.SimpleNamespace(free=10*1024**3)}),os=types.SimpleNamespace(**{**os.__dict__,'geteuid':lambda:0}))
+   keys=('SECURE','BACKUPS','RELEASES','run','model','states','control_status','snapshot_host_memory','shutil','os','verify_oom_inboxes','archive_oom_locks','oom_restore_log_summary','offline_rehearsal_disk_plan','streamed_rehearsal_run');old={k:NS.get(k) for k in keys}
+   NS.update(streamed_rehearsal_run=run,offline_rehearsal_disk_plan=lambda *args:None,oom_restore_log_summary=lambda backup:{'present':False},verify_oom_inboxes=lambda directory:[{'lane':'prematch','pendingRows':13526}],archive_oom_locks=lambda *args:None,SECURE=secure,BACKUPS=backups,RELEASES=releases,run=run,model=model,states=states,control_status=lambda:200,snapshot_host_memory=lambda:12*1024**3,shutil=types.SimpleNamespace(**{**NS['shutil'].__dict__,'disk_usage':lambda _:types.SimpleNamespace(free=10*1024**3)}),os=types.SimpleNamespace(**{**os.__dict__,'geteuid':lambda:0}))
    def invoke(phase,base_hashes=hashes,verify_only=False):
     out=io.StringIO();request={'phase':phase,'files':files,'baseHashes':base_hashes,'handoff':handoff,'freshAuditAt':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')}
     if distribution:request['fixCommit']='2aa06f7'

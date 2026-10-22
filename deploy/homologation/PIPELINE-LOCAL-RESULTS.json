@@ -1,0 +1,34 @@
+{
+  "operation": "pipeline.offline.complete",
+  "snapshotBytes": 540714293,
+  "snapshotRows": 25416,
+  "applied": 25416,
+  "preload": 674380,
+  "received": 21900,
+  "acknowledged": 21900,
+  "processed": 585728,
+  "checkpointed": 569344,
+  "processingBacklog": 670355,
+  "finalBacklog": 110552,
+  "load": {
+    "event": "load_complete",
+    "sent": 21900,
+    "durationMs": 300007.744968
+  },
+  "writes": 70,
+  "maxPersistMs": 100924.80437500004,
+  "peakRSSBytes": 2083762176,
+  "maxEventLoopDelayMs": 8925.478911,
+  "readbackRows": 25416,
+  "scope": "synthetic_snapshot_plus_real_durable_actor_and_session_not_AWS",
+  "maxSampledCgroupBytes": 4702031872,
+  "maxCgroupPeakBytes": 4827832320,
+  "limitations": [
+    "Synthetic snapshot; real preserved AWS copy is a mandatory deployment gate.",
+    "Hot message fixture set: 100; snapshot fixtures: 25416.",
+    "Measured net backlog reduction; remaining 110552 rows were not fully drained in this run.",
+    "Sampled cgroup peak was collected before final readback finished.",
+    "Bulk run preceded stricter per-fixture heap-reserve waiting and additional fallback SDK guards; those branches passed focused tests.",
+    "Main event loop maximum 8925ms; reception actor remains separate, but real heartbeat/AMQP stability remains an AWS acceptance criterion."
+  ]
+}

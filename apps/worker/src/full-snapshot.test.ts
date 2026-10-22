@@ -180,3 +180,12 @@ test('apply progress exposes the first completed row before the next 100-row che
   assert.equal(applied,100);assert.equal(result.rows,100);assert.equal(progress.at(-1)?.appliedRows,100);assert.equal(progress.at(-1)?.stage,'complete');
  }finally{process.availableMemory=original;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(directory,{recursive:true,force:true});}
 });
+
+test('bounded snapshot jobs preserve fixture order, publish first completion and avoid one processing barrier per fixture',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-snapshot-batch-'));const original=process.availableMemory;process.availableMemory=()=>1024**3;
+ const server=createServer((_req,res)=>res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:Array.from({length:101},(_,i)=>row(i+1))})));await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+ const received:number[]=[];const sizes:number[]=[];const progress:any[]=[];
+ try{const result=await fullSnapshot({url:'http://127.0.0.1:'+(server.address() as any).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},async apply(){assert.fail('batch sink must be used');},async applyBatch(rows){assert.ok(rows.length<=16);sizes.push(rows.length);received.push(...rows.map(r=>r.fixtureId));},progress:p=>progress.push(p)});
+  assert.deepEqual(received,Array.from({length:101},(_,i)=>i+1));assert.equal(result.rows,101);assert.equal(sizes.length,7);assert.equal(progress.find(p=>p.stage==='apply'&&p.appliedRows>0).appliedRows,16);assert.equal(progress.at(-1).appliedRows,101);
+ }finally{process.availableMemory=original;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
+});
