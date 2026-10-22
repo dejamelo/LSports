@@ -7,6 +7,7 @@ if(process.env.ADL_OFFLINE_FIXTURE!=='1')throw Error('ISOLATED_FIXTURE_ONLY');
 const {readdir}=await import('node:fs/promises');if((await readdir('/data')).length)throw Error('EMPTY_SYNTHETIC_DIRECTORY_REQUIRED');
 const s=new TradeState(),at=Date.now()-1000,path='/data/trade-feed.json';
 for(const lane of ['prematch','inplay'])for(let id=1;id<=20;id++)s.apply(lane,[{fixtureId:id,fixture:{status:1},markets:[{id:1,status:1,bets:[{id:'1',price:'2.1',status:1,isChanged:1}]}]}],at);
+s.apply('prematch',[{fixtureId:100,outright:{competitionId:90},markets:[]}],at);
 await persistRegularCheckpoint(path,s);await createPublisher(path)(s.projection(),{...checkpoint(s,false),regularExternal:true});
 const dbs=[];
 for(const lane of ['prematch','inplay']){

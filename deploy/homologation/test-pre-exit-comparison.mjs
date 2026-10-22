@@ -1,0 +1,15 @@
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+const source=readFileSync(new URL('./pre-exit-replay-proof.mjs',import.meta.url),'utf8');
+const functions=source.slice(source.indexOf('function* entries'),source.indexOf('async function stateDigest'));
+const context={createHash,checkpoint:s=>({regular:[...s.rows.prematch.values()],outright:[...s.rows.inplay.values()]})};vm.createContext(context);vm.runInContext(functions+';this.entries=entries;this.difference=difference;this.canonical=canonical;',context);
+const make=reverse=>({rows:{prematch:new Map(reverse?[[2,{fixtureId:2,markets:[]}],[1,{fixtureId:1,markets:[]}]]:[[1,{fixtureId:1,markets:[]}],[2,{fixtureId:2,markets:[]}]]),inplay:new Map()}});
+assert.equal(JSON.stringify([...context.entries(make(false))]),JSON.stringify([...context.entries(make(true))]));
+assert.equal(context.difference({a:1,b:2},{b:2,a:1}),undefined);
+assert.equal(context.difference({markets:[1,2]},{markets:[2,1]}).path,'$.markets[0]');
+assert.equal(context.difference({a:null},{a:[]}).actualType,'array');
+assert.equal(context.difference({a:1},{}).fieldMembershipMismatch,true);
+assert.equal(context.difference({a:1},{a:'1'}).expectedType,'number');
+console.log('Identity order independent; field, type, membership and array order remain strict: OK');

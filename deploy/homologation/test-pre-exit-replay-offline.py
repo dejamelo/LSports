@@ -21,9 +21,11 @@ class OfflineReplay(unittest.TestCase):
      if incomplete:
       self.assertEqual(result.returncode,1);self.assertNotIn(b'pre-exit-proof-ok',result.stdout);self.assertIn(b'inbox_integrity_prematch',result.stdout);self.assertFalse((output/'receipt.json').exists())
      else:
-      self.assertEqual(result.returncode,0,result.stdout.decode()+result.stderr.decode());receipt=json.loads((output/'receipt.json').read_text());self.assertEqual(receipt['stateRows'],40);self.assertEqual([r['replayedRows'] for r in receipt['inboxes']],[100,100]);self.assertEqual([r['pendingCommittedRows'] for r in receipt['inboxes']],[100,100])
+      self.assertEqual(result.returncode,0,result.stdout.decode()+result.stderr.decode());receipt=json.loads((output/'receipt.json').read_text());self.assertEqual(receipt['stateRows'],41);self.assertEqual([r['replayedRows'] for r in receipt['inboxes']],[100,100]);self.assertEqual([r['pendingCommittedRows'] for r in receipt['inboxes']],[100,100])
       result=subprocess.run(command+['readback'],capture_output=True,timeout=120);self.assertEqual(result.returncode,0,result.stdout.decode());readback=json.loads((output/'readback.json').read_text());self.assertTrue(readback['verified']);self.assertEqual(readback['stateSha256'],receipt['stateSha256'])
       public=json.loads((output/'projection.json').read_text());self.assertTrue(all(not s['available'] for e in public['events'] for s in e['selections']));settled=next(e for e in public['events'] if e['id']=='prematch:1');self.assertIn('selection_settled',settled['selections'][0]['unavailableReasons'])
+      manifest=output/'expected-state.jsonl';lines=manifest.read_text().splitlines();entry=json.loads(lines[0]);entry['value']['regular'][0]['fixtureId']=999;lines[0]=json.dumps(entry);manifest.write_text('\n'.join(lines)+'\n')
+      result=subprocess.run(command+['readback'],capture_output=True,timeout=120);self.assertEqual(result.returncode,1,result.stdout.decode());diagnostic=json.loads((output/'divergence.json').read_text());self.assertEqual(diagnostic['path'],'$.value.regular[0].fixtureId');self.assertTrue(diagnostic['valueMismatch']);self.assertNotIn('999',json.dumps(diagnostic))
      self.assertEqual(original,{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in source.iterdir()})
  def test_verified_paused_container_kill_is_not_reported_as_docker_oom(self):
   name='adl-isolated-finalize-'+uuid.uuid4().hex[:12]

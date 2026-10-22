@@ -325,12 +325,13 @@ def pre_exit_proof_run(command,log,phase):
                 emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_proof.progress',status='running',proofPhase=phase,elapsedSeconds=round(elapsed),metrics={k:v for k,v in (latest or {}).items() if k in ('processed','rssBytes','heapUsedBytes','heapLimitBytes','maxRSSBytes') and type(v) is int},workerStarted=False,posnetChanged=False)
             time.sleep(1)
     if child.returncode:
-        details={}
+        details={};divergence=None
         for line in read_tail(log).decode(errors='replace').splitlines():
             try:r=json.loads(line)
             except ValueError:continue
+            if isinstance(r,dict) and r.get('operation')=='pre_exit.divergence':divergence={k:v for k,v in r.items() if k in ('entity','lane','path','expectedType','actualType','expectedCount','actualCount','fieldMembershipMismatch','valueMismatch')}
             if isinstance(r,dict) and r.get('operation')=='pre_exit.proof' and r.get('status')=='blocked':details={k:v for k,v in r.items() if k in ('phase','processed','reason','validationCode','validationDetail','rssBytes','heapUsedBytes','heapLimitBytes','maxRSSBytes')}
-        emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_proof',status='blocked',reason='PRE_EXIT_COPY_RECOVERY_FAILED_NO_TERMINATION',proofPhase=phase,childExitCode=child.returncode,diagnostic=details,privateLog=log.name,workerStarted=False,posnetChanged=False)
+        emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_proof',status='blocked',reason='PRE_EXIT_COPY_RECOVERY_FAILED_NO_TERMINATION',proofPhase=phase,childExitCode=child.returncode,diagnostic=details,divergence=divergence,privateLog=log.name,workerStarted=False,posnetChanged=False)
         raise RuntimeError('PRE_EXIT_COPY_RECOVERY_FAILED_NO_TERMINATION')
     require(b'pre-exit-proof-ok' in read_tail(log),'PRE_EXIT_PROOF_COMPLETION_NOT_VERIFIED')
 
@@ -390,11 +391,14 @@ def recover_completed_shutdown(progress,save,backup,evidence):
         require(snapshot_file_hash(output/'receipt.json')==proof['receiptHash'] and snapshot_file_hash(output/'readback.json')==proof['readbackHash'] and snapshot_file_hash(output/'projection.json')==proof['projectionHash'] and snapshot_file_hash(output/'projection.json.regular-checkpoint.json')==proof['regularHash'],'PRE_EXIT_PROOF_RECEIPT_CHANGED')
     else:
         require(shutil.disk_usage(backup).free>=total*5+512*1024**2,'PRE_EXIT_COPY_DISK_HEADROOM_INSUFFICIENT');require(snapshot_host_memory()>=6*1024**3,'PRE_EXIT_COPY_MEMORY_HEADROOM_INSUFFICIENT')
+        previous_original=Path(proof['originalCopy']) if proof.get('sourceHashes')==hashes and proof.get('originalCopy') else None
+        if previous_original is not None:
+            require(previous_original.parent==backup and not previous_original.is_symlink() and previous_original.is_dir() and all((previous_original/name).is_file() and not (previous_original/name).is_symlink() and snapshot_file_hash(previous_original/name)==sha for name,sha in hashes.items()),'PRE_EXIT_PRESERVED_COPY_IDENTITY_CHANGED')
         nonce=os.urandom(8).hex();original=backup/('pre-exit-original-'+nonce);original.mkdir(mode=0o700);work=backup/('rehearsal-'+os.urandom(12).hex());work.mkdir(mode=0o700);output=backup/('pre-exit-output-'+nonce);output.mkdir(mode=0o700)
         progress['preExitProof']={'verified':False,'originalCopy':str(original),'workingCopy':str(work),'output':str(output),'sourceHashes':hashes,'proofCodeHash':proof_code_hash};save(progress)
         copies=[]
         for src in paths:
-            raw=original/src.name;shutil.copyfile(src,raw);os.chmod(raw,0o600)
+            raw=original/src.name;shutil.copyfile(previous_original/src.name if previous_original is not None else src,raw);os.chmod(raw,0o600)
             with raw.open('rb') as file:os.fsync(file.fileno())
             require(snapshot_file_hash(raw)==hashes[src.name] and snapshot_file_hash(src)==hashes[src.name],'PRE_EXIT_RAW_COPY_HASH_MISMATCH')
             dst=work/src.name;shutil.copyfile(raw,dst);os.chmod(dst,0o600);copies.append((raw,dst,hashes[src.name]))
