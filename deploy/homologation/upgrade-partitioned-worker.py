@@ -351,6 +351,37 @@ def save_upgrade_exception(backup,error,operation):
         details['loggingFailure']=recovery_exception_details(logging_error)
     return details
 
+def reuse_pre_exit_restore(progress,backup,directory,image_info,save):
+    proof=progress.get('preExitProof') or {}
+    if proof.get('verified') is not True:return False
+    if any(directory.glob('.full-snapshot-*/response.private.json')):
+        emit(operation='cutover.aws',stage='partitioned_upgrade.recovery_proof_reuse',status='not_reused',reason='PRESERVED_HTTP_SPOOL_REQUIRES_DISTINCT_REHEARSAL',workerStarted=False,posnetChanged=False)
+        return False
+    require(progress.get('verifiedExitContainerId')==progress.get('oldContainer') and progress.get('verifiedExitSignal',{}).get('status') in ('docker_accepted','exit_observed_after_intent'),'RESTORE_REUSE_CONTAINER_EXIT_UNVERIFIED')
+    require(proof.get('proofCodeHash')==hashlib.sha256(PRE_EXIT_REPLAY_PROOF.encode()).hexdigest(),'RESTORE_REUSE_PROOF_CODE_CHANGED')
+    require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==progress.get('digest'),'RESTORE_REUSE_PREPARED_IMAGE_CHANGED')
+    output=Path(proof.get('output',''));original=Path(proof.get('originalCopy',''))
+    require(output.parent==backup and original.parent==backup and output.is_dir() and original.is_dir() and not output.is_symlink() and not original.is_symlink(),'RESTORE_REUSE_PATH_UNVERIFIED')
+    def checked(path,sha):
+        require(re.fullmatch('[0-9a-f]{64}',str(sha)) and path.is_file() and not path.is_symlink() and snapshot_file_hash(path)==sha,'RESTORE_REUSE_ARTIFACT_HASH_MISMATCH')
+    hashes=proof.get('sourceHashes') or {};required={'trade-feed.json','trade-feed.json.regular-checkpoint.json','trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite'}
+    require(required<=set(hashes),'RESTORE_REUSE_SOURCE_SET_INCOMPLETE')
+    for name,sha in hashes.items():
+        require(Path(name).name==name,'RESTORE_REUSE_SOURCE_NAME_UNVERIFIED');checked(original/name,sha)
+        if name.endswith('.inbox.sqlite-shm'):continue # SQLite shared-memory cache is not a committed record.
+        require(progress.get('dataBackupHashes',{}).get(name)==sha,'RESTORE_REUSE_CURRENT_BACKUP_CHANGED');checked(backup/name,sha);checked(directory/name,sha)
+    for name,key in [('receipt.json','receiptHash'),('readback.json','readbackHash'),('projection.json','projectionHash'),('projection.json.regular-checkpoint.json','regularHash')]:checked(output/name,proof.get(key))
+    require((output/'receipt.json').stat().st_size<1024*1024 and (output/'readback.json').stat().st_size<1024*1024,'RESTORE_REUSE_RECEIPT_SIZE_LIMIT')
+    receipt=json.loads((output/'receipt.json').read_bytes());readback=json.loads((output/'readback.json').read_bytes())
+    require(readback.get('verified') is True and readback.get('stateRows')==receipt.get('stateRows')==proof.get('stateRows') and readback.get('stateSha256')==receipt.get('stateSha256') and readback.get('projectionSha256')==receipt.get('sha256')==proof.get('projectionHash'),'RESTORE_REUSE_ROUNDTRIP_RECEIPT_MISMATCH')
+    inboxes=receipt.get('inboxes',[])
+    require(len(inboxes)==2 and {r.get('lane') for r in inboxes}=={'prematch','inplay'} and all(type(r.get('pendingCommittedRows')) is int and r['pendingCommittedRows']>=0 and r['pendingCommittedRows']==r.get('replayedRows') and re.fullmatch('[0-9a-f]{64}',str(r.get('rawRecordSha256'))) for r in inboxes),'RESTORE_REUSE_INBOX_REPLAY_UNVERIFIED')
+    free=shutil.disk_usage(backup).free;require(free>=4*1024**3,'RESTORE_REUSE_ACTIVATION_DISK_HEADROOM_INSUFFICIENT')
+    progress.update(oomRestoreVerified=True,projectionReadbackVerified=True,rehearsalCopyVerified=True,preservedSpoolRehearsed=False)
+    progress['restoreProofReused']={'output':str(output),'receiptHash':proof['receiptHash'],'readbackHash':proof['readbackHash'],'reason':'same_prepared_image_same_committed_input_full_replay_roundtrip_verified'};save(progress)
+    emit(operation='cutover.aws',stage='partitioned_upgrade.recovery_proof_reuse',status='verified',rows=proof['stateRows'],inboxCount=2,freeDiskBytes=free,requiredFreeBytes=4*1024**3,newDataCopies=0,newProjectionWrites=0,backupsRemoved=0,workerStarted=False,posnetChanged=False)
+    return True
+
 def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     output=backup/('projection-rehearsal-'+digest[:24])
     require(not output.is_symlink(),'REHEARSAL_OUTPUT_PATH_UNSAFE')
@@ -1048,6 +1079,7 @@ def upgrade_partitioned(request):
                 if progress.get('oomContainerId') or progress.get('verifiedExitContainerId'):archive_oom_locks(directory,backup,progress,states('worker'))
                 require(not (directory/'trade-feed.json.lock').exists() and not list(directory.glob('trade-feed.json*.reclaim')) and not list(directory.glob('trade-feed.json.snapshot-*.lock')),'OOM_LOCKS_NOT_ARCHIVED')
                 progress['inboxIntegrity']=verify_oom_inboxes(directory)
+                if not progress.get('oomRestoreVerified'):reuse_pre_exit_restore(progress,backup,directory,image_info,save)
                 if not progress.get('oomRestoreVerified'):
                     candidates=[p for p in directory.glob('.full-snapshot-*/response.private.json') if p.is_file() and not p.is_symlink() and not p.parent.is_symlink() and re.fullmatch(r'\.full-snapshot-[A-Za-z0-9_-]{1,80}',p.parent.name) and 0<p.stat().st_size<=2*1024**3]
                     spool=max(candidates,key=lambda p:p.stat().st_mtime) if candidates else None
