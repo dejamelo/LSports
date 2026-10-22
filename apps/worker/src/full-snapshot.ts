@@ -20,7 +20,7 @@ import type {TradeEvent} from './state.js';
 const MiB=1024*1024;
 export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:20000,totalMs:120000};
 const fail=(reason:string,shape:Partial<NonNullable<import('@lsports/contracts').IntegrationDiagnostic['snapshotValidation']>>={}):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven',...shape},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
-export function fullSnapshotMemory(){const c=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'},undefined,'prematch');if(!c.allowed)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}
+export function fullSnapshotMemory(){const c=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'},undefined,'prematch');if(!c.allowed)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,snapshotMemory:c.memory,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.
 async function* tokens(file:string,max:number){let primitive='',quoted=false,escape=false,parts:string[]=[],size=0;
  for await(const chunk of createReadStream(file,{encoding:'utf8',highWaterMark:64*1024})){
@@ -120,7 +120,7 @@ export async function fullSnapshot(options:{timestamp?:number;url:string;credent
  const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};fullSnapshotMemory();options.assertOpen();
  const space=await statfs(options.directory);if(Number(space.bavail)*Number(space.bsize)<limits.responseBytes+512*MiB)fail('disk_headroom');
  const dir=await mkdtemp(join(options.directory,'.full-snapshot-'));const file=join(dir,'response.private.json');
- let bytes=0,timedOut=false,httpStatus:number|undefined,validatedRows=0,appliedRows=0;const progress=(stage:FullSnapshotProgress['stage'])=>options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString()});const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
+ let bytes=0,timedOut=false,httpStatus:number|undefined,validatedRows=0,appliedRows=0;let lastStage:FullSnapshotProgress['stage']='waiting_http';const progress=(stage:FullSnapshotProgress['stage'])=>{lastStage=stage;options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString()});};const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
  const timer=setTimeout(()=>{timedOut=true;abort.abort();},limits.totalMs);timer.unref();
  try{
   const url=new URL('/Prematch/GetEvents',options.url);if(url.username||url.password||!['http:','https:'].includes(url.protocol))fail('invalid_endpoint');
@@ -149,7 +149,7 @@ export async function fullSnapshot(options:{timestamp?:number;url:string;credent
   await walkSnapshot(file,async raw=>{options.assertOpen();fullSnapshotMemory();await options.apply(convertSnapshotRow(raw),started);appliedRows++;if(appliedRows%100===0)progress('apply');},limits.itemBytes);
   progress('complete');
   return {ids,rows,bytes,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString()};
- }catch(error){if(timedOut)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',timeoutMs:limits.totalMs,message:'Tiempo máximo de descarga snapshot excedido; baseline bloqueado.'});if(error instanceof OperationError&&httpStatus!==undefined&&error.diagnostic.httpStatus===undefined)throw new OperationError({...error.diagnostic,httpStatus});throw error;}finally{clearTimeout(timer);abort.abort();await rm(dir,{recursive:true,force:true});}
+ }catch(error){try{progress(lastStage);}catch{/* Progress reporting must not replace the original failure. */}if(timedOut)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',timeoutMs:limits.totalMs,message:'Tiempo máximo de descarga snapshot excedido; baseline bloqueado.'});if(error instanceof OperationError&&httpStatus!==undefined&&error.diagnostic.httpStatus===undefined)throw new OperationError({...error.diagnostic,httpStatus});throw error;}finally{clearTimeout(timer);abort.abort();await rm(dir,{recursive:true,force:true});}
 }
 
 // Run in a fresh offline process: no restored TradeState or projected graph is

@@ -431,6 +431,8 @@ def safe_feed_diagnostic(value):
     for key in ('retryAt',):
         if isinstance(value.get(key),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[0-9:.]+Z',value[key]):out[key]=value[key]
     if type(value.get('deferred')) is bool:out['deferred']=value['deferred']
+    if isinstance(value.get('snapshotMemory'),dict):
+        out['snapshotMemory']={k:v for k,v in value['snapshotMemory'].items() if k in ('heapLimitBytes','heapUsedBytes','heapHeadroomBytes','availableMemoryBytes') and (v is None or type(v) is int and v>=0) or k=='limitingFactor' and v in ('heap','available_memory','both','heap_only')}
     if isinstance(value.get('amqpCloseSignals'),list):out['amqpCloseSignals']=[v for v in value['amqpCloseSignals'] if isinstance(v,str) and v in {'connection_forced','heartbeat_timeout','ack_timeout','administrative_close','server_shutdown'}]
     if isinstance(value.get('distributionInspection'),dict):
         inspection=value['distributionInspection'];out['distributionInspection']={k:v for k,v in inspection.items() if k in ('before','startRequested','after') and type(v) is bool}

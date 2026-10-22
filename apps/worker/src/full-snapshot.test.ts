@@ -130,3 +130,15 @@ test('dense record tokenization stays within 256 MiB heap without retaining all 
   const result=JSON.parse(stdout);assert.equal(result.count,6000000);assert.ok(result.maxRSS>0);assert.ok(result.maxRSS<384*1024**2);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('memory deferral reports heap vs physical budget and the actual validated prefix without partial application',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-full-memory-prefix-'));const previous=process.availableMemory;let samples=0,applied=0;const progress:any[]=[];
+ const server=createServer((_req,res)=>res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:Array.from({length:12},(_,i)=>row(i+1))})));
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  process.availableMemory=()=>++samples===1?512*1024**2:0;
+  await assert.rejects(fullSnapshot({url:'http://127.0.0.1:'+(server.address() as any).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},progress:p=>progress.push(p),async apply(){applied++;}}),(error:any)=>{
+   assert.equal(error.diagnostic.reason,'memory_budget_exceeded');assert.equal(error.diagnostic.memoryBudgetBytes,320*1024**2);assert.equal(error.diagnostic.snapshotMemory.availableMemoryBytes,0);assert.equal(error.diagnostic.snapshotMemory.limitingFactor,'available_memory');return true;
+  });assert.equal(progress.at(-1).stage,'validate');assert.equal(progress.at(-1).validatedRows,10);assert.equal(progress.at(-1).appliedRows,0);assert.equal(applied,0);
+ }finally{process.availableMemory=previous;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
+});
