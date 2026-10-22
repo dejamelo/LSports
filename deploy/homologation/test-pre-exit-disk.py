@@ -14,10 +14,10 @@ class DiskPlan(unittest.TestCase):
    with patch.object(ns['shutil'],'disk_usage',return_value=type('Usage',(),{'free':0})()):
     with self.assertRaisesRegex(RuntimeError,'PRE_EXIT_COPY_DISK_HEADROOM_INSUFFICIENT'):ns['pre_exit_disk_plan'](root,100,hashes,{'workingCopy':str(active)},original)
    self.assertFalse(duplicate.exists());self.assertTrue(modified.exists());self.assertTrue(active.exists());self.assertTrue(original.exists())
-   report=json.loads((root/'pre-exit-disk-plan.json').read_text());self.assertEqual(report['requiredFreeBytes'],400+512*1024**2);self.assertEqual(report['missingBytes'],report['requiredFreeBytes']);self.assertEqual(report['minimumExpansionGiB'],1)
+   report=json.loads(next(root.glob('pre-exit-disk-plan-attempt-*.json')).read_text());self.assertEqual(report['requiredFreeBytes'],400+512*1024**2);self.assertEqual(report['missingBytes'],report['requiredFreeBytes']);self.assertEqual(report['minimumExpansionGiB'],1)
  def test_sufficient_space_has_no_cleanup_or_docker_calls(self):
   ns=module.load();ns.update(run=lambda _:self.fail('unnecessary docker query'),emit=lambda **r:None)
   with tempfile.TemporaryDirectory() as tmp:
    with patch.object(ns['shutil'],'disk_usage',return_value=type('Usage',(),{'free':10**10})()):ns['pre_exit_disk_plan'](Path(tmp),100,{}, {},None)
-   r=json.loads((Path(tmp)/'pre-exit-disk-plan.json').read_text());self.assertEqual(r['missingBytes'],0);self.assertEqual(r['requiredFreeBytes'],500+512*1024**2)
+   r=json.loads(next(Path(tmp).glob('pre-exit-disk-plan-attempt-*.json')).read_text());self.assertEqual(r['missingBytes'],0);self.assertEqual(r['requiredFreeBytes'],500+512*1024**2)
 if __name__=='__main__':unittest.main()

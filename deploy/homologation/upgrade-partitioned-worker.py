@@ -306,15 +306,18 @@ def container_process_tree(container):
     require(len(rows)<=512 and any(r['hostPid']==root for r in rows),'PROCESS_TREE_ROOT_UNVERIFIED')
     return {'containerId':container,'initHostPid':root,'processes':rows,'nodeProcesses':[r for r in rows if r['executable'] in ('node','nodejs')],'completeContainerProcessList':True}
 
-def replace_recovery_report(path,data):
-    # Mutable diagnostic report, never a preparation receipt or data backup.
+def write_recovery_attempt_report(path,data):
+    # Preserve legacy reports and all previous attempts. Never overwrite evidence.
     require(path.name in ('offline-rehearsal-disk-plan.json','pre-exit-disk-plan.json'),'RECOVERY_REPORT_SCOPE_UNVERIFIED')
     if path.exists() or path.is_symlink():
         info=path.lstat()
         require(path.is_file() and not path.is_symlink() and info.st_uid==os.geteuid() and info.st_nlink==1 and info.st_mode&0o077==0,'RECOVERY_REPORT_IDENTITY_UNVERIFIED')
-    temporary=path.parent/(path.name+'.'+os.urandom(8).hex()+'.tmp')
-    private(temporary,data)
-    durable_replace(temporary,path)
+    attempt=path.with_name(path.stem+'-attempt-'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())+'-'+os.urandom(8).hex()+'.json')
+    private(attempt,data)
+    fd=os.open(path.parent,os.O_RDONLY)
+    try:os.fsync(fd)
+    finally:os.close(fd)
+    return attempt
 
 def recovery_exception_details(error):
     import traceback,errno
@@ -323,6 +326,22 @@ def recovery_exception_details(error):
     if isinstance(error,OSError):details['osCode']=errno.errorcode.get(error.errno,'UNKNOWN');details['errno']=error.errno
     if isinstance(error,subprocess.CalledProcessError):details['childExitCode']=error.returncode
     if isinstance(error,FileExistsError) and Path(str(error.filename)).name in ('offline-rehearsal-disk-plan.json','pre-exit-disk-plan.json'):details['operation']='exclusive_create_existing_disk_report';details['file']=Path(error.filename).name
+    return details
+
+def save_upgrade_exception(backup,error,operation):
+    import traceback
+    details=recovery_exception_details(error)
+    details['operation']=operation if re.fullmatch('[a-z_.]{1,120}',str(operation)) else 'partitioned_upgrade.unknown'
+    if backup is None:return details
+    try:
+        info=backup.lstat()
+        require(backup.is_dir() and not backup.is_symlink() and info.st_uid==os.geteuid() and info.st_mode&0o077==0,'EXCEPTION_LOG_BACKUP_UNVERIFIED')
+        log=backup/('upgrade-exception-'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime())+'-'+os.urandom(8).hex()+'.private.log')
+        private(log,json.dumps({'operation':details['operation'],'exceptionType':type(error).__name__,'errno':getattr(error,'errno',None),'traceback':''.join(traceback.format_exception(type(error),error,error.__traceback__))}).encode())
+        details['privateLog']=log.name
+    except Exception as logging_error:
+        details['exceptionLogSaved']=False
+        details['loggingFailure']=recovery_exception_details(logging_error)
     return details
 
 def offline_rehearsal_disk_plan(backup,sources,progress,digest):
@@ -370,7 +389,8 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     minimum=(physical_gib+gib) if physical_gib is not None else None
     target=max(64,((minimum+3)//4)*4) if minimum is not None else None
     report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'minimumFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'currentEbsGiB':physical_gib,'minimumEbsGiB':minimum,'suggestedEbsGiB':target,'ebsGrowthGiB':target-physical_gib if target is not None else None,'estimatedEbsGrowthUSDPerMonth':round((target-physical_gib)*0.08,2) if target is not None else None,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':'conservative planning reserve, not measured complete serialization peak','removed':removed,'copies':copies}
-    replace_recovery_report(backup/'offline-rehearsal-disk-plan.json',json.dumps(report).encode())
+    report_path=write_recovery_attempt_report(backup/'offline-rehearsal-disk-plan.json',json.dumps(report).encode())
+    report['reportFile']=str(report_path)
     emit(operation='cutover.aws',stage='partitioned_upgrade.offline_disk',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
     require(short==0,'OFFLINE_REHEARSAL_DISK_EXPANSION_REQUIRED_NO_START')
 
@@ -402,7 +422,8 @@ def pre_exit_disk_plan(backup,total,hashes,proof,previous_original):
         free=shutil.disk_usage(backup).free
     missing=max(0,required-free)
     report={'destination':str(backup),'filesystemDevice':backup.stat().st_dev,'sourceBytes':total,'requiredFreeBytes':required,'availableFreeBytes':free,'missingBytes':missing,'minimumExpansionGiB':(missing+1024**3-1)//1024**3,'pristineCopyReused':previous_original is not None,'reserveBytes':512*1024**2,'copies':candidates,'removed':removed}
-    replace_recovery_report(backup/'pre-exit-disk-plan.json',json.dumps(report).encode())
+    report_path=write_recovery_attempt_report(backup/'pre-exit-disk-plan.json',json.dumps(report).encode())
+    report['reportFile']=str(report_path)
     emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_disk',status='verified' if missing==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
     require(missing==0,'PRE_EXIT_COPY_DISK_HEADROOM_INSUFFICIENT')
 
@@ -1112,7 +1133,8 @@ def upgrade_partitioned(request):
         if stage=='partitioned_upgrade.checkpoint_parser_image' and isinstance(error,(subprocess.CalledProcessError,subprocess.TimeoutExpired)):reason='CHECKPOINT_PARSER_IMAGE_BUILD_FAILED'
         if stage in ('partitioned_upgrade.oom_restore','partitioned_upgrade.projection_readback') and isinstance(error,(subprocess.CalledProcessError,subprocess.TimeoutExpired)):reason='PRESERVED_DATA_OFFLINE_REHEARSAL_FAILED_NO_START'
         detail=safe_helper_error(error)
-        detail['exceptionDetails']=recovery_exception_details(error)
+        detail['exceptionDetails']=save_upgrade_exception(backup,error,stage)
+        detail['exceptionType']=detail['exceptionDetails']['exceptionType']
         if stage=='partitioned_upgrade.checkpoint_parser_image' and backup:detail['checkpointImageBuild']=checkpoint_build_log_summary(backup)
         if stage in ('partitioned_upgrade.oom_restore','partitioned_upgrade.projection_readback') and backup:
             detail['offlineRehearsal']=oom_restore_log_summary(backup)
