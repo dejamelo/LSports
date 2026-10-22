@@ -45,6 +45,7 @@ export interface Row {
   betAt: Map<string, number>;
   betOrder?: Map<string,string>;
   freshBets?: Set<string>;
+  quoteInvalidations?: Set<string>; // Sparse session-only revocations; never restored as confirmation.
   deferredTimestampBets?: Map<string, {marketId:number;selectionId:string;bet:NonNullable<Market["bets"]>[number];inspection:import("@lsports/contracts").TimestampInspection;receivedAt:string}>;
   timestampRecovery?: Map<string, import("@lsports/contracts").TimestampRecovery>;
   settlementAudit?: Map<string, import("@lsports/contracts").SettlementTrace>;
@@ -52,6 +53,7 @@ export interface Row {
   // Session evidence only: a checkpoint must never restore quote confirmation.
   snapshotBets?: Map<string, import("@lsports/contracts").SnapshotQuoteObservation>;
 }
+export function quoteConfirmed(row:Row,key:string){return !row.quoteInvalidations?.has(key)&&(row.freshBets?.has(key)===true||!row.timestampRecovery?.has(key)&&row.snapshotBets?.get(key)?.decision==='confirmed');}
 function selectionReasons(row:Row,m:Market,b:NonNullable<Market['bets']>[number],status:number|undefined,connection:ConnectionState,deferred=false){return [
               ...(!deferred&&connection.phase !== "connected" ? ["feed_disconnected"] : []),
               ...(!deferred&&connection.ingressProgress && (connection.ingressProgress!.processingBacklog??connection.ingressProgress!.backlog) > 0 && (connection.ingressProgress!.oldestProcessingAgeMs??connection.ingressProgress!.oldestAgeMs) > 5000 ? ["processing_backlog"] : []),
@@ -62,7 +64,7 @@ function selectionReasons(row:Row,m:Market,b:NonNullable<Market['bets']>[number]
               ...(!(Number(b.price) > 1 && Number.isFinite(Number(b.price))) ? ["invalid_price"] : []),
               ...(row.deferredTimestampBets?.has(`${m.id}:${b.id}`) ? ["ambiguous_snapshot_timestamp"] : []),
               ...(row.timestampRecovery?.get(`${m.id}:${b.id}`)?.status === "awaiting_fresh_amqp" ? ["awaiting_timestamp_recovery"] : []),
-              ...(row.restored && !row.freshBets?.has(`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
+              ...(row.restored && !quoteConfirmed(row,`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
             ];}
 const startTimeFormatter=new Intl.DateTimeFormat('es-AR',{
  timeZone:'America/Argentina/Buenos_Aires',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'
@@ -204,6 +206,7 @@ export class TradeState {
         throw new Error("Invalid provider fixture ID");
       // Bound timestamp interning to one fixture update: identical primitive ISO
       // values need not be separately allocated for every selection observation.
+      const snapshotObservations=new Map<string,import("@lsports/contracts").SnapshotQuoteObservation>();
       const isoTimes=new Map<number,string>();const isoTime=(n:number)=>{let value=isoTimes.get(n);if(value===undefined){value=new Date(n).toISOString();if(isoTimes.size<1024)isoTimes.set(n,value);}return value;};
       const key = event.outright ? `outright:${event.outright.competitionId}:${event.fixtureId}` : event.fixtureId;
       let row = this.rows[lane].get(key);
@@ -277,6 +280,7 @@ export class TradeState {
       for(const rejection of event.settlementInspection?.rejected || []) {
         (row.deferredTimestampBets ||= new Map()).set(`${rejection.marketId}:${rejection.selectionId}`, {...rejection,receivedAt:isoTime(at)});
         row.freshBets?.delete(`${rejection.marketId}:${rejection.selectionId}`);
+        (row.quoteInvalidations ||= new Set()).add(`${rejection.marketId}:${rejection.selectionId}`);
       }
       const settlementFields = new Map((event.settlementInspection?.fields || []).map(f => [`${f.marketId}:${f.selectionId}`, f]));
       for (const market of event.markets || []) {
@@ -324,11 +328,17 @@ export class TradeState {
           }
           const hasPrice = bet.price !== undefined && Number.isFinite(Number(bet.price)) && Number(bet.price) > 1;
           if (event.marketRecovery) {
-            (row.snapshotBets ||= new Map()).set(betKey, {
-              receivedAt: isoTime(at), versionAt: isoTime(t),
-              receivedPrice: bet.price !== undefined && Number.isFinite(Number(bet.price)) ? Number(bet.price) : null,
-              decision: older ? "older_than_stored" : !hasPrice ? "missing_or_invalid_price" : "confirmed",
-            });
+            const wasConfirmed=quoteConfirmed(row,betKey);
+            const receivedPrice=bet.price !== undefined && Number.isFinite(Number(bet.price)) ? Number(bet.price) : null;
+            const decision=older ? "older_than_stored" : !hasPrice ? "missing_or_invalid_price" : "confirmed";
+            const observationKey=JSON.stringify([t,receivedPrice,decision]);
+            let snapshot=snapshotObservations.get(observationKey);
+            if(!snapshot){snapshot=Object.freeze({receivedAt:isoTime(at),versionAt:isoTime(t),receivedPrice,decision});if(snapshotObservations.size<1024)snapshotObservations.set(observationKey,snapshot);}
+            (row.snapshotBets ||= new Map()).set(betKey,snapshot);
+            // Confirmation is already represented by the immutable snapshot observation.
+            // Keep the separate Set only for live/previous confirmation not represented there.
+            if(decision==='confirmed'&&!row.timestampRecovery?.has(betKey))row.freshBets?.delete(betKey);
+            else if(wasConfirmed)(row.freshBets ||= new Set()).add(betKey);
           }
           if (!older) {
             row.deferredTimestampBets?.delete(betKey);
@@ -344,8 +354,10 @@ export class TradeState {
             // A current snapshot explicitly reconfirms an unchanged quote. Its LastUpdate
             // describes the last price change, not when the snapshot was requested.
             // A status-only delta must never validate a price read from disk.
-            if (row.restored && hasPrice && (event.marketRecovery || BigInt(order)>BigInt(previousOrder)))
-              (row.freshBets ||= new Set()).add(betKey);
+            if (row.restored && hasPrice && (event.marketRecovery || BigInt(order)>BigInt(previousOrder))){
+              row.quoteInvalidations?.delete(betKey);
+              if(!event.marketRecovery||row.timestampRecovery?.has(betKey))(row.freshBets ||= new Set()).add(betKey);
+            }
             row.betAt.set(betKey, t);
             // Millisecond order is exactly reconstructible from betAt. Keep all
             // sub-millisecond ordering keys and every non-snapshot path unchanged.
@@ -500,7 +512,7 @@ export class TradeState {
                 settlementTrace: row.settlementAudit?.get(`${m.id}:${b.id}`),
                 timestampRecovery: row.timestampRecovery?.get(`${m.id}:${b.id}`),
                 quoteRecovery: {
-                  awaitingFreshQuote: !!row.restored && !row.freshBets?.has(`${m.id}:${b.id}`),
+                  awaitingFreshQuote: !!row.restored && !quoteConfirmed(row,`${m.id}:${b.id}`),
                   snapshotSeen: !!row.snapshotBets?.has(`${m.id}:${b.id}`),
                   snapshot: row.snapshotBets?.get(`${m.id}:${b.id}`),
                 },

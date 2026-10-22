@@ -16,6 +16,12 @@ class Scope(unittest.TestCase):
   ns['verify_pipeline_sources'](old,candidate,digest)
   for changed,sha in ((old,digest),({**candidate,'apps/worker/src/messages.ts':'unrelated'},digest),(candidate,'f'*64)):
    with self.assertRaises(RuntimeError):ns['verify_pipeline_sources'](old,changed,sha)
+class RetentionOrigin(unittest.TestCase):
+ def test_only_completed_six_gib_preparation_can_be_derived(self):
+  old={'phase':'stopped','pipelineRepair':True,'memoryLimitBytes':6442450944,'oldContainer':'a'*64,'verifiedExitContainerId':'a'*64,'preExitProof':{'verified':True}}
+  ns['verify_stopped_retention_origin'](old)
+  for changed in ({'phase':'stop_requested'},{'pipelineRepair':False},{'memoryLimitBytes':4294967296},{'preExitProof':{'verified':False}},{'verifiedExitContainerId':'b'*64}):
+   with self.assertRaises(RuntimeError):ns['verify_stopped_retention_origin']({**old,**changed})
 class StopResumeBudget(unittest.TestCase):
  def test_only_actual_previous_progress_gets_bounded_completion_window(self):
   self.assertEqual(ns['resumed_stop_budget']({}),180)

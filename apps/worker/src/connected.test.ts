@@ -5,7 +5,7 @@ import { EventEmitter } from "node:events";
 import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
 import { session } from "./connected.js";
-import { TradeState } from "./state.js";
+import { TradeState, quoteConfirmed } from "./state.js";
 import type { PackageConfig } from "./config.js";
 import { clients } from "./provider.js";
 test("worker consumes while snapshot is pending, preserves newer deltas, persists before ack and gates on shutdown", async () => {
@@ -831,4 +831,20 @@ test('heartbeat cannot queue repeated full writes while a snapshot is applying',
 test('heap reserve waits for publication completion without retaining the writer gate',async()=>{
  const {spawnSync}=await import('node:child_process');const code=`import{TradeState}from'./apps/worker/src/state.ts';const s=new TradeState();const captured=await s.exclusive(()=>s.capturePublication());let mutated=false,waiting=false;const task=s.publicationMutation(()=>mutated=true,active=>waiting=active);await new Promise(r=>setTimeout(r,20));if(mutated||!waiting)throw Error('reserve not enforced');captured.release();await task;if(!mutated||waiting)throw Error('writer did not release reserve');console.log('heap-reserve-offline-ok');`;
  const child=spawnSync(process.execPath,['--max-old-space-size=128','--import','tsx','--input-type=module','-e',code],{cwd:process.cwd(),encoding:'utf8',timeout:15000});assert.equal(child.status,0,child.stderr);assert.ok(child.stdout.includes('heap-reserve-offline-ok'));
+});
+
+test('snapshot confirmation shares bounded immutable observations instead of duplicating fresh keys',()=>{
+ const s=new TradeState();const bets=Array.from({length:10000},(_,i)=>({id:String(i),price:'2.1',status:1,isChanged:0}));
+ s.apply('prematch',[{fixtureId:1,markets:[{id:1,status:1,bets}]}],100);
+ s.beginPartitionedSnapshot('prematch');
+ s.apply('prematch',[{fixtureId:1,marketRecovery:true,markets:[{id:1,status:1,bets}]}],200);
+ const row=s.rows.prematch.get(1)!;
+ assert.equal(row.freshBets?.size,0);assert.equal(row.snapshotBets?.size,10000);
+ assert.equal(new Set(row.snapshotBets?.values()).size,1);assert.equal(Object.isFrozen(row.snapshotBets?.get('1:0')),true);
+ assert.equal(row.snapshotBets?.get('1:0')?.decision,'confirmed');
+ row.quoteInvalidations=new Set(['1:0']);assert.equal(quoteConfirmed(row,'1:0'),false);
+ s.apply('prematch',[{fixtureId:1,marketRecovery:true,markets:[{id:1,status:1,bets}]}],200);assert.equal(quoteConfirmed(row,'1:0'),true);
+ // An older snapshot observation cannot erase the prior confirmed quote.
+ s.apply('prematch',[{fixtureId:1,marketRecovery:true,markets:[{id:1,bets:[{...bets[0],lastUpdate:new Date(100)}]}]}],300);
+ assert.equal(row.snapshotBets?.get('1:0')?.decision,'older_than_stored');assert.equal(row.freshBets?.has('1:0'),true);
 });

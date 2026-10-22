@@ -1,0 +1,22 @@
+{
+  "scope": "local synthetic, not AWS preserved data",
+  "containerLimitBytes": 6442450944,
+  "nodeOldSpaceMiB": 2560,
+  "fixtures": 2980,
+  "bets": 2980000,
+  "beforeAppliedHeapUsedBytesAfterGC": 925195640,
+  "afterAppliedHeapUsedBytesAfterGC": 649872120,
+  "savedHeapBytesAfterGC": 275323520,
+  "beforeFreshKeys": 2980000,
+  "afterFreshKeys": 0,
+  "beforeDistinctSnapshotObservationObjects": 2980000,
+  "afterDistinctSnapshotObservationObjects": 2980,
+  "fullCyclePeakRSSBytes": 1357778944,
+  "applicationSerializationProjectionDigestAndFullBetPriceReadbackPassed": true,
+  "limitations": [
+    "Synthetic fields; actual preserved AWS copy still mandatory",
+    "GC forced at measurement boundaries; not a production heap guarantee",
+    "Final freeze protection was validated by focused tests; bulk measurement used the same interning/fresh-key representation before freeze enforcement",
+    "No new simultaneous AMQP load run locally; existing remote load gate is invalidated and must pass again for the changed candidate"
+  ]
+}

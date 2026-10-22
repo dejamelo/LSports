@@ -810,6 +810,9 @@ def resolve_prepared_upgrade(request,candidate_files):
     emit(operation='cutover.aws',stage='partitioned_upgrade.resume_resolved',status='verified',receipt=str(found),backup=str(expected),image=image,imageId=image_id,digest=digest,progressPhase=record['phase'],candidateFilesMatchPrepared=files==candidate_files,preparedSourceReused=True,workerStarted=False,imageRebuilt=False,posnetChanged=False)
     return found,record,files
 
+def verify_stopped_retention_origin(old):
+    require(old.get('phase')=='stopped' and old.get('pipelineRepair') is True and partition_memory(old)==6442450944 and old.get('preExitProof',{}).get('verified') is True and old.get('verifiedExitContainerId')==old.get('oldContainer') and re.fullmatch('[0-9a-f]{64}',str(old.get('oldContainer'))),'RETENTION_REPAIR_PRIOR_RECOVERY_UNVERIFIED')
+
 def upgrade_partitioned_unlocked(request):
     stage='partitioned_upgrade.input';backup=None
     try:
@@ -823,7 +826,7 @@ def upgrade_partitioned_unlocked(request):
         require(control_status()==200,'API_NOT_HEALTHY')
         memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
         if request.get('pipelineRepair'):
-            require(request.get('livePersistenceRepair') is True and request.get('snapshotMemoryRepair') is True and memory_limit==6442450944,'PIPELINE_REQUIRES_SIX_GIB_LIVE_IDENTITY')
+            require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and memory_limit==6442450944,'PIPELINE_REQUIRES_SIX_GIB_VERIFIED_IDENTITY')
             require(run(['systemctl','is-active','adl-worker-cache-reserve.service']).strip()==b'active','CACHE_RESERVE_NOT_ACTIVE_NO_WORKER_CHANGE')
             require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=2560','PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
         def save(p):
@@ -844,6 +847,7 @@ def upgrade_partitioned_unlocked(request):
             require(len(previous)==1,'CHECKPOINT_REPAIR_SOURCE_NOT_UNIQUE')
             backup=source_backup
             old=previous[0];require(not any(w['running'] for w in states('worker')),'CHECKPOINT_REPAIR_REQUIRES_STOPPED_WORKER')
+            if request.get('stoppedRetentionRepair'):verify_stopped_retention_origin(old)
             image_info=json.loads(run(['docker','image','inspect',old['image']]))[0]
             require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'CHECKPOINT_REPAIR_IMAGE_UNVERIFIED')
             # The backup/context is the original image's source. Later parser
@@ -884,6 +888,7 @@ def upgrade_partitioned_unlocked(request):
             # an externally selected buildx builder may not have the prepared base.
             run(['docker','build','--builder','default','--network','none','--pull=false','-t',image,str(context)],timeout=240,log=log)
             progress={**old,'digest':digest,'image':image,'snapshotMemoryVerified':False,'oomRestoreVerified':False,'projectionSerializationVerified':False,'projectionReadbackVerified':False,'projectionReceiptHash':None,'checkpointParserSourceDigest':old['digest']}
+            if request.get('stoppedRetentionRepair'):progress['pipelineLoadVerified']=False
             save(progress)
         if receipt_path.exists():
             require(receipt_path.is_file() and not receipt_path.is_symlink(),'UPGRADE_RECEIPT_UNVERIFIED');progress=json.loads(receipt_path.read_bytes());require(progress['digest']==digest,'UPGRADE_DIGEST_MISMATCH');backup=Path(progress['backup'])
