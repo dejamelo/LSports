@@ -17,5 +17,42 @@ class Relief(unittest.TestCase):
   g=self.group();g['memory.high']=3*1024**3
   with self.assertRaisesRegex(RuntimeError,'MEMORY_HIGH'):ns['relief_plan'](g,12*1024**3)
  def test_resume_no_unbounded_increase(self):
-  g=self.group();g['memory.max']=6*1024**3;p=ns['relief_plan'](g,9*1024**3);self.assertEqual(p['oldLimitBytes'],p['newLimitBytes']);self.assertEqual(p['hostReserveAfterIncreaseBytes'],9*1024**3)
+  g=self.group();g['memory.max']=6*1024**3;p=ns['relief_plan'](g,9*1024**3);self.assertEqual(p['oldLimitBytes'],p['plannedLimitBytes']);self.assertEqual(p['hostReserveAfterIncreaseBytes'],9*1024**3)
+
+# End-to-end host orchestration regression: cache headroom must not skip live/persistent update.
+class PersistentRelief(unittest.TestCase):
+ def test_already_reclaimed_cache_still_updates_and_preserves_other_services(self):
+  import tempfile,json,os,datetime,copy,re
+  from types import SimpleNamespace
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);secure=root/'secure';secure.mkdir();cid='176d57fbd609'+'a'*52
+   cg=root/'cgroup';(cg/cid).mkdir(parents=True)
+   (root/'meminfo').write_text('MemAvailable: 12582912 kB\n')
+   (root/'cgroup-entry').write_text('0::/'+cid+'\n')
+   original={'release':'preserved','composeOverrides':[]};(secure/'deployment.json').write_text(json.dumps(original))
+   state={'limit':4*1024**3,'updates':0};events=[]
+   info={'Image':'sha256:preserved','State':{'Pid':123,'StartedAt':'2026-10-22T00:00:00Z','Running':True,'OOMKilled':False},'HostConfig':{'Memory':state['limit'],'MemorySwap':state['limit']}}
+   def run(args):
+    if args[:2]==['docker','inspect']:
+     value=copy.deepcopy(info);value['HostConfig']['Memory']=state['limit'];return json.dumps([value]).encode()
+    if args[:2]==['docker','update']:state['limit']=int(args[args.index('--memory')+1]);state['updates']+=1;return b'ok'
+    raise AssertionError(args)
+   def mapped(p):
+    return {'/proc/meminfo':root/'meminfo','/proc/123/cgroup':root/'cgroup-entry','/sys/fs/cgroup':cg}.get(str(p),Path(p))
+   base_model={'services':{'worker':{'mem_limit':4*1024**3,'memswap_limit':4*1024**3,'environment':{'NODE_OPTIONS':'preserved'}},'api':{'image':'preserved-api'}}}
+   def model(args):
+    value=copy.deepcopy(base_model)
+    for p in args:
+     if str(p).endswith('.json'):value['services']['worker'].update(json.loads(Path(p).read_text())['services']['worker'])
+    return value
+   realopen=os.open
+   def opened(path,*args):return realopen(root/'action.lock' if str(path).startswith('/run/lock/') else path,*args)
+   local=dict(ns,Path=mapped,json=json,os=SimpleNamespace(**{k:getattr(os,k) for k in dir(os) if not k.startswith('__')}),datetime=datetime,copy=copy,re=re,SECURE=secure,run=run,states=lambda _: [{'id':cid,'running':True}],memory_cgroup=lambda _:{'memory.max':state['limit'],'memory.high':None,'memory.current':2407251968,'limitMinusCurrentBytes':state['limit']-2407251968,'stat':{},'memory.events':{'oom_kill':0}},emit=lambda **row:events.append(row),partition_base=lambda meta:meta['composeOverrides'],model=model,private=lambda path,data:path.write_bytes(data),durable_replace=lambda a,b:os.replace(a,b))
+   local['os'].open=opened
+   exec(Path(__file__).with_name('relieve-current-memory.py').read_text().split('try:relief_main()')[0],local)
+   local['relief_main']()
+   self.assertEqual(state['updates'],1);self.assertEqual(state['limit'],6*1024**3)
+   saved=json.loads((secure/'deployment.json').read_text());self.assertEqual(saved['release'],'preserved');self.assertEqual(len(saved['composeOverrides']),1)
+   self.assertTrue(any(e.get('stage')=='persistent_limit_verified' for e in events));self.assertFalse((cg/cid/'memory.reclaim').exists())
+
 if __name__=='__main__':unittest.main()

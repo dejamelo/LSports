@@ -7,7 +7,7 @@ const defs=(await assembleRemoteHelper(here)).replace("if __name__=='__main__':r
 const memory=readFileSync(join(here,'current-memory-pressure.py'),'utf8').split('try:current_memory_main()')[0];
 const source=defs+'\n'+memory+'\n'+readFileSync(join(here,'relieve-current-memory.py'),'utf8');
 const rpc=await helperInvocation(here,source,{});const report=join(here,'memory-relief-'+Date.now()+'.jsonl');writeFileSync(report,'',{mode:0o600,flag:'wx'});
-console.log('Resultado: '+report+'; cache restrito ao cgroup; aumento máximo 6 GiB; sem reinício.');
+console.log('Resultado: '+report+'; ajuste persistente para 6 GiB; verificação Docker/cgroup/Compose; sem limpeza de cache ou reinício.');
 const child=spawn('ssh',['-i',join(homedir(),'Downloads',keys[0]),'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2','ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',rpc.command],{stdio:['pipe','pipe','pipe']});
 let final,blocked,stderr='';child.stdin.on('error',()=>{});child.stdin.end(rpc.input);child.stderr.on('data',b=>{if(stderr.length<65536)stderr+=b;});
 createInterface({input:child.stdout}).on('line',line=>{let row;try{row=JSON.parse(line);}catch{return;}appendFileSync(report,JSON.stringify(row)+'\n');console.log(JSON.stringify(row));if(row.operation==='memory_relief_complete')final=row;if(row.status==='blocked')blocked=row;});
@@ -21,7 +21,9 @@ createInterface({input:observe.stdout}).on('line',line=>{console.log(line);try{c
 const observedCode=await new Promise(resolve=>{observe.once('error',()=>resolve(2));observe.once('close',c=>resolve(c??2));});
 if(observedCode!==0||!observation||observation.workerId!==final.containerId){console.log(JSON.stringify({reason:'POST_RELIEF_OBSERVATION_FAILED_NO_RESTART',report}));process.exit(2);}
 const a=observation.samples[0].lanes.prematch,b=observation.samples.at(-1).lanes.prematch;
-const advanced=['validatedRows','appliedRows'].some(k=>(b.snapshot?.[k]??0)>(a.snapshot?.[k]??0))||b.lastSnapshotAt&&b.lastSnapshotAt!==a.lastSnapshotAt;
+const advancedInWindow=['validatedRows','appliedRows'].some(k=>(b.snapshot?.[k]??0)>(a.snapshot?.[k]??0))||b.lastSnapshotAt&&b.lastSnapshotAt!==a.lastSnapshotAt;
+const snapshotProgressAt=Date.parse(b.snapshot?.lastProgressAt??b.lastSnapshotAt??'');
+const advanced=advancedInWindow&&snapshotProgressAt>=Date.parse(final.appliedAtUTC);
 const rates=observation.rates.prematch;
 if(!advanced&&!(rates.comparableMetricWindows&&rates.processedPerSecond>rates.receivedPerSecond)){
  console.log(JSON.stringify({reason:'POST_RELIEF_SNAPSHOT_OR_SUSTAINED_DRAIN_NOT_YET_VERIFIED',report,snapshotBefore:a.snapshot,snapshotAfter:b.snapshot,diagnostic:b.diagnostic,rates,workerRestarted:false,integrationVerified:false}));process.exit(2);
