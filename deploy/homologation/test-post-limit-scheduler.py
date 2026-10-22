@@ -15,6 +15,11 @@ class Attempt(unittest.TestCase):
   self.assertEqual(self.decide({'lastSnapshotAt':'2026-10-22T18:00:00Z','recoveryProgress':{'regularSnapshotReady':True}}),'snapshot_completed_after_limit')
  def test_new_attempt_not_associated_with_old_failure(self):
   self.assertEqual(self.decide({'fullSnapshot':{'startedAt':'2026-10-22T18:00:00Z'},'lastSnapshotErrorAt':'2026-10-22T17:49:42Z'}),'post_limit_attempt_in_progress')
+ def test_completed_baseline_does_not_hide_later_failure(self):
+  c={'lastSnapshotAt':'2026-10-22T18:39:20.547Z','recoveryProgress':{'regularSnapshotReady':True},'lastSnapshotErrorAt':'2026-10-22T19:01:35.916Z'}
+  self.assertEqual(self.decide(c),'failure_after_limit')
+  c['recoveryProgress']['startedAt']='2026-10-22T19:06:55.941Z'
+  self.assertEqual(self.decide(c),'post_limit_attempt_in_progress')
 class ProcessEvidence(unittest.TestCase):
  def test_tree_has_cpu_and_identity_without_process_arguments(self):
   with tempfile.TemporaryDirectory() as tmp:

@@ -44,6 +44,12 @@ const transportEnd=(reason:"connection_closed"|"channel_closed"|"consumer_cancel
 export async function publicationTurn<T>(state:TradeState,persist:()=>Promise<T>){
  await nextTurn();return state.exclusive(persist);
 }
+// Preserve the same processing/FIFO barriers; expose which one is actually awaited.
+export async function snapshotApplyTurn<T>(processing:Promise<unknown>,state:Pick<TradeState,'exclusive'>,apply:()=>T|Promise<T>,observe:(phase:string,elapsedMs:number)=>void,intervalMs=10000):Promise<T>{
+ let phase='processing_queue',completed=false;const began=performance.now();const report=(stage:string)=>{try{observe(stage,Math.ceil(performance.now()-began));}catch{/* Instrumentation must not replace an application failure. */}};const timer=setInterval(()=>report(phase),intervalMs);timer.unref();
+ try{await processing;phase='state_exclusive';const result=await state.exclusive(()=>{phase='apply';return apply();});completed=true;return result;}
+ finally{clearInterval(timer);report(completed?'completed':'failed');}
+}
 export function coalescedPersistence(persist:()=>Promise<void>){
  let tail:Promise<void>=Promise.resolve(),queued:Promise<void>|undefined;
  return()=>{if(queued)return queued;let job:Promise<void>;job=tail.then(()=>{if(queued===job)queued=undefined;return persist();});queued=job;tail=job.catch(()=>{});return job;};
@@ -476,8 +482,10 @@ export async function session(
             }
             const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
             regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(()=>state.beginPartitionedSnapshot(lane));await save();
-            const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>{
-              const applied=processing.then(async()=>{requireOpen();await state.exclusive(()=>state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()}));});
+            const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows===1){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>{
+              const applied=snapshotApplyTurn(processing,state,()=>{requireOpen();return state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{
+                if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,atUTC:new Date().toISOString()}));
+              });
               processing=applied;await applied;
             }});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;

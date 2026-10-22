@@ -48,3 +48,26 @@ test('processing can advance beyond a checkpoint in flight; staged rows survive 
   await transport.crashOfflineForTest();const db=openInbox(path);assert.equal(db.stats().backlog,1000);assert.deepEqual(db.peek().map(r=>JSON.parse(r.content).n),Array.from({length:1000},(_,i)=>i));db.close();
  }finally{await transport.close();await rm(dir,{recursive:true,force:true});}
 });
+
+test('receipt metrics use covering index without payload scan, preserve backwards receipt clocks and replay',async()=>{
+ const {DatabaseSync}=await import('node:sqlite');const directory=await mkdtemp(join(tmpdir(),'adl-receipt-metric-'));const path=join(directory,'inbox.sqlite');
+ try{
+  let inbox=openInbox(path);const ids=inbox.append([3000,1000,2000,500].map((received,i)=>({...message(i),received})));inbox.complete([ids[1]]);
+  const stat=inbox.processingStats(ids[0]);assert.equal(stat.processingBacklog,2);assert.ok(stat.oldestProcessingAgeMs>=Date.now()-500-100);inbox.close();
+  inbox=openInbox(path);assert.equal(inbox.processingStats(ids[0]).processingBacklog,2);assert.deepEqual(inbox.peek().map(r=>r.id),[ids[0],ids[2],ids[3]]);inbox.close();
+  const db=new DatabaseSync(path,{readOnly:true});try{
+   const plan=db.prepare('EXPLAIN QUERY PLAN SELECT count(*) AS processingBacklog,min(received) AS oldest FROM inbox WHERE id>?').all(ids[0]);
+   assert.ok(plan.some(r=>String(r.detail).includes('COVERING INDEX inbox_processing_receipt')));
+   assert.deepEqual({...db.prepare('SELECT count(*) AS n,min(received) AS oldest FROM inbox WHERE id>?').get(ids[0])},{n:2,oldest:500});
+  }finally{db.close();}
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('adding receipt index to a legacy inbox preserves original ids, bytes and timestamps',async()=>{
+ const {DatabaseSync}=await import('node:sqlite');const directory=await mkdtemp(join(tmpdir(),'adl-legacy-inbox-'));const path=join(directory,'inbox.sqlite');
+ try{
+  const original=new DatabaseSync(path);original.exec('PRAGMA journal_mode=WAL; CREATE TABLE inbox(id INTEGER PRIMARY KEY AUTOINCREMENT,received INTEGER NOT NULL,content BLOB NOT NULL,properties TEXT NOT NULL,fields TEXT NOT NULL)');
+  original.prepare('INSERT INTO inbox(id,received,content,properties,fields) VALUES(?,?,?,?,?)').run(19,12345,Buffer.from('preserved bytes'),'{}','{}');original.close();
+  const inbox=openInbox(path);try{const rows=inbox.peek();assert.equal(rows.length,1);assert.equal(rows[0].id,19);assert.equal(rows[0].received,12345);assert.equal(rows[0].content.toString(),'preserved bytes');assert.equal(inbox.processingStats(0).processingBacklog,1);}finally{inbox.close();}
+ }finally{await rm(directory,{recursive:true,force:true});}
+});

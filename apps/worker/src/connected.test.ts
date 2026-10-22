@@ -786,3 +786,18 @@ test('a local coordinator deferral retries at its deadline without adding five m
  const timeout=setTimeout(()=>abort.abort(),3500);
  try{await session(pkg,{packages:[pkg],snapshotUrl:'http://isolated',customersUrl:'http://isolated',staleMs:90000,recoveryMs:300000},state,async()=>{if(state.connections.prematch.phase==='connected')abort.abort();},abort.signal,{clientFactory:()=>api,connect:(async()=>connection) as unknown as typeof amqp.connect});assert.equal(attempts,2);assert.equal(state.connections.prematch.lastSnapshotDiagnostic,undefined);}finally{clearTimeout(timeout);}
 });
+
+test('snapshot wait instrumentation distinguishes processing barrier from state exclusivity without reordering',async()=>{
+ const {snapshotApplyTurn}=await import('./connected.js');const state=new TradeState();let releaseProcessing!:()=>void,releaseState!:()=>void;const stages:string[]=[];const order:string[]=[];
+ const processing=new Promise<void>(resolve=>releaseProcessing=resolve);
+ const occupied=state.exclusive(()=>new Promise<void>(resolve=>{releaseState=resolve;}));
+ const task=snapshotApplyTurn(processing,state,()=>{order.push('apply');return 7;},stage=>stages.push(stage),5);
+ await new Promise(r=>setTimeout(r,15));assert.ok(stages.includes('processing_queue'));assert.deepEqual(order,[]);
+ releaseProcessing();await new Promise(r=>setTimeout(r,15));assert.ok(stages.includes('state_exclusive'));assert.deepEqual(order,[]);
+ releaseState();await occupied;assert.equal(await task,7);assert.deepEqual(order,['apply']);assert.equal(stages.at(-1),'completed');
+});
+
+test('snapshot wait diagnostics cannot hide the original application failure',async()=>{
+ const {snapshotApplyTurn}=await import('./connected.js');const expected=new Error('isolated application failure');
+ await assert.rejects(snapshotApplyTurn(Promise.resolve(),new TradeState(),()=>{throw expected;},()=>{throw new Error('isolated logging failure');}),error=>error===expected);
+});

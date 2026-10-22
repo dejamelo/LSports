@@ -1,0 +1,49 @@
+{
+  "rows": 682572,
+  "pending": 674380,
+  "payloadBytes": 1024,
+  "before": {
+    "plan": [
+      {
+        "id": 3,
+        "parent": 0,
+        "notused": 196,
+        "detail": "SEARCH inbox USING INTEGER PRIMARY KEY (rowid>?)"
+      }
+    ],
+    "result": {
+      "processingBacklog": 674380,
+      "oldest": 1700000000000
+    },
+    "ms": [
+      231.0404499999995,
+      192.67723999999998,
+      190.53620200000023,
+      189.05569000000014,
+      192.2994060000001
+    ]
+  },
+  "after": {
+    "plan": [
+      {
+        "id": 3,
+        "parent": 0,
+        "notused": 190,
+        "detail": "SEARCH inbox USING COVERING INDEX inbox_processing_receipt (id>?)"
+      }
+    ],
+    "result": {
+      "processingBacklog": 674380,
+      "oldest": 1700000000000
+    },
+    "ms": [
+      21.869071000000076,
+      21.47493100000065,
+      21.639603999999963,
+      20.927248999999392,
+      21.31695799999943
+    ]
+  },
+  "scope": "SQLite metric query only; not full worker or AWS throughput",
+  "maxRSSBytes": 41140224
+}

@@ -165,7 +165,8 @@ export async function fullSnapshot(options:{timestamp?:number;url:string;credent
   await memoryReady();
   progress('apply');
   // Envelope (including trailing Header/errors) and ALL rows verified before first application.
-  await walkSnapshot(file,async raw=>{options.assertOpen();await memoryReady();await options.apply(convertSnapshotRow(raw),started);appliedRows++;if(appliedRows%100===0)progress('apply');},limits.itemBytes);
+  let lastApplyProgress=performance.now();
+  await walkSnapshot(file,async raw=>{options.assertOpen();await memoryReady();await options.apply(convertSnapshotRow(raw),started);appliedRows++;if(appliedRows===1||appliedRows%100===0||performance.now()-lastApplyProgress>=5000){lastApplyProgress=performance.now();progress('apply');}},limits.itemBytes);
   progress('complete');
   return {ids,rows,bytes,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString()};
  }catch(error){try{progress(lastStage);}catch{/* Progress reporting must not replace the original failure. */}if(timedOut)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',timeoutMs:limits.totalMs,message:'Tiempo máximo de descarga snapshot excedido; baseline bloqueado.'});if(error instanceof OperationError&&httpStatus!==undefined&&error.diagnostic.httpStatus===undefined)throw new OperationError({...error.diagnostic,httpStatus});throw error;}finally{clearTimeout(timer);abort.abort();await rm(dir,{recursive:true,force:true});}

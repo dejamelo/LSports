@@ -27,7 +27,7 @@ def pressure_logs(cid,start):
         except ValueError:continue
         if not isinstance(record,dict):continue
         safe={'loggedAtUTC':stamp}
-        if record.get('operation') in ('snapshot.events','file.persist','feed.coverage'):
+        if record.get('operation') in ('snapshot.events','snapshot.apply_wait','file.persist','feed.coverage'):
             safe.update(operation=record['operation'])
             for key in ('lane','stage','status'):
                 if isinstance(record.get(key),str) and re.fullmatch('[a-z_]{1,60}',record[key]):safe[key]=record[key]

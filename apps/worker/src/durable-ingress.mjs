@@ -11,12 +11,15 @@ const reviveBuffers=(_key,value)=>value?.type==='Buffer'&&Array.isArray(value.da
 export function openInbox(path, maxBytes=2*1024**3){
  mkdirSync(dirname(path),{recursive:true,mode:0o700});
  const db=new DatabaseSync(path);chmodSync(path,0o600);
- db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS inbox(id INTEGER PRIMARY KEY AUTOINCREMENT, received INTEGER NOT NULL, content BLOB NOT NULL, properties TEXT NOT NULL, fields TEXT NOT NULL); CREATE TABLE IF NOT EXISTS recovery(id INTEGER PRIMARY KEY CHECK(id=1), safe_seconds INTEGER);');
+ db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS inbox(id INTEGER PRIMARY KEY AUTOINCREMENT, received INTEGER NOT NULL, content BLOB NOT NULL, properties TEXT NOT NULL, fields TEXT NOT NULL); CREATE TABLE IF NOT EXISTS recovery(id INTEGER PRIMARY KEY CHECK(id=1), safe_seconds INTEGER); CREATE INDEX IF NOT EXISTS inbox_processing_receipt ON inbox(id,received);');
  const add=db.prepare('INSERT INTO inbox(received,content,properties,fields) VALUES(?,?,?,?)');
  const count=db.prepare('SELECT count(*) AS backlog,coalesce(sum(length(content)+length(cast(properties as blob))+length(cast(fields as blob))),0) AS bytes,min(received) AS oldest FROM inbox');
+ // Cover receipt metrics without visiting payload pages for every pending message.
+ // Preserve exact MIN(received), including out-of-order clocks, and the existing id cursor.
+ const processingCount=db.prepare('SELECT count(*) AS processingBacklog,min(received) AS oldest FROM inbox WHERE id>?');
  const pending=db.prepare('SELECT id,received,content,properties,fields FROM inbox WHERE id>? ORDER BY id LIMIT ?');
  const del=db.prepare('DELETE FROM inbox WHERE id=?');
- let usage=Number(count.get().bytes),backlog=Number(count.get().backlog);
+ const initial=count.get();let usage=Number(initial.bytes),backlog=Number(initial.backlog);
  const rowSize=db.prepare('SELECT length(content)+length(cast(properties as blob))+length(cast(fields as blob)) AS bytes FROM inbox WHERE id=?');
  const stats=()=>{const oldest=db.prepare('SELECT received FROM inbox ORDER BY id LIMIT 1').get()?.received;return {backlog,bytes:usage,oldestAgeMs:oldest?Math.max(0,Date.now()-Number(oldest)):0,databaseBytes:statSync(path).size,walBytes:(()=>{try{return statSync(path+'-wal').size;}catch{return 0;}})()};};
  return {
@@ -28,7 +31,7 @@ export function openInbox(path, maxBytes=2*1024**3){
   complete(ids){db.exec('BEGIN IMMEDIATE');try{let removed=0,bytes=0;for(const id of ids){const row=rowSize.get(id);if(row){bytes+=Number(row.bytes);removed++;del.run(id);}}db.exec('COMMIT');usage-=bytes;backlog-=removed;}catch(e){db.exec('ROLLBACK');throw e;}},
   safePoint(seconds,checkpointPrefix=false){if(!Number.isSafeInteger(seconds)||seconds<0||backlog!==0&&!checkpointPrefix)throw Error('SAFE_POINT_REQUIRES_DRAINED_INBOX');if(backlog){const oldest=Number(db.prepare('SELECT received FROM inbox ORDER BY id LIMIT 1').get().received);seconds=Math.min(seconds,Math.max(0,Math.floor(oldest/1000)-2));}
    db.prepare('INSERT INTO recovery(id,safe_seconds) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET safe_seconds=excluded.safe_seconds').run(seconds);return seconds;},
-  processingStats(after){const row=db.prepare('SELECT count(*) AS processingBacklog,min(received) AS oldest FROM inbox WHERE id>?').get(after);return{processingBacklog:Number(row.processingBacklog),oldestProcessingAgeMs:row.oldest?Math.max(0,Date.now()-Number(row.oldest)):0};},
+  processingStats(after){const row=processingCount.get(after);return{processingBacklog:Number(row.processingBacklog),oldestProcessingAgeMs:row.oldest?Math.max(0,Date.now()-Number(row.oldest)):0};},
   safeSeconds(){return db.prepare('SELECT safe_seconds FROM recovery WHERE id=1').get()?.safe_seconds;},stats,
   close(){db.close();}
  };

@@ -6,10 +6,10 @@ def scheduler_time(value):
 
 def post_limit_decision(connection,threshold):
     snapshot=connection.get('fullSnapshot') or {};recovery=connection.get('recoveryProgress') or {}
-    started=scheduler_time(snapshot.get('startedAt'));progress=scheduler_time(snapshot.get('lastProgressAt'));error=scheduler_time(connection.get('lastSnapshotErrorAt'))
+    started=max(scheduler_time(snapshot.get('startedAt')),scheduler_time(recovery.get('startedAt')));progress=scheduler_time(snapshot.get('lastProgressAt'));error=scheduler_time(connection.get('lastSnapshotErrorAt'))
     completed=scheduler_time(connection.get('lastSnapshotAt'))
     ready=recovery.get('regularSnapshotReady') is True
-    if completed>=threshold and ready:return 'snapshot_completed_after_limit'
+    if completed>=threshold and ready and completed>=max(started,error):return 'snapshot_completed_after_limit'
     if error>=threshold and error>=max(started,progress):return 'failure_after_limit'
     if started>=threshold:return 'post_limit_attempt_in_progress'
     if progress>=threshold:return 'existing_spool_progress_after_limit'
@@ -42,9 +42,21 @@ def post_limit_main():
     directory=Path(volume['Mountpoint']);threshold=scheduler_time(LIMIT_APPLIED_AT)
     # Lightweight, separate Node process: verifies the same available-memory API/cgroup,
     # not an injected measurement of the running worker's heap.
-    probe=json.loads(run(['docker','exec',cid,'node','--max-old-space-size=32','--input-type=module','-e',"console.log(JSON.stringify({node:process.versions.node,libuv:process.versions.uv,constrainedMemoryBytes:process.constrainedMemory(),availableMemoryBytes:process.availableMemory(),probeIsSeparateProcess:true}))"],timeout=15))
-    require(probe.get('constrainedMemoryBytes')==6442450944,'NODE_RUNTIME_DOES_NOT_SEE_SIX_GIB_LIMIT')
-    emit(operation='post_limit_scheduler',stage='runtime_capacity_verified',workerId=cid,appliedAtUTC=LIMIT_APPLIED_AT,probe=probe,runningWorkerHeapNotProbed=True,workerRestarted=False,providerRequests=0)
+    if not WATCH_COST_MODE:
+        probe=json.loads(run(['docker','exec',cid,'node','--max-old-space-size=32','--input-type=module','-e',"console.log(JSON.stringify({node:process.versions.node,libuv:process.versions.uv,constrainedMemoryBytes:process.constrainedMemory(),availableMemoryBytes:process.availableMemory(),probeIsSeparateProcess:true}))"],timeout=15))
+        require(probe.get('constrainedMemoryBytes')==6442450944,'NODE_RUNTIME_DOES_NOT_SEE_SIX_GIB_LIMIT')
+        emit(operation='post_limit_scheduler',stage='runtime_capacity_verified',workerId=cid,appliedAtUTC=LIMIT_APPLIED_AT,probe=probe,runningWorkerHeapNotProbed=True,workerRestarted=False,providerRequests=0)
+    else:
+        # Do not start an extra Node in the nearly full worker cgroup.
+        host_available=int(re.search(r'^MemAvailable:\s+(\d+)',Path('/proc/meminfo').read_text(),re.M)[1])*1024
+        require(host_available>=2*1024**3+128*1024**2,'HOST_HEADROOM_INSUFFICIENT_FOR_ISOLATED_PLAN_READER')
+        plans=[]
+        for lane in ('prematch','inplay'):
+            reader='adl-metric-plan-'+os.urandom(6).hex()
+            try:
+                plans.append(json.loads(run(['docker','run','--rm','--name',reader,'--network','none','--memory','128m','--memory-swap','128m','--cpus','0.25','--read-only','--user','1000:1000','--mount','type=volume,src='+mounts[0]['Name']+',dst=/app/.runtime/feed,readonly','--entrypoint','node',info['Image'],'--max-old-space-size=32','--input-type=module','-e',INBOX_PLAN_PROBE,'/app/.runtime/feed/trade-feed.json.'+lane+'.inbox.sqlite'],timeout=20)))
+            finally:subprocess.run(['docker','rm','-f',reader],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10,check=False)
+        emit(operation='post_limit_scheduler',stage='inbox_receipt_metric_query_plan_read_only',plans=plans,indexCreated=False,aggregateQueryExecuted=False,workerCgroupProbeStarted=False,isolatedReaderMemoryBytes=128*1024**2)
     began=time.monotonic();samples=[];result=None
     for index in range(WATCH_SAMPLE_COUNT):
         current=json.loads(run(['docker','inspect',cid]))[0];require(current['State']['Running'] and current['State']['StartedAt']==started and current['Image']==info['Image'],'WORKER_CHANGED_NO_ACTION')
@@ -66,12 +78,12 @@ def post_limit_main():
             c=connections.get(lane) or {};ingress=c.get('ingressProgress') or {}
             lanes[lane]={'decision':post_limit_decision(c,threshold),'phase':c.get('phase'),'sessionStartedAt':(c.get('session') or {}).get('startedAt'),'snapshot':{k:v for k,v in (c.get('fullSnapshot') or {}).items() if k in ('stage','bytes','startedAt','lastProgressAt','validatedRows','appliedRows','completedAt')},'recovery':{k:v for k,v in (c.get('recoveryProgress') or {}).items() if k in ('stage','startedAt','lastProgressAt','nextRegularAttemptAt','regularSnapshotReady','completedAt')},'lastSnapshotAt':c.get('lastSnapshotAt'),'lastSnapshotErrorAt':c.get('lastSnapshotErrorAt'),'errorIsHistorical':0<scheduler_time(c.get('lastSnapshotErrorAt'))<threshold,'diagnostic':safe_feed_diagnostic(c.get('lastSnapshotDiagnostic')),'ingress':{k:v for k,v in ingress.items() if k in ('received','acknowledged','processed','checkpointed','processingBacklog','oldestProcessingAgeMs','metricWindowEndUTC')},'updates':{k:v for k,v in ({**(c.get('updates') or {}),**{k:v for k,v in c.items() if k in ('lastMarketDecodedAt','lastDataDecodedAt','lastControlDecodedAt')}}).items() if k in ('lastMarketDecodedAt','lastDataDecodedAt','lastControlDecodedAt')},'persistence':{k:v for k,v in (c.get('persistenceProgress') or {}).items() if k in ('writes','lastCompletedAt','lastDurationMs','metricWindowEndUTC')}}
         spools=[{'directory':p.parent.name,'bytes':p.stat().st_size,'modifiedAtUTC':datetime.datetime.fromtimestamp(p.stat().st_mtime,datetime.timezone.utc).isoformat(),'validityNotAssumed':True} for p in directory.glob('.full-snapshot-*/response.private.json') if not p.is_symlink() and not p.parent.is_symlink()][:16]
-        cg=memory_cgroup(pid);sample={'atUTC':now,'elapsedSeconds':round(time.monotonic()-began,1),'memoryMaxBytes':cg['memory.max'],'memoryCurrentBytes':cg['memory.current'],'availableByCgroupBytes':cg['limitMinusCurrentBytes'],'lanes':lanes,'schedules':schedules,'spools':spools,'recentPostLimitLogs':pressure_logs(cid,LIMIT_APPLIED_AT)[-5:],'applicationProcesses':apply_pending_processes(cid) if WATCH_SAMPLE_COUNT==7 else None};samples.append(sample)
+        cg=memory_cgroup(pid);sample={'atUTC':now,'elapsedSeconds':round(time.monotonic()-began,1),'memoryMaxBytes':cg['memory.max'],'memoryCurrentBytes':cg['memory.current'],'availableByCgroupBytes':cg['limitMinusCurrentBytes'],'lanes':lanes,'schedules':schedules,'spools':spools,'recentPostLimitLogs':pressure_logs(cid,LIMIT_APPLIED_AT)[-5:],'applicationProcesses':apply_pending_processes(cid) if WATCH_SAMPLE_COUNT in (3,7) else None,'workerCgroup':cg if WATCH_COST_MODE else None,'hostMemAvailableBytes':int(re.search(r'^MemAvailable:\s+(\d+)',Path('/proc/meminfo').read_text(),re.M)[1])*1024 if WATCH_COST_MODE else None,'hostLargestProcesses':memory_processes() if WATCH_COST_MODE else None};samples.append(sample)
         emit(operation='post_limit_scheduler',stage='observation',**sample,workerRestarted=False,providerRequests=0)
         decision=lanes['prematch']['decision']
         if decision in ('failure_after_limit','snapshot_completed_after_limit'):result=decision;break
         if index==WATCH_SAMPLE_COUNT-1:break
-        time.sleep(20)
+        time.sleep(WATCH_SAMPLE_INTERVAL)
     correlations={}
     for lane in ('prematch','inplay'):
         a=samples[0]['lanes'][lane];b=samples[-1]['lanes'][lane];x=a['ingress'];y=b['ingress'];dt=scheduler_time(y.get('metricWindowEndUTC'))-scheduler_time(x.get('metricWindowEndUTC'))
