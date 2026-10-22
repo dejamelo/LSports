@@ -31,7 +31,7 @@ def pressure_logs(cid,start):
             safe.update(operation=record['operation'])
             for key in ('lane','stage','status'):
                 if isinstance(record.get(key),str) and re.fullmatch('[a-z_]{1,60}',record[key]):safe[key]=record[key]
-            for key in ('bytes','validatedRows','appliedRows','rssBytes','heapUsedBytes','externalBytes','arrayBuffersBytes','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs'):
+            for key in ('bytes','validatedRows','appliedRows','rssBytes','heapUsedBytes','externalBytes','arrayBuffersBytes','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','waitedMs','maximumWaitMs','memoryBudgetBytes','memoryHeadroomBytes'):
                 if type(record.get(key)) is int:safe[key]=record[key]
             if record['operation']=='snapshot.events':safe['diagnostic']=safe_feed_diagnostic(record)
             if record['operation']=='feed.coverage':
