@@ -1,0 +1,65 @@
+{
+  "scope": "synthetic restored checkpoint; real AWS data unavailable in this workspace",
+  "rows": 16329,
+  "markets": 195948,
+  "selections": 2351376,
+  "containerMemoryBytes": 4294967296,
+  "nodeOldSpaceMiB": 2560,
+  "cpuCount": 2,
+  "explicitGCAfterRestoreAndApplication": true,
+  "beforeApplyRetainedHeapBytes": 699881072,
+  "baselineAfterApplyRetainedHeapBytes": 1489526256,
+  "fixedAfterApplyRetainedHeapBytes": 1093455968,
+  "retainedHeapReductionBytes": 396070288,
+  "results": {
+    "restored-apply-result": {
+      "rows": 16329,
+      "rss": 1968635904,
+      "heapTotal": 1829421056,
+      "heapUsed": 1507496568,
+      "external": 7807718,
+      "arrayBuffers": 3534321,
+      "peak": 1974259712
+    },
+    "restored-apply-fixed": {
+      "rows": 16329,
+      "rss": 2001600512,
+      "heapTotal": 1802682368,
+      "heapUsed": 1097042216,
+      "external": 7807718,
+      "arrayBuffers": 3534329,
+      "peak": 2008489984
+    },
+    "restored-apply-roundtrip": {
+      "rows": 16329,
+      "rss": 1981960192,
+      "heapTotal": 1804779520,
+      "heapUsed": 1098510120,
+      "external": 7807718,
+      "arrayBuffers": 3534321,
+      "peak": 1993154560
+    },
+    "restored-apply-readback": {
+      "integrity": {
+        "rows": 16329,
+        "bytes": 357346626,
+        "sha256": "5b91df7b89e417d5ceaca900b7d1553400d470184c113fc843cb44250404b81b",
+        "integrityVerified": true
+      },
+      "restoredRows": 16329,
+      "markets": 195948,
+      "bets": 2351376,
+      "orders": 0,
+      "rssBytes": 1758068736,
+      "maxRSSBytes": 1762680832,
+      "awsValidated": false
+    }
+  },
+  "limitations": [
+    "Baseline did not reproduce real fatal exhaustion; it demonstrated redundant retained memory.",
+    "Peak RSS did not improve in this synthetic run despite lower retained heap; no production capacity claim.",
+    "Explicit GC was used only in the comparison harness to separate live state from transient garbage. Real rehearsal and worker heap/container limits are unchanged.",
+    "Application harness uses row-bounded cloned synthetic state events, not the preserved real HTTP spool.",
+    "Real g2uant6r checkpoint plus full preserved HTTP spool must pass application, persistence and readback before worker start."
+  ]
+}

@@ -181,6 +181,9 @@ export class TradeState {
     for (const event of events) {
       if (!Number.isSafeInteger(event.fixtureId) || event.fixtureId <= 0)
         throw new Error("Invalid provider fixture ID");
+      // Bound timestamp interning to one fixture update: identical primitive ISO
+      // values need not be separately allocated for every selection observation.
+      const isoTimes=new Map<number,string>();const isoTime=(n:number)=>{let value=isoTimes.get(n);if(value===undefined){value=new Date(n).toISOString();if(isoTimes.size<1024)isoTimes.set(n,value);}return value;};
       const key = event.outright ? `outright:${event.outright.competitionId}:${event.fixtureId}` : event.fixtureId;
       let row = this.rows[lane].get(key);
       if (!row) {
@@ -211,7 +214,7 @@ export class TradeState {
           const receipt = row.marketReceipt ||= { messagesByType: {}, marketUpdates: 0, betUpdates: 0, providerMarketUpdates: 0, providerBetUpdates: 0, staleBetUpdates: 0 };
           if (event.marketRecovery) {
             receipt.snapshotMarketUpdates = (receipt.snapshotMarketUpdates || 0) + (event.markets?.length || 0);
-            receipt.lastMarketSnapshotAt = new Date(at).toISOString();
+            receipt.lastMarketSnapshotAt = isoTime(at);
           }
           if (event.marketMessageType && !event.localReplay) {
           const type = String(event.marketMessageType);
@@ -247,11 +250,11 @@ export class TradeState {
       const settlementSource = event.marketRecovery ? "snapshot.outright.markets" : event.marketMessageType ? `amqp.${event.marketMessageType}` as const : undefined;
       if (settlementSource) for (const counts of event.settlementInspection?.counts || []) {
         const evidence = (row.settlementMarkets ||= new Map()).get(String(counts.marketId)) || {};
-        evidence[settlementSource] = {...counts, receivedAt: new Date(at).toISOString()};
+        evidence[settlementSource] = {...counts, receivedAt: isoTime(at)};
         row.settlementMarkets.set(String(counts.marketId), evidence);
       }
       for(const rejection of event.settlementInspection?.rejected || []) {
-        (row.deferredTimestampBets ||= new Map()).set(`${rejection.marketId}:${rejection.selectionId}`, {...rejection,receivedAt:new Date(at).toISOString()});
+        (row.deferredTimestampBets ||= new Map()).set(`${rejection.marketId}:${rejection.selectionId}`, {...rejection,receivedAt:isoTime(at)});
         row.freshBets?.delete(`${rejection.marketId}:${rejection.selectionId}`);
       }
       const settlementFields = new Map((event.settlementInspection?.fields || []).map(f => [`${f.marketId}:${f.selectionId}`, f]));
@@ -289,7 +292,7 @@ export class TradeState {
           if(recovering && !validatesRecovery) continue;
           if (settlementSource && field) {
             const observation: import("@lsports/contracts").SettlementObservation = {
-              source: settlementSource, receivedAt: new Date(at).toISOString(), versionAt: new Date(t).toISOString(),
+              source: settlementSource, receivedAt: isoTime(at), versionAt: isoTime(t),
               field: field.field, code: field.code, timestamp: field.timestamp,
               decision: field.field === "missing" ? "ignored_missing" : field.field === "null" ? "ignored_null" : older ? "ignored_older" : "stored",
             };
@@ -301,15 +304,15 @@ export class TradeState {
           const hasPrice = bet.price !== undefined && Number.isFinite(Number(bet.price)) && Number(bet.price) > 1;
           if (event.marketRecovery) {
             (row.snapshotBets ||= new Map()).set(betKey, {
-              receivedAt: new Date(at).toISOString(), versionAt: new Date(t).toISOString(),
+              receivedAt: isoTime(at), versionAt: isoTime(t),
               receivedPrice: bet.price !== undefined && Number.isFinite(Number(bet.price)) ? Number(bet.price) : null,
               decision: older ? "older_than_stored" : !hasPrice ? "missing_or_invalid_price" : "confirmed",
             });
           }
           if (!older) {
             row.deferredTimestampBets?.delete(betKey);
-            if(validatesReplay) {recovery.status="settlement_replayed";recovery.validatedAt=new Date(at).toISOString();}
-            if(validatesRecovery) {recovery.status="validated_amqp";recovery.validatedAt=new Date(at).toISOString();}
+            if(validatesReplay) {recovery.status="settlement_replayed";recovery.validatedAt=isoTime(at);}
+            if(validatesRecovery) {recovery.status="validated_amqp";recovery.validatedAt=isoTime(at);}
             bets.set(bet.id, {
               ...bets.get(bet.id),
               ...defined(bet),
@@ -323,7 +326,10 @@ export class TradeState {
             if (row.restored && hasPrice && (event.marketRecovery || BigInt(order)>BigInt(previousOrder)))
               (row.freshBets ||= new Set()).add(betKey);
             row.betAt.set(betKey, t);
-            (row.betOrder ||= new Map()).set(betKey,order);
+            // Millisecond order is exactly reconstructible from betAt. Keep all
+            // sub-millisecond ordering keys and every non-snapshot path unchanged.
+            if(event.marketRecovery&&!event.outright&&BigInt(order)===BigInt(t)*1000000n)row.betOrder?.delete(betKey);
+            else (row.betOrder ||= new Map()).set(betKey,order);
           } else {
             this.metrics[lane].staleUpdatesIgnored++;
             if (row.marketReceipt) row.marketReceipt.staleBetUpdates++;
