@@ -76,19 +76,21 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const publish = createPublisher(path);
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0,loopWindowStart=Date.now();
-    const save = coalescedPersistence(()=>operation("file.persist", "local", async () => {
-        const started=performance.now();const feed = state.projection(),capturedBlocks=state.availabilityBlocks();
-        tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection write and AMQP ACK.
+    const save = coalescedPersistence(()=>state.exclusive(()=>operation("file.persist", "local", async () => {
+        const memoryStage=(stage:string)=>{const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
+        memoryStage('capture');
+        const started=performance.now();const feed = state.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
+        tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
         const {regular,...saved}=checkpoint(state,false);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
-        await persistRegularCheckpoint(path,state);
+        memoryStage('regular_checkpoint');await persistRegularCheckpoint(path,state);
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
         const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
-        await publish(feed,{...saved,regularExternal:true},capturedBlocks);
+        memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks);
         const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
-    }));
+    })));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
     const heartbeat = setInterval(() => {
@@ -97,7 +99,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         console.info(
           JSON.stringify({
             operation: "feed.coverage",
-            coverage: state.projection().coverage,
+            coverage: state.projection(Date.now(),false).coverage,
           }),
         );
       }
@@ -341,7 +343,7 @@ export async function session(
         }
         if (!seen.has(decoded.guid)) {
           await operation("feed.apply", "local", async () =>
-            state.apply(lane, decoded.events, decoded.at,{source:"amqp",receivedAt:Number((msg.fields as unknown as {inboxReceived?:number}|undefined)?.inboxReceived)||Date.now()}),
+            state.exclusive(()=>state.apply(lane, decoded.events, decoded.at,{source:"amqp",receivedAt:Number((msg.fields as unknown as {inboxReceived?:number}|undefined)?.inboxReceived)||Date.now()})),
           );
         }
         if(decoded.events.length>0&&decoded.metadata.timestampSource!=='received_control')processedSourceFloor=Math.min(processedSourceFloor??Infinity,decoded.at);
@@ -461,25 +463,25 @@ export async function session(
             if(timestampRecoveryPending){
               state.set(lane,{message:"Recuperando eventos y liquidaciones desde el checkpoint seguro; cuotas bloqueadas."});
               await api.snapshotFull({timestamp:recoveryAnchor,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,apply:async(row,at)=>{
-                const applied=processing.then(async()=>{requireOpen();state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});});processing=applied;await applied;
+                const applied=processing.then(async()=>{requireOpen();await state.exclusive(()=>state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()}));});processing=applied;await applied;
               }});
               requireOpen();await processing;await save();timestampRecoveryPending=false;
               console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
             }
             const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
-            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});state.beginPartitionedSnapshot(lane);await save();
+            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(()=>state.beginPartitionedSnapshot(lane));await save();
             const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>{
-              const applied=processing.then(async()=>{requireOpen();state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});});
+              const applied=processing.then(async()=>{requireOpen();await state.exclusive(()=>state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()}));});
               processing=applied;await applied;
             }});
-            requireOpen();await processing;requireOpen();state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted);partitionCompleted=true;fullCompleted=true;
+            requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
           }else if(lane==='prematch'&&api.snapshotPartitioned){
             regularSnapshotReady=false;state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,regularSnapshotReady:false}});
             let inventory=new Set<number>();
             // Inventory itself can wait through a cooldown. Do not retain 100 unacked
             // deliveries until begin(ids): that callback only runs AFTER inventory HTTP.
-            state.beginPartitionedSnapshot(lane);await save();
+            await state.exclusive(()=>state.beginPartitionedSnapshot(lane));await save();
             const prefix=buffered;buffered=[];
             const handoff=processing.then(async()=>{for(const msg of prefix){await processMessage(msg,!durable);if(closed)break;}if(durable&&!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}});
             processing=handoff;bufferingForSnapshot=false;await handoff;requireOpen();
@@ -488,18 +490,18 @@ export async function session(
               batch:async(batch,at)=>{
                 requireOpen();const capacity=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'64'},undefined,lane);
                 if(!capacity.allowed)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,message:'Memoria insuficiente para aplicar/persistir el lote; baseline incompleto.'});
-                const applied=processing.then(async()=>{requireOpen();state.apply(lane,batch.map(event=>({...event,marketRecovery:true})),at,{source:'snapshot',receivedAt:Date.now()});await save();});
+                const applied=processing.then(async()=>{requireOpen();await state.exclusive(()=>state.apply(lane,batch.map(event=>({...event,marketRecovery:true})),at,{source:'snapshot',receivedAt:Date.now()}));await save();});
                 processing=applied;await applied;
               },
               progress:async progress=>{requireOpen();state.set(lane,{partitionRecovery:progress});await save();},
             });
-            requireOpen();state.finishPartitionedSnapshot(lane,inventory,api.snapshotAudit?.());partitionCompleted=true;
+            requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,inventory,api.snapshotAudit?.()));partitionCompleted=true;
             console.info(JSON.stringify({lane,operation:'snapshot.events',status:'partitioned_complete',...result}));
-          }else {state.beginPartitionedSnapshot(lane);await save();rows=await api.snapshot();}
+          }else {await state.exclusive(()=>state.beginPartitionedSnapshot(lane));await save();rows=await api.snapshot();}
           if (closed || signal.aborted) throw failure || new Error("Disconnected during recovery");
           if(rows!==undefined){
             const recovered=rows;
-            const applied=processing.then(async()=>{requireOpen();state.apply(lane,recovered.map(r=>({...r,marketRecovery:true})),started,{source:'snapshot',receivedAt:Date.now()});state.finishPartitionedSnapshot(lane,new Set(recovered.map(r=>r.fixtureId)),api.snapshotAudit?.(),started);await save();});
+            const applied=processing.then(async()=>{requireOpen();await state.exclusive(()=>{state.apply(lane,recovered.map(r=>({...r,marketRecovery:true})),started,{source:'snapshot',receivedAt:Date.now()});state.finishPartitionedSnapshot(lane,new Set(recovered.map(r=>r.fixtureId)),api.snapshotAudit?.(),started);});await save();});
             processing=applied;await applied;
           }
           regularSnapshotReady = true;
@@ -536,7 +538,7 @@ export async function session(
         try {
           const recovered = await action();
           if (closed || signal.aborted) throw failure || new Error("Disconnected during outright recovery");
-          await operation("feed.apply", "local", async () => state.apply(lane, recovered, startedOutright,{source:"snapshot",receivedAt:Date.now()}));
+          await operation("feed.apply", "local", async () => state.exclusive(()=>state.apply(lane, recovered, startedOutright,{source:"snapshot",receivedAt:Date.now()})));
           outrightRecovery[counter] = recovered.length;
           attempt.lastSuccessAt=new Date().toISOString();
           if(name === "snapshot.outright.markets") outrightRecovery.timestampRejections = api.outrightTimestampRejections?.() || [];
@@ -592,7 +594,7 @@ export async function session(
           status: fullCompleted?"full_snapshot_recovered":partitionCompleted?"partitioned_snapshot_recovered":rows === undefined ? "snapshot_deferred" : "snapshot_recovered",
           ...(partitionCompleted?{events:state.connections[lane].snapshotEvents,partitioned:!fullCompleted,fullSnapshot:fullCompleted}:rows !== undefined ? { events: rows.length } : { snapshotDeferred: true }),
           snapshotAudit: api.snapshotAudit?.(),
-          coverage: state.projection().coverage?.[lane],
+          coverage: state.projection(Date.now(),false).coverage?.[lane],
         }),
       );
     };

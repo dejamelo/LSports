@@ -4,6 +4,17 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
+  request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
+  worker={'oomKilled':True,'exitCode':137,'running':False,'name':'/adl-homologation-worker-1','id':'7f43cb2939c7'+'a'*52}
+  NS['verify_live_oom_identity'](worker,request)
+  for changed in ({'running':True},{'oomKilled':False},{'name':'/adl-homologation-api-1'},{'id':'b'*64},{'exitCode':1}):
+   with self.assertRaises(Exception):NS['verify_live_oom_identity']({**worker,**changed},request)
+  old={name:'original' for name in NS['PARTITION_FILES']};digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  new={**old,'apps/worker/src/state.ts':'bounded'}
+  NS['verify_live_oom_sources'](old,new,digest)
+  for candidate,source_hash in ((old,digest),({**new,'apps/worker/src/messages.ts':'unexpected'},digest),(new,'0'*64)):
+   with self.assertRaises(Exception):NS['verify_live_oom_sources'](old,candidate,source_hash)
  def test_readback_failure_resumes_without_repeating_serialization(self):
   self.test_prepare_activate_reuse_preserves_every_non_worker_field(oom=True,readback_fails=True)
  @unittest.skipUnless(os.environ.get('ADL_OFFLINE_PROOF_IMAGE'),'opt-in isolated Docker proof')

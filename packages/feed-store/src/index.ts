@@ -76,8 +76,8 @@ export async function writeJsonObject(file: Awaited<ReturnType<typeof open>>, va
         const projected=(key==='events'&&depth===1)&&item&&masks?maskEventAvailability(item,masks[item.source as keyof AvailabilityBlocks]):item;
         // Canonical source-event digest, independent of the incremental encoder.
         // One bounded fixture string, never the complete projection.
-        if((key==='events'&&depth===1))eventHash.update(JSON.stringify(projected)+'\n');
-        await write(projected,'',depth+1);}
+        if((key==='events'&&depth===1)){const text=JSON.stringify(projected);if(Buffer.byteLength(text)>16*1024*1024)throw Error('projection_record_limit');eventHash.update(text+'\n');await put(text);}
+        else await write(projected,'',depth+1);}
       await put(']');return;
     }
     await put('{');let first=true;
@@ -86,6 +86,11 @@ export async function writeJsonObject(file: Awaited<ReturnType<typeof open>>, va
     await put('}');
   };
   await write(value);await flush();return {sha256:hash.digest('hex'),bytes:total,eventSha256:eventHash.digest('hex')};
+}
+// Private checkpoint contract bounds one fixture to 32 MiB, not the document.
+// Native serialization avoids a Promise and JS traversal per scalar.
+export async function writeJsonRecord(file:Awaited<ReturnType<typeof open>>,record:Record<string,unknown>){
+ const text=JSON.stringify(record);if(Buffer.byteLength(text)>32*1024*1024)throw Error('checkpoint_record_limit');await file.writeFile(text);
 }
 // One local worker writes a single atomic projection; API only reads. Never store credentials here.
 export function createPublisher(path = statePath()) {

@@ -51,6 +51,21 @@ export interface Row {
   // Session evidence only: a checkpoint must never restore quote confirmation.
   snapshotBets?: Map<string, import("@lsports/contracts").SnapshotQuoteObservation>;
 }
+function selectionReasons(row:Row,m:Market,b:NonNullable<Market['bets']>[number],status:number|undefined,connection:ConnectionState,deferred=false){return [
+              ...(!deferred&&connection.phase !== "connected" ? ["feed_disconnected"] : []),
+              ...(!deferred&&connection.ingressProgress && (connection.ingressProgress!.processingBacklog??connection.ingressProgress!.backlog) > 0 && (connection.ingressProgress!.oldestProcessingAgeMs??connection.ingressProgress!.oldestAgeMs) > 5000 ? ["processing_backlog"] : []),
+              ...(![1, 2, 9].includes(status ?? 0) ? ["event_inactive"] : []),
+              ...(m.status !== 1 ? [m.status === 3 ? "market_settled" : "market_not_open"] : []),
+              ...((b.betStatusId ?? b.status) !== 1 ? ["selection_not_open"] : []),
+              ...(b.settlement !== undefined && b.settlement !== 0 ? ["selection_settled"] : []),
+              ...(!(Number(b.price) > 1 && Number.isFinite(Number(b.price))) ? ["invalid_price"] : []),
+              ...(row.deferredTimestampBets?.has(`${m.id}:${b.id}`) ? ["ambiguous_snapshot_timestamp"] : []),
+              ...(row.timestampRecovery?.get(`${m.id}:${b.id}`)?.status === "awaiting_fresh_amqp" ? ["awaiting_timestamp_recovery"] : []),
+              ...(row.restored && !row.freshBets?.has(`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
+            ];}
+const startTimeFormatter=new Intl.DateTimeFormat('es-AR',{
+ timeZone:'America/Argentina/Buenos_Aires',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'
+});
 const statusLabels: Record<number, string> = {
   0: "Sin estado",
   1: "Prepartido",
@@ -83,6 +98,10 @@ const defined = <T extends object>(value: T) =>
   ) as Partial<T>;
 export class TradeState {
   // Opt-in worker publication cache: immutable event projections; never raw SDK rows.
+  private mutationTail:Promise<void>=Promise.resolve();
+  exclusive<T>(operation:()=>T|Promise<T>):Promise<T>{
+    const result=this.mutationTail.then(operation);this.mutationTail=result.then(()=>{},()=>{});return result;
+  }
   private projectionCaptured=new WeakSet<Row>();
   private projectionCache=new WeakMap<Row,{context:string;event:SportEvent}>();
   restoration?:import("@lsports/contracts").EventFeed["restoration"];
@@ -345,10 +364,10 @@ export class TradeState {
   }
   // Freeze row references, not their full projected graph. Only one fixture is projected at a time, with the existing validation/quote rules.
   // Internal publication payload: lazy arrays are consumed by writeJsonObject, not JSON.stringify.
-  projection(now = Date.now()): EventFeed {
+  projection(now = Date.now(),capture=true): EventFeed {
     const captured = Object.create(this) as TradeState;
     captured.rows={prematch:new Map(this.rows.prematch),inplay:new Map(this.rows.inplay)};
-    for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.projectionCaptured.add(row);
+    if(capture)for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.projectionCaptured.add(row);
     captured.connections=structuredClone(this.connections);
     captured.metrics=structuredClone(this.metrics);
     const empty=Object.create(captured) as TradeState;
@@ -374,15 +393,19 @@ export class TradeState {
     for(const lane of ['prematch','inplay'] as const)Object.assign(base.coverage![lane],{
       rowsStored:0,rowsWithoutFixture:0,rowsPublished:0,rowsHiddenAsDuplicate:0,
       outrightMarketRowsWithoutFixture:0,eventsWithMarkets:0,eventsWithSelections:0,eventsWithSelectableOdds:0});
-    for(const {lane,part} of parts()){
-      const c=part.coverage![lane],target=base.coverage![lane];
-      for(const key of ['rowsStored','rowsWithoutFixture','outrightMarketRowsWithoutFixture'] as const)target[key]+=c[key]??0;
-      target.rowsPublished+=part.events.length;
-      target.rowsHiddenAsDuplicate+=(c.rowsPublished-part.events.length);
-      target.eventsWithMarkets+=part.events.filter(e=>e.markets?.length).length;
-      target.eventsWithSelections+=part.events.filter(e=>e.markets?.some(m=>m.selections.length)).length;
-      target.eventsWithSelectableOdds+=part.events.filter(e=>e.markets?.some(m=>m.selections.some(s=>s.available))).length;
-      horse ||= part.horseRacing?.status==='observed';
+    for(const lane of ['prematch','inplay'] as const)for(const [id,row] of captured.rows[lane]){
+      const target=base.coverage![lane];target.rowsStored++;
+      if(!row.fixture){target.rowsWithoutFixture++;if(row.outright&&row.marketReceipt)target.outrightMarketRowsWithoutFixture=(target.outrightMarketRowsWithoutFixture??0)+1;continue;}
+      horse ||= classifySport(row.fixture.value.sport?.name)==='hipica';
+      if(lane==='prematch'&&live.has(String(id))){target.rowsHiddenAsDuplicate++;continue;}
+      target.rowsPublished++;if(row.markets.size)target.eventsWithMarkets++;
+      if([...row.markets.values()].some(m=>m.bets?.length))target.eventsWithSelections++;
+      const status=(row.livescore&&row.livescore.at>=(row.fixture?.at||0)?row.livescore.value.scoreboard?.status:undefined)??row.fixture.value.status;
+      let selectable=false;
+      for(const market of row.markets.values()){
+        if((market.bets||[]).some(b=>selectionReasons(row,market,b,status,captured.connections[lane]).length===0)){selectable=true;break;}
+      }
+      if(selectable)target.eventsWithSelectableOdds++;
     }
     if(horse)base.horseRacing={status:'observed',message:'Se observaron eventos de Hípica en el paquete.'};
     (base as any).events=jsonItems(function*(){for(const {part} of parts())yield* part.events;});
@@ -492,18 +515,7 @@ export class TradeState {
           name: m.name || `Mercado ${m.id}`,
           status: m.status,
           selections: (m.bets || []).map((b) => {
-            const unavailableReasons = [
-              ...(!deferred&&this.connections[lane].phase !== "connected" ? ["feed_disconnected"] : []),
-              ...(!deferred&&this.connections[lane].ingressProgress && (this.connections[lane].ingressProgress!.processingBacklog??this.connections[lane].ingressProgress!.backlog) > 0 && (this.connections[lane].ingressProgress!.oldestProcessingAgeMs??this.connections[lane].ingressProgress!.oldestAgeMs) > 5000 ? ["processing_backlog"] : []),
-              ...(![1, 2, 9].includes(status ?? 0) ? ["event_inactive"] : []),
-              ...(m.status !== 1 ? [m.status === 3 ? "market_settled" : "market_not_open"] : []),
-              ...((b.betStatusId ?? b.status) !== 1 ? ["selection_not_open"] : []),
-              ...(b.settlement !== undefined && b.settlement !== 0 ? ["selection_settled"] : []),
-              ...(!(Number(b.price) > 1 && Number.isFinite(Number(b.price))) ? ["invalid_price"] : []),
-              ...(row.deferredTimestampBets?.has(`${m.id}:${b.id}`) ? ["ambiguous_snapshot_timestamp"] : []),
-              ...(row.timestampRecovery?.get(`${m.id}:${b.id}`)?.status === "awaiting_fresh_amqp" ? ["awaiting_timestamp_recovery"] : []),
-              ...(row.restored && !row.freshBets?.has(`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
-            ];
+            const unavailableReasons=selectionReasons(row,m,b,status,this.connections[lane],deferred);
             return ({
             id: `${prefix}:${m.id}:${b.id}`,
             ...(() => {
@@ -577,13 +589,7 @@ export class TradeState {
             (sport === "hipica" ? `${participants.length} participantes` : ""),
           time:
             start && Number.isFinite(+start)
-              ? new Intl.DateTimeFormat("es-AR", {
-                  timeZone: "America/Argentina/Buenos_Aires",
-                  day: "2-digit",
-                  month: "2-digit",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                }).format(start) + " ART"
+              ? startTimeFormatter.format(start) + " ART"
               : "Horario no informado",
           live: status === 2,
           score: score?.results?.map((r) => r.value).join(" : "),

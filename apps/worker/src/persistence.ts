@@ -4,7 +4,7 @@ import { copyFile, open, rename, mkdir, lstat } from 'node:fs/promises';
 import {getHeapStatistics} from 'node:v8';
 import {dirname} from 'node:path';
 import {walkSnapshot} from './full-snapshot.js';
-import {writeJsonObject} from '@lsports/feed-store';
+import {writeJsonObject,writeJsonRecord} from '@lsports/feed-store';
 import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
 import { TradeState, type Row } from './state.js';
@@ -42,7 +42,7 @@ export async function persistRegularCheckpoint(path:string,regular:ReturnType<ty
       const captured=(['prematch','inplay'] as const).flatMap(lane=>[...regular.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({lane,key,row})));
       for(const {lane,key,row} of captured){
         if(!first)await file.writeFile(',');first=false;
-        await writeJsonObject(file,{lane,fixtureId:Number(key),fixture:row.fixture,livescore:row.livescore,markets:[...row.markets],marketAt:[...row.marketAt],betAt:[...row.betAt],betOrder:row.betOrder?[...row.betOrder]:undefined,marketReceipt:row.marketReceipt,deferredTimestampBets:row.deferredTimestampBets?[...row.deferredTimestampBets]:undefined,timestampRecovery:row.timestampRecovery?[...row.timestampRecovery]:undefined,settlementAudit:row.settlementAudit?[...row.settlementAudit]:undefined,settlementMarkets:row.settlementMarkets?[...row.settlementMarkets]:undefined});
+        await writeJsonRecord(file,{lane,fixtureId:Number(key),fixture:row.fixture,livescore:row.livescore,markets:[...row.markets],marketAt:[...row.marketAt],betAt:[...row.betAt],betOrder:row.betOrder?[...row.betOrder]:undefined,marketReceipt:row.marketReceipt,deferredTimestampBets:row.deferredTimestampBets?[...row.deferredTimestampBets]:undefined,timestampRecovery:row.timestampRecovery?[...row.timestampRecovery]:undefined,settlementAudit:row.settlementAudit?[...row.settlementAudit]:undefined,settlementMarkets:row.settlementMarkets?[...row.settlementMarkets]:undefined});
       }
       await file.writeFile(']}');
     }else await writeJsonObject(file,{version:1,regular});
