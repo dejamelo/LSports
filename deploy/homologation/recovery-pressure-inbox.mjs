@@ -17,5 +17,5 @@ for(const lane of ['prematch','inplay']){
 }
 const cgroup={};for(const key of ['memory.current','memory.peak','memory.max','memory.events'])try{const raw=readFileSync('/sys/fs/cgroup/'+key,'utf8').trim();cgroup[key]=key==='memory.events'?Object.fromEntries(raw.split('\n').map(s=>s.split(/\s+/)).map(([k,v])=>[k,Number(v)])):raw==='max'?null:Number(raw);}catch{}
 try{cgroup.stat=Object.fromEntries(readFileSync('/sys/fs/cgroup/memory.stat','utf8').trim().split('\n').map(s=>s.split(/\s+/)).filter(([k])=>['anon','file','kernel','slab','sock','inactive_file','active_file','file_dirty','file_writeback','slab_reclaimable'].includes(k)).map(([k,v])=>[k,Number(v)]));}catch{}
-const installedSourceHashes={};for(const file of ['full-snapshot.ts','snapshot-capacity.ts','diagnostics.ts'])installedSourceHashes[file]=createHash('sha256').update(readFileSync('/app/apps/worker/src/'+file)).digest('hex');
+const installedSourceHashes={};for(const file of ['full-snapshot.ts','snapshot-capacity.ts','diagnostics.ts','durable-ingress.mjs','connected.ts','persistence.ts'])installedSourceHashes[file]=createHash('sha256').update(readFileSync('/app/apps/worker/src/'+file)).digest('hex');
 console.log(JSON.stringify({lanes,cgroup,installedSourceHashes,scope:'pending durable rows, including processed but not checkpointed; not a second processing counter',readOnly:true}));
