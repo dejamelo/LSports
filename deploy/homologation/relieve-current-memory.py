@@ -9,6 +9,34 @@ def relief_plan(cgroup,host_available):
     stat=cgroup['stat'];clean=max(0,stat.get('inactive_file',0)-stat.get('file_dirty',0)-stat.get('file_writeback',0)-stat.get('shmem',0))
     return {'reclaimBytes':min(clean,REQUIRED),'oldLimitBytes':old,'plannedLimitBytes':6*GiB,'hostReserveAfterIncreaseBytes':host_available-(6*GiB-old),'requiredActualHeadroomBytes':REQUIRED,'cleanInactiveEstimateBytes':clean}
 
+MEMORY_PATHS={('services','worker','mem_limit'),('services','worker','memswap_limit')}
+def memory_model_canonical(value):
+    result=copy.deepcopy(value)
+    for path in MEMORY_PATHS:
+        worker=result.get('services',{}).get('worker',{})
+        if path[-1] in worker:
+            raw=worker[path[-1]]
+            require(type(raw) is int or type(raw) is str and re.fullmatch('[0-9]{1,20}',raw) is not None,'COMPOSE_MEMORY_REPRESENTATION_UNVERIFIED')
+            worker[path[-1]]=int(raw)
+    return result
+
+def safe_model_diff(before,after,path=()):
+    if type(before) is type(after) and before==after:return []
+    if isinstance(before,dict) and isinstance(after,dict):
+        rows=[]
+        for key in sorted(set(before)|set(after)):
+            rows+=safe_model_diff(before.get(key),after.get(key),path+(key,))
+        return rows
+    def safe(value):
+        result={'type':type(value).__name__}
+        if path in MEMORY_PATHS and (type(value) is int or type(value) is str and re.fullmatch('[0-9]{1,20}',value)):
+            result['value']=value
+        else:result['value']='redacted'
+        return result
+    safe_path=['/'.join(path) if all(re.fullmatch('[A-Za-z0-9_.-]{1,80}',str(k)) for k in path) else 'redacted_path']
+    equivalent=path in MEMORY_PATHS and str(before)==str(after) and str(before).isdigit()
+    return [{'path':safe_path[0],'before':safe(before),'candidate':safe(after),'classification':'representation_only' if equivalent else 'value_or_structure_change'}]
+
 def relief_main():
     import errno,fcntl
     lock=os.open('/run/lock/adl-memory-relief.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
@@ -37,6 +65,15 @@ def relief_main():
     deployment=SECURE/'deployment.json'
     require(deployment.is_file() and not deployment.is_symlink(),'DEPLOYMENT_METADATA_UNVERIFIED')
     deployment_raw=deployment.read_bytes();meta=json.loads(deployment_raw);base=partition_base(meta);original_model=model(base)
+    candidates=[]
+    paths=sorted(SECURE.glob('compose.memory-capacity-*.json'))
+    require(len(paths)<=128,'TOO_MANY_PRIOR_MEMORY_CANDIDATES')
+    for path in paths:
+        require(not path.is_symlink() and path.is_file() and path.stat().st_size<4096,'PRIOR_MEMORY_CANDIDATE_UNVERIFIED')
+        candidate=json.loads(path.read_bytes())
+        only_memory=isinstance(candidate,dict) and set(candidate)=={'services'} and set(candidate['services'])=={'worker'} and set(candidate['services']['worker'])<={'mem_limit','memswap_limit'}
+        candidates.append({'path':str(path),'referencedByDeployment':str(path) in meta.get('composeOverrides',[]),'onlyWorkerMemoryFields':only_memory,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()})
+    emit(operation='memory_relief',stage='prior_attempt_reconciliation',deploymentSha256=hashlib.sha256(deployment_raw).hexdigest(),dockerMemoryBytes=info['HostConfig']['Memory'],cgroupMemoryMaxBytes=before['memory.max'],priorCandidates=candidates,filesRemoved=False,historicalDeploymentHashAvailable=False)
     expected=copy.deepcopy(original_model);change={'mem_limit':6*GiB}
     original_swap=info['HostConfig']['MemorySwap']
     if original_swap==4*GiB:
@@ -46,7 +83,9 @@ def relief_main():
     overlay=SECURE/('compose.memory-capacity-'+stamp+'-'+os.urandom(4).hex()+'.json')
     private(overlay,json.dumps({'services':{'worker':change}}).encode())
     proposed=model(base+['-f',str(overlay)])
-    require(proposed==expected,'PERSISTENT_OVERRIDE_CHANGED_UNEXPECTED_FIELDS')
+    actual_diff=safe_model_diff(original_model,proposed);comparison_diff=safe_model_diff(expected,proposed)
+    emit(operation='memory_relief',stage='compose_candidate_diff',effectiveChanges=actual_diff,expectedVsCandidate=comparison_diff,normalizationScope=['services/worker/mem_limit','services/worker/memswap_limit'])
+    require(memory_model_canonical(proposed)==memory_model_canonical(expected),'PERSISTENT_OVERRIDE_CHANGED_UNEXPECTED_FIELDS')
     private(backup.with_suffix('.deployment.private.json'),deployment_raw)
     identity();host_now=int(re.search(r'^MemAvailable:\s+(\d+)',Path('/proc/meminfo').read_text(),re.M)[1])*1024
     relief_plan(memory_cgroup(pid),host_now)
@@ -60,7 +99,7 @@ def relief_main():
     meta['composeOverrides']=[*meta.get('composeOverrides',[]),str(overlay)]
     tmp=SECURE/('memory-capacity-'+os.urandom(8).hex()+'.deployment.tmp')
     private(tmp,json.dumps(meta).encode());durable_replace(tmp,deployment)
-    require(model(partition_base(json.loads(deployment.read_bytes())))==expected,'PERSISTED_COMPOSE_MODEL_NOT_EFFECTIVE')
+    require(memory_model_canonical(model(partition_base(json.loads(deployment.read_bytes()))))==memory_model_canonical(expected),'PERSISTED_COMPOSE_MODEL_NOT_EFFECTIVE')
     emit(operation='memory_relief',stage='persistent_limit_verified',dockerMemoryBytes=actual['HostConfig']['Memory'],cgroupMemoryMaxBytes=after['memory.max'],composeMemoryBytes=proposed['services']['worker']['mem_limit'],override=str(overlay),workerRestarted=False,heapChanged=False,cacheReclaimRepeated=False)
     require(after['limitMinusCurrentBytes']>=REQUIRED,'ACTUAL_HEADROOM_INSUFFICIENT_AFTER_RELIEF')
     require(after['memory.events'].get('oom_kill',0)==before['memory.events'].get('oom_kill',0),'NEW_OOM_DURING_RELIEF')
