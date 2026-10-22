@@ -32,11 +32,13 @@ def main():
  for pid in (13723,13014):
   try:os.kill(pid,signal.SIGCONT)
   except ProcessLookupError:pass
+ def exited(pid):
+  row=read_process(pid);return row is None or row['state'].startswith('Z')
  deadline=time.monotonic()+10
  while time.monotonic()<deadline:
-  if read_process(13014) is None and read_process(13723) is None:break
+  if exited(13014) and exited(13723):break
   time.sleep(.2)
- require(read_process(13014) is None and read_process(13723) is None,'LOCAL_TERMINATION_PENDING_NO_MORE_SIGNALS')
+ require(exited(13014) and exited(13723),'LOCAL_TERMINATION_PENDING_NO_MORE_SIGNALS')
  require(not run(['/usr/sbin/lsof','-nP','-t','-iTCP:43761','-sTCP:LISTEN']),'LOCAL_PORT_STILL_OCCUPIED_NO_RESUME')
  print(json.dumps({'operation':'local_executor_retirement','status':'verified','nodePid':13014,'sshPid':13723,'signals':['SIGTERM queued before SIGCONT'],'remoteSignalsSent':0,'workerRestarted':False}),flush=True)
 if __name__=='__main__':
