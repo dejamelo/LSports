@@ -81,11 +81,13 @@ export async function run(args){
     const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
     const rehearsalLog=process.env.ADL_REHEARSAL_LOG;
     if(rehearsalLog!==undefined&&!/^oom-restore-attempt-[0-9a-f]{16,32}\.private\.log$/.test(rehearsalLog))throw Error('INVALID_REHEARSAL_LOG_NAME');
-    const report=await remote('worker_exit_report',{handoff,rehearsalBackup:ledger.steps.throughput_image?.result?.backup,...(rehearsalLog?{rehearsalLog}:{})},true);
+    const expectedWorkerId=process.env.ADL_EXPECTED_WORKER_ID;if(expectedWorkerId&&!/^[0-9a-f]{64}$/.test(expectedWorkerId))throw Error('INVALID_EXPECTED_WORKER_ID');
+    const currentOnly=process.env.ADL_CURRENT_EXIT_ONLY==='1';
+    const report=await remote('worker_exit_report',{handoff,...(!currentOnly?{rehearsalBackup:ledger.steps.throughput_image?.result?.backup}:{}),...(expectedWorkerId?{expectedWorkerId}:{}),...(!currentOnly&&rehearsalLog?{rehearsalLog}:{})},true);
     const {writeProtectedReport}=await import('./distribution-validation.mjs');
-    const reportFile=path.join(folder,`worker-exit-${pid}-${parent}.json`);
+    const reportFile=path.join(folder,`worker-exit-${pid}-${parent}${expectedWorkerId?'-'+expectedWorkerId.slice(0,12):''}.json`);
     await writeProtectedReport(reportFile,JSON.stringify(report,null,2));
-    emit({stage,status:'collected',readOnly:true,providerRequests:0,workerRestarted:false,offlineRehearsal:report.offlineRehearsal,workers:report.workers?.map(({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})=>({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})),reportFile,posnetChanged:false});return;
+    emit({stage,status:'collected',readOnly:true,providerRequests:0,workerRestarted:false,offlineRehearsal:report.offlineRehearsal,workers:report.workers?.map(({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,memoryLimitBytes,nodeOptions,frozenCheckpoint,checkpointDiagnosticError,kernelOOM,timeline,finalLogSignals,oomConclusion})=>({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,memoryLimitBytes,nodeOptions,checkpointDiagnosticError,kernelOOM,recentStages:timeline?.records?.filter(r=>['snapshot.events','file.persist'].includes(r.operation)).slice(-4),lastSnapshotStage:frozenCheckpoint?.lanes?.prematch?.fullSnapshot,sharedPersistence:frozenCheckpoint?.sharedPersistence,finalLogSignals,oomConclusion})),reportFile,posnetChanged:false});return;
    }
   if(['--api-validation-resume','--feed-validation-resume','--recovery-progress'].includes(args[4])){
    stage='api_health';

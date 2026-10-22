@@ -35,18 +35,69 @@ def canonical_barrier(value):
     if dt.microsecond%1000:dt+=datetime.timedelta(microseconds=1000-dt.microsecond%1000)
     return dt.isoformat(timespec='milliseconds').replace('+00:00','Z')
 
-def worker_exit_report(rehearsal_backup=None,rehearsal_log=None):
+def timeline_timestamp(value,field):
+    valid=isinstance(value,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z',value)
+    try:
+        if not valid:raise ValueError()
+        return datetime.datetime.fromisoformat(value.replace('Z','+00:00'))
+    except (ValueError,TypeError):
+        emit(operation='cutover.aws',stage='timeline_timestamp',status='blocked',reason='TIMELINE_TIMESTAMP_UNVERIFIED',timestampField=field,valueType=type(value).__name__,requiredFormat='RFC3339 UTC Z; optional 1-9 fractional digits; valid calendar')
+        raise RuntimeError('TIMELINE_TIMESTAMP_UNVERIFIED_'+field.replace('.','_').upper())
+
+def frozen_worker_checkpoint(path):
+    metadata,rows,size=diagnostic_checkpoint(path,lambda event:None)
+    result={'sizeBytes':size,'events':rows,'updatedAt':metadata.get('updatedAt'),'source':'persisted_checkpoint_not_exact_exit_state','lanes':{}}
+    for lane in ('prematch','inplay'):
+        c=metadata.get('connections',{}).get(lane,{})
+        allowed={}
+        for name,keys in {'fullSnapshot':('method','stage','bytes','rows','validatedRows','appliedRows','startedAt','completedAt','lastProgressAt','ackedDuringRecovery'),'ingressProgress':('received','acknowledged','processed','checkpointed','backlog','bytes','processingBacklog','oldestAgeMs','oldestProcessingAgeMs','rssBytes','metricWindowStartUTC','metricWindowEndUTC'),'consumerProgress':('active','registeredAt','acknowledgedMessages','lastAckAt')}.items():
+            allowed[name]={k:v for k,v in (c.get(name) or {}).items() if k in keys and (isinstance(v,str) and len(v)<128 or type(v) in (int,float,bool))}
+        allowed.update(phase=c.get('phase'),session=c.get('session'),lastSnapshotAt=c.get('lastSnapshotAt'),diagnostic=safe_feed_diagnostic(c.get('diagnostic')),lastSnapshotDiagnostic=safe_feed_diagnostic(c.get('lastSnapshotDiagnostic')))
+        result['lanes'][lane]=allowed
+    shared=metadata.get('connections',{}).get('prematch',{}).get('persistenceProgress') or {}
+    result['sharedPersistence']={k:v for k,v in shared.items() if k in ('writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','rssBytes','lastCompletedAt','metricWindowStartUTC','metricWindowEndUTC') and type(v) in (int,float,str)}
+    return result
+
+def kernel_oom_evidence(container_id,start,end):
+    try:
+        with tempfile.TemporaryFile() as raw:
+            cmd=['journalctl','-k','--utc','--since',start.strftime('%Y-%m-%d %H:%M:%S UTC'),'--until',(end+datetime.timedelta(seconds=2)).strftime('%Y-%m-%d %H:%M:%S UTC'),'--no-pager','-o','short-iso','--grep','oom-kill|Killed process|Out of memory|Memory cgroup out']
+            process=subprocess.Popen(cmd,stdout=raw,stderr=subprocess.DEVNULL)
+            try:code=process.wait(timeout=15)
+            except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=5);return {'available':False,'reason':'kernel_log_timeout'}
+            size=raw.tell();raw.seek(0)
+            if code!=0 or size>8*1024*1024:return {'available':False,'reason':'kernel_log_unavailable_or_bounded_limit'}
+            lines=raw.read().decode(errors='replace').splitlines();pids=set();records=[]
+            for line in lines:
+                if container_id in line:
+                    match=re.search(r'\bpid=(\d+)',line)
+                    if match:pids.add(match[1])
+            for line in lines:
+                match=re.search(r'Killed process (\d+)',line)
+                if container_id not in line and not (match and match[1] in pids):continue
+                record={'atUTC':line.split(' ',1)[0],'containerMatched':container_id in line}
+                if match:record['hostPid']=int(match[1])
+                for name,key in [('total-vm','virtualBytes'),('anon-rss','anonymousRSSBytes'),('file-rss','fileRSSBytes'),('shmem-rss','sharedRSSBytes')]:
+                    found=re.search(re.escape(name)+r':(\d+)kB',line)
+                    if found:record[key]=int(found[1])*1024
+                records.append(record)
+            return {'available':True,'records':records[-8:],'matchedContainerEvents':bool(records),'rawLogPrinted':False}
+    except (OSError,subprocess.SubprocessError):return {'available':False,'reason':'kernel_log_unavailable'}
+
+def worker_exit_report(rehearsal_backup=None,rehearsal_log=None,expected_worker_id=None):
     consumers=states('worker');reports=[]
+    if expected_worker_id is not None:require(re.fullmatch('[0-9a-f]{64}',str(expected_worker_id)) and len(consumers)==1 and consumers[0]['id']==expected_worker_id,'EXPECTED_OOM_CONTAINER_NOT_CURRENT_NO_RESTART')
     for c in consumers:
         require(re.fullmatch('[0-9a-f]{12,64}',c['id']) is not None,'WORKER_CONTAINER_ID_UNVERIFIED')
         item=json.loads(run(['docker','inspect',c['id']]))[0]
         labels=item.get('Config',{}).get('Labels',{})
         require(labels.get('com.docker.compose.project')=='adl-homologation' and labels.get('com.docker.compose.service')=='worker','WORKER_LABELS_UNVERIFIED')
         state=item.get('State',{});host=item.get('HostConfig',{})
-        row={**c,'startedAtUTC':state.get('StartedAt'),'finishedAtUTC':state.get('FinishedAt'),'imageId':item.get('Image'),'restartCount':item.get('RestartCount'),'memoryLimitBytes':host.get('Memory'),'memorySwapBytes':host.get('MemorySwap'),'rawLogPrinted':False}
+        row={**c,'startedAtUTC':state.get('StartedAt'),'finishedAtUTC':state.get('FinishedAt'),'imageId':item.get('Image'),'restartCount':item.get('RestartCount'),'memoryLimitBytes':host.get('Memory'),'memorySwapBytes':host.get('MemorySwap'),'nodeOptions':next((e.split('=',1)[1] for e in item.get('Config',{}).get('Env',[]) if e.startswith('NODE_OPTIONS=') and re.fullmatch(r'NODE_OPTIONS=--max-old-space-size=\d{3,5}',e)),None),'rawLogPrinted':False}
         end=datetime.datetime.now(datetime.timezone.utc)
-        if state.get('Status')=='exited':end=datetime.datetime.fromisoformat(state['FinishedAt'].replace('Z','+00:00'))
+        if state.get('Status')=='exited':end=timeline_timestamp(state.get('FinishedAt'),'State.FinishedAt')
         start=end-datetime.timedelta(minutes=20)
+        row['kernelOOM']=kernel_oom_evidence(c['id'],start,end)
         row['timeline']=existing_recovery_timeline([c],{'fromUTC':start.strftime('%Y-%m-%dT%H:%M:%SZ'),'toUTC':(end+datetime.timedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%SZ')})
         with tempfile.TemporaryFile() as raw:
             process=subprocess.Popen(['docker','logs','--timestamps','--tail','250',c['id']],stdout=raw,stderr=raw)
@@ -64,6 +115,10 @@ def worker_exit_report(rehearsal_backup=None,rehearsal_log=None):
             volume=json.loads(run(['docker','volume','inspect',mount['Name']]))[0]
             require(volume.get('Labels',{}).get('com.docker.compose.project')=='adl-homologation','VOLUME_PROJECT_UNVERIFIED')
             directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'VOLUME_SYMLINK')
+            checkpoint=directory/'trade-feed.json'
+            if checkpoint.is_file() and not checkpoint.is_symlink():
+                try:row['frozenCheckpoint']=frozen_worker_checkpoint(checkpoint)
+                except Exception as error:row['checkpointDiagnosticError']={'reason':str(error) if re.fullmatch('[A-Z_]{1,100}',str(error)) else 'CHECKPOINT_DIAGNOSTIC_FAILED','exceptionType':type(error).__name__,'sizeBytes':checkpoint.stat().st_size,'rawErrorPrinted':False}
             for path in sorted(directory.glob('trade-feed.json*'))[:100]:
                 if path.is_symlink() or not path.is_file():continue
                 name=path.name
@@ -163,7 +218,7 @@ def cutover_main():
         require(action in ('import','start','status','startup_report','worker_exit_report','recover_start','recovery_evidence'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(audit['operation']=='cutover.audit' and audit['readOnly'] is True,'INVALID_AUDIT')
-        if action=='worker_exit_report':return worker_exit_report(request.get('rehearsalBackup'),request.get('rehearsalLog'))
+        if action=='worker_exit_report':return worker_exit_report(request.get('rehearsalBackup'),request.get('rehearsalLog'),request.get('expectedWorkerId'))
         deadline=datetime.datetime.fromisoformat(audit['notBeforeUTC'].replace('Z','+00:00')).timestamp()
         require(audit['notBeforeUTC'].endswith('Z') and math.isfinite(deadline),'INVALID_DEADLINE')
         digest=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -547,9 +602,9 @@ def recovery_runtime_evidence(directory,consumers,expected):
     return result
 
 def existing_recovery_timeline(consumers,window):
-    require(isinstance(window,dict) and set(window)=={'fromUTC','toUTC'},'TIMELINE_WINDOW_UNVERIFIED')
-    for v in window.values():require(isinstance(v,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',v),'TIMELINE_TIMESTAMP_UNVERIFIED')
-    start=datetime.datetime.fromisoformat(window['fromUTC'].replace('Z','+00:00'));end=datetime.datetime.fromisoformat(window['toUTC'].replace('Z','+00:00'))
+    require(isinstance(window,dict),'TIMELINE_WINDOW_UNVERIFIED')
+    start=timeline_timestamp(window.get('fromUTC'),'window.fromUTC');end=timeline_timestamp(window.get('toUTC'),'window.toUTC')
+    require(set(window)=={'fromUTC','toUTC'},'TIMELINE_WINDOW_UNVERIFIED')
     require(0<(end-start).total_seconds()<=3600,'TIMELINE_WINDOW_LIMIT')
     records=[];reads=[]
     for c in consumers:

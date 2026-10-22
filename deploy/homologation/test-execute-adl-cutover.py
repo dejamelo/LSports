@@ -31,6 +31,37 @@ class Cutover(unittest.TestCase):
    def changed(event):
     other=path.with_suffix('.new');other.write_text('{"mode":"connected","events":[]}');os.replace(other,path)
    _,rows,_=NS['diagnostic_checkpoint'](path,changed);self.assertEqual(rows,1)
+ def test_timeline_accepts_utc_fraction_and_identifies_invalid_field(self):
+  start=NS['timeline_timestamp']('2026-10-22T01:02:03.456Z','window.fromUTC');self.assertEqual(start.microsecond,456000)
+  end=NS['timeline_timestamp']('2026-10-22T01:02:03.123456789Z','State.FinishedAt');self.assertEqual(end.microsecond,123456)
+  for value in (None,'2026-02-30T01:02:03Z','2026-10-22T25:02:03Z','2026-10-22T01:02:03+01:00','SECRET_NOT_A_TIMESTAMP'):
+   out=io.StringIO()
+   with contextlib.redirect_stdout(out):
+    with self.assertRaisesRegex(RuntimeError,'TIMELINE_TIMESTAMP_UNVERIFIED_WINDOW_TOUTC'):NS['timeline_timestamp'](value,'window.toUTC')
+   record=json.loads(out.getvalue());self.assertEqual(record['timestampField'],'window.toUTC');self.assertNotIn('SECRET',out.getvalue())
+  out=io.StringIO()
+  with contextlib.redirect_stdout(out):
+   with self.assertRaisesRegex(RuntimeError,'WINDOW_TOUTC'):NS['existing_recovery_timeline']([],{'fromUTC':'2026-10-22T01:02:03Z'})
+ def test_worker_exit_collection_fences_the_exact_new_container(self):
+  old=NS['states'];NS['states']=lambda service:[{'id':'a'*64}]
+  try:
+   with self.assertRaisesRegex(RuntimeError,'EXPECTED_OOM_CONTAINER_NOT_CURRENT'):NS['worker_exit_report'](expected_worker_id='b'*64)
+  finally:NS['states']=old
+ def test_current_exit_timeline_uses_millisecond_window_without_consumers(self):
+  result=NS['existing_recovery_timeline']([],{'fromUTC':'2026-10-22T01:02:03.123Z','toUTC':'2026-10-22T01:12:03.456Z'})
+  self.assertEqual(result['records'],[])
+ def test_kernel_oom_filters_the_current_container_and_correlated_host_pid(self):
+  current='a'*64;other='b'*64;original=NS['subprocess']
+  class Process:
+   def wait(self,timeout):return 0
+  def popen(args,stdout,stderr):
+   self.assertEqual(args[0],'journalctl');self.assertIn('--utc',args)
+   stdout.write((f'2026-10-22T01:00:00+0000 host kernel: oom-kill:task_memcg=/docker/{other},pid=88\n'+f'2026-10-22T01:00:00+0000 host kernel: oom-kill:task_memcg=/docker/{current},pid=77\n'+'2026-10-22T01:00:00+0000 host kernel: Killed process 88 (node) anon-rss:999kB\n'+'2026-10-22T01:00:00+0000 host kernel: Killed process 77 (node) anon-rss:2048kB file-rss:64kB\n').encode());return Process()
+  NS['subprocess']=types.SimpleNamespace(**{**original.__dict__,'Popen':popen})
+  try:
+   now=NS['datetime'].datetime.now(NS['datetime'].timezone.utc);result=NS['kernel_oom_evidence'](current,now,now)
+   self.assertEqual(len(result['records']),2);self.assertEqual(result['records'][-1]['anonymousRSSBytes'],2097152);self.assertNotIn('999',json.dumps(result));self.assertFalse(result['rawLogPrinted'])
+  finally:NS['subprocess']=original
  def test_amqp_comparison_reports_secret_drift_without_values_or_hashes(self):
   before={'LSPORTS_PREMATCH_USERNAME':'SECRET_USER','LSPORTS_PREMATCH_PASSWORD':'SECRET_PASSWORD','LSPORTS_INPLAY_USERNAME':'SECRET_USER_2','LSPORTS_INPLAY_PASSWORD':'SECRET_PASS_2'}
   current=dict(before);current['LSPORTS_PREMATCH_PASSWORD']='NEW_SECRET'
