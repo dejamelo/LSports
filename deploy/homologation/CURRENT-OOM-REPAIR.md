@@ -38,10 +38,19 @@ Follow-up validation:271 worker/feed-store tests passed,2 opt-in skipped;17 upgr
 
 ## Resume at graceful-stop gate
 
-`ADL_RESUME_BACKUP=/var/backups/adl-partitioned-upgrade-oqxi48jd` pins continuation to the existing protected receipt, exact candidate-source digest and backup. A missing/different receipt fails before preparing another image. It does not reissue Distribution/Stop or SIGTERM when phase=stop_requested.
+`ADL_RESUME_BACKUP=/var/backups/adl-partitioned-upgrade-oqxi48jd` pins continuation to the existing protected receipt, original prepared-source digest and backup. A missing/different receipt fails before preparing another image. It does not reissue Distribution/Stop or SIGTERM when phase=stop_requested.
 
 The resumed stop gate verifies the old container ID and base image ID, observes sanitized existing logs plus checkpoint/temp/inbox/WAL file metadata, and records each observation in the protected receipt. Maximum observation180s, every15s; if no log/file change for90s it stops with UPGRADE_STOP_NO_OBSERVABLE_PROGRESS_NO_MORE_SIGNALS. This is an evidence limit, not proof of a deadlock. Original signal time may be absent in an old receipt; elapsed time since the confirmed distribution stop is separately named and never presented as signal time. New signal requests record their timestamp.
 
 If the container already exited, the existing persistence/inbox integrity and offline-copy gates run immediately without replaying signals. No force-stop path was added: consistency of a live checkpoint/inbox/WAL is not established by file metadata. Offline validation and backups must still pass before starting the prepared worker. POSNET, panel, original data and previous backups are untouched.
 
 `--pipeline-report` is an additional read-only mode, not required to resume: exact expected/found image references and IDs, source-hash comparisons, override fingerprints, persisted-format scalars, cgroup memory and three recovery observations are written into a protected local report. No provider queries, worker restarts or app imports are used by its identity probe. Compatibility is explicitly not claimed from matching hashes alone.
+
+
+## Original preparation receipt resolution
+
+The old input gate required `/etc/adl-homologation/partitioned-upgrade-<current-executor-candidate-digest24>.json` before searching for the original preparation. Resume now identifies the original receipt by protected `backup` and `image` fields. The local executor forwards `steps.throughput_image.result.image` only when its successful result matches the pinned backup. If absent locally, exactly one protected remote receipt for that backup is required; no image/phase/receipt is invented.
+
+The remote resolver validates root ownership/private permissions, unique receipt, digest64/filename/image-tag agreement, original stop identity, image label and all fifteen production-source bytes read from the immutable prepared image ID. Their canonical digest must equal the original receipt digest. It resumes that image's sources rather than silently deriving a new image from a newer executor. The original worker/image identity is checked again by the existing stop gate. Original data/receipt content is unchanged by resolution. Missing records report the exact expected directory, filename (when known) and matching fields; an absent receipt is never recreated from an assumed phase.
+
+Seven focused tests cover interrupted stop with newer executor sources, remote lookup when local image is missing, absent/duplicate receipts, label/source tampering and missing old-container identity. The observer independently tests exit, progress and bounded lack of progress. Use only `ADL_RESUME_BACKUP` plus snapshot-memory-repair for this continuation; no fresh-live-image repair authorization flag is needed.

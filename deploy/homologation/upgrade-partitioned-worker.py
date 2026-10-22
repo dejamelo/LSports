@@ -332,6 +332,40 @@ def upgrade_stop_sample(progress):
         result['distributionStoppedAtUTC']=stopped;result['elapsedSinceDistributionStopSeconds']=round((end-timeline_timestamp(stopped,'supplierStoppedAtUTC')).total_seconds(),1)
     return result
 
+def resolve_prepared_upgrade(request,candidate_files):
+    expected=Path(request['resumeBackup']);image=request.get('resumePreparedImage')
+    checks={'backupPath':expected.parent==BACKUPS and bool(re.fullmatch('adl-partitioned-upgrade-[A-Za-z0-9_-]+',expected.name)),'backupExists':expected.is_dir(),'backupNotSymlink':not expected.is_symlink(),'backupProtected':False,'preparedImageFormatOrRemoteLookup':image is None or bool(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',str(image)))}
+    if checks['backupExists'] and checks['backupNotSymlink']:checks['backupProtected']=expected.stat().st_uid==os.geteuid() and expected.stat().st_mode&0o077==0
+    emit(operation='cutover.aws',stage='partitioned_upgrade.resume_lookup',status='checking',checks=checks,backup=str(expected) if checks['backupPath'] else 'unverified_path',expectedImage=image if image is not None and checks['preparedImageFormatOrRemoteLookup'] else 'lookup_from_original_receipt' if image is None else 'unverified_image',receiptDirectory=str(SECURE),receiptPattern='partitioned-upgrade-<prepared-image-digest-prefix>.json',workerStarted=False,posnetChanged=False)
+    require(all(checks.values()),'RESUME_BACKUP_OR_PREPARED_IMAGE_UNVERIFIED')
+    # The preparation receipt belongs to the ORIGINAL prepared image, never to
+    # the source digest of a newer executor used merely to resume it.
+    path=SECURE/('partitioned-upgrade-'+image.split(':',1)[1]+'.json') if image is not None else None
+    matching=[];scanned=0
+    for p in sorted(SECURE.glob('partitioned-upgrade-*.json')):
+        require(scanned<1024,'RESUME_RECEIPT_SCAN_LIMIT');scanned+=1
+        if p.is_symlink() or not p.is_file() or p.stat().st_uid!=os.geteuid() or p.stat().st_mode&0o077 or p.stat().st_size>2*1024**2:continue
+        try:record=json.loads(p.read_bytes())
+        except (ValueError,UnicodeError):continue
+        if isinstance(record,dict) and record.get('backup')==str(expected) and (image is None or record.get('image')==image):matching.append((p,record))
+    emit(operation='cutover.aws',stage='partitioned_upgrade.resume_lookup',status='collected',expectedReceipt=str(path) if path else str(SECURE/'partitioned-upgrade-<original-image-prefix>.json'),matchedReceipts=len(matching),checkedFields=['backup','image','digest','phase','oldContainer','baseImageId'],workerStarted=False,posnetChanged=False)
+    require(len(matching)==1,'RESUME_ORIGINAL_RECEIPT_NOT_FOUND' if not matching else 'RESUME_ORIGINAL_RECEIPT_NOT_UNIQUE')
+    found,record=matching[0];digest=record.get('digest');image=record.get('image')
+    require(isinstance(image,str) and re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'RESUME_ORIGINAL_IMAGE_REFERENCE_UNVERIFIED');suffix=image.split(':',1)[1]
+    if path is None:path=SECURE/('partitioned-upgrade-'+suffix+'.json')
+    require(found==path and re.fullmatch('[0-9a-f]{64}',str(digest)) and digest[:24]==suffix,'RESUME_ORIGINAL_RECEIPT_DIGEST_MISMATCH')
+    require(record.get('phase') in ('prepared','stop_requested','stopped','start_requested','running'),'RESUME_ORIGINAL_PHASE_UNVERIFIED')
+    if record.get('phase')=='stop_requested':require(record.get('supplierStoppedBeforeConsumer') is True and re.fullmatch('[0-9a-f]{64}',str(record.get('oldContainer'))) and re.fullmatch('sha256:[0-9a-f]{64}',str(record.get('baseImageId'))),'RESUME_STOP_IDENTITY_UNVERIFIED')
+    image_info=json.loads(run(['docker','image','inspect',image]))[0]
+    require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==digest,'RESUME_PREPARED_IMAGE_LABEL_MISMATCH')
+    image_id=image_info['Id'];require(re.fullmatch('sha256:[0-9a-f]{64}',image_id),'RESUME_PREPARED_IMAGE_ID_UNVERIFIED')
+    export="const f=require('node:fs');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(PARTITION_FILES))+".map(n=>[n,f.readFileSync('/app/'+n,'utf8')]))));"
+    files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',image_id,'-e',export],timeout=30))
+    require(isinstance(files,dict) and set(files)==PARTITION_FILES and all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'RESUME_PREPARED_SOURCES_UNVERIFIED')
+    require(hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==digest,'RESUME_PREPARED_SOURCE_DIGEST_MISMATCH')
+    emit(operation='cutover.aws',stage='partitioned_upgrade.resume_resolved',status='verified',receipt=str(found),backup=str(expected),image=image,imageId=image_id,digest=digest,progressPhase=record['phase'],candidateFilesMatchPrepared=files==candidate_files,preparedSourceReused=True,workerStarted=False,imageRebuilt=False,posnetChanged=False)
+    return found,record,files
+
 def upgrade_partitioned(request):
     stage='partitioned_upgrade.input';backup=None
     try:
@@ -340,8 +374,7 @@ def upgrade_partitioned(request):
         require(all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'UPGRADE_SOURCE_SIZE_LIMIT')
         digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt_path=SECURE/('partitioned-upgrade-'+digest[:24]+'.json')
         if request.get('resumeBackup'):
-            expected=Path(request['resumeBackup']);require(expected.parent==BACKUPS and re.fullmatch('adl-partitioned-upgrade-[A-Za-z0-9_-]+',expected.name) and expected.is_dir() and not expected.is_symlink() and expected.stat().st_uid==os.geteuid() and expected.stat().st_mode&0o077==0 and receipt_path.is_file() and not receipt_path.is_symlink(),'RESUME_PREPARED_RECEIPT_REQUIRED')
-            saved=json.loads(receipt_path.read_bytes());require(saved.get('digest')==digest and saved.get('backup')==str(expected),'RESUME_BACKUP_OR_IMAGE_MISMATCH')
+            receipt_path,saved,files=resolve_prepared_upgrade(request,files);digest=saved['digest']
         meta=json.loads((SECURE/'deployment.json').read_bytes());base=partition_base(meta);before=model(base)
         require(control_status()==200,'API_NOT_HEALTHY')
         require(snapshot_memory_bytes(before['services']['worker']['mem_limit'])==4294967296,'UPGRADE_REQUIRES_EXISTING_FOUR_GIB_LIMIT')
