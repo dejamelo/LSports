@@ -740,6 +740,12 @@ def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None
         if previous is not None and now()-last_change>=90:raise RuntimeError('UPGRADE_STOP_NO_OBSERVABLE_PROGRESS_NO_MORE_SIGNALS')
         previous=fingerprint;sleep(min(interval,timeout-elapsed))
 
+def resumed_stop_budget(progress):
+    previous=progress.get('shutdownObservation',{}).get('samples',[])
+    # Only a pinned interrupted operation with measured write progress qualifies.
+    # No repeated signal; inactivity and identity checks remain unchanged.
+    return 600 if previous and previous[-1].get('progressSincePreviousSample') is True else 180
+
 def upgrade_stop_sample(progress):
     workers=states('worker');require(len(workers)==1 and workers[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
     worker=workers[0];info=json.loads(run(['docker','inspect',worker['id']]))[0]
@@ -1128,7 +1134,10 @@ def upgrade_partitioned_unlocked(request):
                     progress['shutdownObservation']=report;save(progress)
                     emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='observing',backup=str(backup),**report['samples'][-1],forceStopEvidenceVerified=False,posnetChanged=False)
                 if any(w['running'] for w in states('worker')):
-                    try:watch_upgrade_stop(lambda:upgrade_stop_sample(progress),observed)
+                    budget=resumed_stop_budget(progress) if request.get('resumeBackup') else 180
+                    initial=upgrade_stop_sample(progress)
+                    emit(operation='cutover.aws',stage='partitioned_upgrade.resume_stop_status',status='collected',backup=str(backup),current=initial,shutdownLogs=evidence.get('shutdownLogs',[]),observationBudgetSeconds=budget,signalsSent=0,forceStopEvidenceVerified=False,posnetChanged=False)
+                    try:watch_upgrade_stop(lambda:upgrade_stop_sample(progress),observed,timeout=budget)
                     except RuntimeError:
                         # No second signal or generic extra wait. An already completed
                         # shutdown can proceed only through the existing copy/replay proof.

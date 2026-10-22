@@ -16,6 +16,11 @@ class Scope(unittest.TestCase):
   ns['verify_pipeline_sources'](old,candidate,digest)
   for changed,sha in ((old,digest),({**candidate,'apps/worker/src/messages.ts':'unrelated'},digest),(candidate,'f'*64)):
    with self.assertRaises(RuntimeError):ns['verify_pipeline_sources'](old,changed,sha)
+class StopResumeBudget(unittest.TestCase):
+ def test_only_actual_previous_progress_gets_bounded_completion_window(self):
+  self.assertEqual(ns['resumed_stop_budget']({}),180)
+  self.assertEqual(ns['resumed_stop_budget']({'shutdownObservation':{'samples':[{'progressSincePreviousSample':False}]}}),180)
+  self.assertEqual(ns['resumed_stop_budget']({'shutdownObservation':{'samples':[{'progressSincePreviousSample':True}]}}),600)
 class OperationLock(unittest.TestCase):
  def test_remote_interrupted_client_cannot_duplicate_operation(self):
   with tempfile.TemporaryDirectory() as tmp:
