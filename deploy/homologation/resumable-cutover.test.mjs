@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage} from './resumable-adl-cutover.mjs';
 test('completed stages are reused; failure stays pending and does not erase previous results',async()=>{
  const ledger={steps:{}};let saves=0,actions=0;
  const save=async()=>{saves++;};
@@ -44,4 +44,10 @@ test('OOM repair and rollback remain distinct durable modes; no migration mode i
  assert.deepEqual(recoveryMode('--snapshot-memory-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--snapshot-memory-rollback'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:true});
  assert.deepEqual(recoveryMode('--durable-ingress-repair'),{snapshotMemoryRepair:false,durableMode:true,durableRollback:false});
+});
+
+test('persistence repair obtains exact image from successful protected progress and never guesses',()=>{
+ const image='adl-worker-partitioned:'+'a'.repeat(24),ledger={steps:{throughput_upgrade:{status:'ok',result:{image}}}};
+ assert.equal(persistenceExpectedImage(ledger,{}),image);assert.throws(()=>persistenceExpectedImage({steps:{}},{}),/EXPECTED_CURRENT/);assert.throws(()=>persistenceExpectedImage(ledger,{ADL_EXPECTED_LIVE_IMAGE:'invalid'}),/EXPECTED_CURRENT/);assert.throws(()=>persistenceExpectedImage(ledger,{ADL_LIVE_OOM_REPAIR:'1'}),/EXPECTED_CURRENT/);
+ ledger.steps.throughput_upgrade.status='pending';assert.throws(()=>persistenceExpectedImage(ledger,{}),/EXPECTED_CURRENT/);
 });

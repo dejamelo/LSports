@@ -21,6 +21,12 @@ class Upgrade(unittest.TestCase):
   for changed in ({'running':False},{'oomKilled':True},{'name':'/api'}):
    with self.assertRaises(Exception):NS['verify_live_persistence_identity']({**worker,**changed},request,image)
   with self.assertRaises(Exception):NS['verify_live_persistence_identity'](worker,request,image+'b')
+ def test_persistence_mismatch_identifies_comparison_without_secrets(self):
+  image='adl-worker-partitioned:'+'a'*24;request={'snapshotMemoryRepair':True,'expectedLiveImage':image};worker={'running':True,'oomKilled':False,'name':'/adl-homologation-worker-1'}
+  output=io.StringIO()
+  with contextlib.redirect_stdout(output):
+   with self.assertRaises(Exception):NS['verify_live_persistence_identity'](worker,request,'PRIVATE_DO_NOT_PRINT')
+  record=json.loads(output.getvalue());self.assertEqual(record['failedChecks'],['imageReferenceMatches']);self.assertEqual(record['expectedImage'],image);self.assertEqual(record['composeImage'],'unverified_reference');self.assertNotIn('PRIVATE_DO_NOT_PRINT',output.getvalue())
  def test_readback_failure_resumes_without_repeating_serialization(self):
   self.test_prepare_activate_reuse_preserves_every_non_worker_field(oom=True,readback_fails=True)
  @unittest.skipUnless(os.environ.get('ADL_OFFLINE_PROOF_IMAGE'),'opt-in isolated Docker proof')

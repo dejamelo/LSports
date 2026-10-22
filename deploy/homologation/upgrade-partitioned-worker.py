@@ -4,7 +4,11 @@ def verify_live_oom_identity(worker,request):
     require(request.get('snapshotMemoryRepair') and worker.get('oomKilled') is True and worker.get('exitCode')==137 and not worker.get('running') and worker.get('name')=='/adl-homologation-worker-1' and re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))) and str(worker.get('id','')).startswith(request['expectedOomPrefix']),'CURRENT_OOM_IDENTITY_UNVERIFIED')
 
 def verify_live_persistence_identity(worker,request,image):
-    require(request.get('snapshotMemoryRepair') and worker.get('running') is True and not worker.get('oomKilled') and worker.get('name')=='/adl-homologation-worker-1' and re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',str(request.get('expectedLiveImage',''))) and image==request['expectedLiveImage'],'CURRENT_PERSISTENCE_IMAGE_UNVERIFIED')
+    expected=request.get('expectedLiveImage')
+    checks={'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'workerRunning':worker.get('running') is True,'workerNotOomKilled':worker.get('oomKilled') is False,'workerNameMatches':worker.get('name')=='/adl-homologation-worker-1','expectedImageFormat':bool(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',str(expected))),'imageReferenceMatches':image==expected}
+    def safe_image(value):return value if re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',str(value)) else 'unverified_reference'
+    emit(operation='cutover.aws',stage='partitioned_upgrade.identity_comparison',status='verified' if all(checks.values()) else 'blocked',checks=checks,failedChecks=[key for key,value in checks.items() if not value],expectedImage=safe_image(expected),composeImage=safe_image(image),workerStarted=False,workerRestarted=False,providerRequests=0,posnetChanged=False)
+    require(all(checks.values()),'CURRENT_PERSISTENCE_IMAGE_UNVERIFIED')
 
 def verify_live_oom_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_OOM_SOURCE_DIGEST_MISMATCH')
