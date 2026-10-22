@@ -5,7 +5,7 @@ class CollectorProgress(unittest.TestCase):
  def test_progress_visible_and_persisted_before_ssh_completion(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);stage=root/'stage';stage.mkdir();home=root/'home';(home/'Downloads').mkdir(parents=True);(home/'Downloads'/'LotteryUnitKey.pem').write_text('ISOLATED TEST FIXTURE')
-   for name in ['collect-recovery-inbox-identity.mjs','remote-helper-transport.mjs','remote-helper-bootstrap.py','pre-exit-replay-proof.mjs','resume-adl-api.py','inspect-cutover-aws.py','patch-adl-worker-image.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py','recovery-inbox-identity.py']:shutil.copyfile(HERE/name,stage/name)
+   for name in ['collect-recovery-inbox-identity.mjs','remote-helper-transport.mjs','remote-helper-bootstrap.py','pre-exit-replay-proof.mjs','snapshot-pressure-proof.mjs','resume-adl-api.py','inspect-cutover-aws.py','patch-adl-worker-image.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py','recovery-inbox-identity.py']:shutil.copyfile(HERE/name,stage/name)
    tools=root/'bin';tools.mkdir();ssh=tools/'ssh';ssh.write_text('#!'+sys.executable+'\nimport sys,json,time\njson.load(sys.stdin)\nprint(json.dumps({"operation":"recovery_inbox_identity_progress","stage":"node_descriptor_identities"}),flush=True)\ntime.sleep(0.5)\nprint(json.dumps({"operation":"recovery_inbox_identity","workerId":"isolated","processes":[],"sqliteQueriesExecuted":0}),flush=True)\n');ssh.chmod(0o700)
    proc=subprocess.Popen(['node',str(stage/'collect-recovery-inbox-identity.mjs')],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env={**os.environ,'HOME':str(home),'PATH':str(tools)+os.pathsep+os.environ['PATH']})
    try:

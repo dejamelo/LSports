@@ -136,9 +136,34 @@ test('memory deferral reports heap vs physical budget and the actual validated p
  const server=createServer((_req,res)=>res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:Array.from({length:12},(_,i)=>row(i+1))})));
  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
  try{
-  process.availableMemory=()=>++samples===1?512*1024**2:0;
-  await assert.rejects(fullSnapshot({url:'http://127.0.0.1:'+(server.address() as any).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},progress:p=>progress.push(p),async apply(){applied++;}}),(error:any)=>{
+  process.availableMemory=()=>++samples<=2?512*1024**2:0;
+  await assert.rejects(fullSnapshot({url:'http://127.0.0.1:'+(server.address() as any).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},progress:p=>progress.push(p),limits:{memoryWaitMs:0},async apply(){applied++;}}),(error:any)=>{
    assert.equal(error.diagnostic.reason,'memory_budget_exceeded');assert.equal(error.diagnostic.memoryBudgetBytes,320*1024**2);assert.equal(error.diagnostic.snapshotMemory.availableMemoryBytes,0);assert.equal(error.diagnostic.snapshotMemory.limitingFactor,'available_memory');return true;
   });assert.equal(progress.at(-1).stage,'validate');assert.equal(progress.at(-1).validatedRows,10);assert.equal(progress.at(-1).appliedRows,0);assert.equal(applied,0);
  }finally{process.availableMemory=previous;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
+});
+
+test('transient physical pressure keeps one complete spool, allows independent work, then fully validates/applies without another HTTP request',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-spool-pressure-'));const available=process.availableMemory;let requests=0,gateEnded=false,workTicks=0,applied=0,release=false;const stages:any[]=[];
+ const server=createServer((_req,res)=>{requests++;res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:Array.from({length:23},(_,i)=>row(i+1))}));});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+ const ticker=setInterval(()=>workTicks++,2);
+ try{
+  process.availableMemory=()=>!gateEnded||release?512*1024**2:264994816;
+  const task=fullSnapshot({url:'http://127.0.0.1:'+(server.address() as any).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},downloadGate:async download=>{await download();gateEnded=true;},progress:p=>stages.push(p),limits:{memoryWaitMs:1000,memoryRetryMs:20},async apply(){applied++;}});
+  await new Promise(r=>setTimeout(r,80));assert.equal(applied,0);assert.equal(requests,1);assert.equal((await readdir(dir)).length,1);assert.ok(workTicks>=2);release=true;
+  const result=await task;assert.equal(result.rows,23);assert.equal(applied,23);assert.equal(requests,1);assert.equal(stages.at(-1).stage,'complete');assert.deepEqual(await readdir(dir),[]);
+ }finally{clearInterval(ticker);process.availableMemory=available;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
+});
+
+test('persistent pressure and disconnection cannot turn retained spool into a partial baseline',async()=>{
+ for(const cancel of [false,true]){
+  const dir=await mkdtemp(join(tmpdir(),'adl-spool-abort-'));const available=process.availableMemory;let downloaded=false,applied=0;const abort=new AbortController();
+  const server=createServer((_req,res)=>res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[row(1)]})));await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+  try{
+   process.availableMemory=()=>downloaded?0:512*1024**2;
+   const task=fullSnapshot({url:'http://127.0.0.1:'+(server.address() as any).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},signal:abort.signal,downloadGate:async download=>{await download();downloaded=true;},limits:{memoryWaitMs:80,memoryRetryMs:10},async apply(){applied++;}});
+   if(cancel)setTimeout(()=>abort.abort(),30);
+   await assert.rejects(task,(e:any)=>cancel?e.name==='AbortError':e.diagnostic.reason==='memory_budget_exceeded');assert.equal(applied,0);assert.deepEqual(await readdir(dir),[]);
+  }finally{process.availableMemory=available;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
+ }
 });

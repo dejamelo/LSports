@@ -5,12 +5,12 @@ import {createHash} from 'node:crypto';
 import {request as httpRequest} from 'node:http';
 import {request as httpsRequest} from 'node:https';
 import {createReadStream,createWriteStream} from 'node:fs';
-import {mkdtemp,rm,statfs} from 'node:fs/promises';
+import {mkdtemp,rm,statfs,open} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import {Transform} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 import {createGunzip,createInflate,createBrotliDecompress} from 'node:zlib';
-import {setImmediate as yieldTurn} from 'node:timers/promises';
+import {setImmediate as yieldTurn,setTimeout as waitTurn} from 'node:timers/promises';
 import {Mapper,GetEventRequestDto,GetEventRequest,GetEventsResultElement,TransformerUtil,IdSafeJsonParser} from 'trade360-nodejs-sdk';
 import {OperationError} from './diagnostics.js';
 import {snapshotCapacity} from './snapshot-capacity.js';
@@ -18,7 +18,7 @@ import {normalizeSdkTimestamps,attachTimestampPrecision,hasInvalidProviderTimest
 import {inspectResponse} from './response-inspection.js';
 import type {TradeEvent} from './state.js';
 const MiB=1024*1024;
-export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:20000,totalMs:120000};
+export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:20000,totalMs:120000,memoryWaitMs:60000,memoryRetryMs:250};
 const fail=(reason:string,shape:Partial<NonNullable<import('@lsports/contracts').IntegrationDiagnostic['snapshotValidation']>>={}):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven',...shape},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
 export function fullSnapshotMemory(){const c=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'},undefined,'prematch');if(!c.allowed)throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,snapshotMemory:c.memory,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.
@@ -117,11 +117,27 @@ export function convertSnapshotRow(raw:unknown):TradeEvent{
 }
 export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string};
 export async function fullSnapshot(options:{timestamp?:number;url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
- const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};fullSnapshotMemory();options.assertOpen();
+ const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};if(!Number.isSafeInteger(limits.memoryWaitMs)||limits.memoryWaitMs<0||limits.memoryWaitMs>60000||!Number.isSafeInteger(limits.memoryRetryMs)||limits.memoryRetryMs<1||limits.memoryRetryMs>1000)throw Error('INVALID_SNAPSHOT_MEMORY_WAIT');fullSnapshotMemory();options.assertOpen();
  const space=await statfs(options.directory);if(Number(space.bavail)*Number(space.bsize)<limits.responseBytes+512*MiB)fail('disk_headroom');
  const dir=await mkdtemp(join(options.directory,'.full-snapshot-'));const file=join(dir,'response.private.json');
  let bytes=0,timedOut=false,httpStatus:number|undefined,validatedRows=0,appliedRows=0;let lastStage:FullSnapshotProgress['stage']='waiting_http';const progress=(stage:FullSnapshotProgress['stage'])=>{lastStage=stage;options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString()});};const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
  const timer=setTimeout(()=>{timedOut=true;abort.abort();},limits.totalMs);timer.unref();
+ let pressureWaitMs=0,lastMemoryLog=-Infinity;
+ // A complete HTTP download is not an invalid document when live memory dips.
+ // Keep exactly this spool and yield outside the state/publication mutex. The
+ // unchanged guard must pass before parsing/applying more rows. Budget the total
+ // wait across the whole snapshot, rather than restarting the clock per fixture.
+ const memoryReady=async()=>{
+  for(;;){
+   signal.throwIfAborted();options.assertOpen();
+   try{fullSnapshotMemory();return;}catch(error){
+    if(!(error instanceof OperationError)||error.diagnostic.reason!=='memory_budget_exceeded'||pressureWaitMs>=limits.memoryWaitMs)throw error;
+    if(performance.now()-lastMemoryLog>=1000){lastMemoryLog=performance.now();console.info(JSON.stringify({operation:'snapshot.events',lane:'prematch',status:'memory_wait',stage:lastStage,bytes,validatedRows,appliedRows,waitedMs:Math.ceil(pressureWaitMs),maximumWaitMs:limits.memoryWaitMs,spoolRetained:true,memoryBudgetBytes:error.diagnostic.memoryBudgetBytes,memoryHeadroomBytes:error.diagnostic.memoryHeadroomBytes,snapshotMemory:error.diagnostic.snapshotMemory}));}
+    const began=performance.now();await waitTurn(Math.min(limits.memoryRetryMs,limits.memoryWaitMs-pressureWaitMs),undefined,{signal});pressureWaitMs+=performance.now()-began;
+   }
+  }
+ };
+
  try{
   const url=new URL('/Prematch/GetEvents',options.url);if(url.username||url.password||!['http:','https:'].includes(url.protocol))fail('invalid_endpoint');
   if(options.timestamp!==undefined&&(!Number.isSafeInteger(options.timestamp)||options.timestamp<0||options.timestamp>99999999999))throw Error('INVALID_RECOVERY_TIMESTAMP_SECONDS');
@@ -138,15 +154,18 @@ export async function fullSnapshot(options:{timestamp?:number;url:string;credent
     pipeline(streams,{signal}).then(resolve,reject);
    });req.setTimeout(limits.idleMs,()=>req.destroy(new Error('Snapshot idle timeout')));req.on('error',reject);req.end(body);
   });};
-  await (options.downloadGate?options.downloadGate(download):download());clearTimeout(timer);options.assertOpen();progress('validate');
+  await (options.downloadGate?options.downloadGate(download):download());clearTimeout(timer);options.assertOpen();
+  // Flush only our downloaded spool; never drop caches globally or touch inbox WAL.
+  const downloaded=await open(file,'r');try{await downloaded.sync();}finally{await downloaded.close();}
+  progress('validate');await memoryReady();
   const ids=new Set<number>();let rows=0;
-  await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){fullSnapshotMemory();await yieldTurn();}},limits.itemBytes);
+  await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){await memoryReady();await yieldTurn();}},limits.itemBytes);
   // The file stays on disk: never reserve four copies of the entire HTTP body.
   // Conversion is item-bounded; re-check live heap/available headroom before EACH row.
-  fullSnapshotMemory();
+  await memoryReady();
   progress('apply');
   // Envelope (including trailing Header/errors) and ALL rows verified before first application.
-  await walkSnapshot(file,async raw=>{options.assertOpen();fullSnapshotMemory();await options.apply(convertSnapshotRow(raw),started);appliedRows++;if(appliedRows%100===0)progress('apply');},limits.itemBytes);
+  await walkSnapshot(file,async raw=>{options.assertOpen();await memoryReady();await options.apply(convertSnapshotRow(raw),started);appliedRows++;if(appliedRows%100===0)progress('apply');},limits.itemBytes);
   progress('complete');
   return {ids,rows,bytes,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString()};
  }catch(error){try{progress(lastStage);}catch{/* Progress reporting must not replace the original failure. */}if(timedOut)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',timeoutMs:limits.totalMs,message:'Tiempo máximo de descarga snapshot excedido; baseline bloqueado.'});if(error instanceof OperationError&&httpStatus!==undefined&&error.diagnostic.httpStatus===undefined)throw new OperationError({...error.diagnostic,httpStatus});throw error;}finally{clearTimeout(timer);abort.abort();await rm(dir,{recursive:true,force:true});}

@@ -1,0 +1,30 @@
+import {readFileSync,readdirSync,writeFileSync} from 'node:fs';
+import {dirname,join} from 'node:path';
+import {homedir} from 'node:os';
+import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+import {assembleRemoteHelper,helperInvocation} from './remote-helper-transport.mjs';
+const here=dirname(fileURLToPath(import.meta.url)),repo=process.env.ADL_REPO_ROOT,ref=process.env.ADL_RUNTIME_REF;
+if(!repo||!ref)throw Error('PINNED_REPOSITORY_AND_REF_REQUIRED');
+const blob=spawnSync('git',['show',ref+':apps/worker/src/full-snapshot.ts'],{cwd:repo,encoding:'utf8',timeout:10000});if(blob.status!==0)throw Error('CANDIDATE_SOURCE_UNAVAILABLE');
+const sha=createHash('sha256').update(blob.stdout).digest('hex');
+const keys=readdirSync(join(homedir(),'Downloads'),{withFileTypes:true}).filter(f=>f.isFile()&&/Lottery.*Key\.pem$/.test(f.name));if(keys.length!==1)throw Error('SSH_KEY_NOT_UNIQUE_OR_AVAILABLE');
+console.log('Etapa: verificar snapshot atual; sem reinício.');
+const defs=(await assembleRemoteHelper(here)).replace("if __name__=='__main__':raise SystemExit(cutover_main())",'');
+const source=defs+'\nPRESSURE_CANDIDATE_SHA = '+JSON.stringify(sha)+'\n'+readFileSync(join(here,'recovery-pressure-report.py'),'utf8').split('try:pressure_main()')[0]+'\n'+readFileSync(join(here,'snapshot-pressure-preflight.py'),'utf8');
+const rpc=await helperInvocation(here,source,{});
+const probe=spawnSync('ssh',['-i',join(homedir(),'Downloads',keys[0].name),'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2','ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',rpc.command],{input:rpc.input,encoding:'utf8',timeout:45000,maxBuffer:1024*1024});
+const rows=(probe.stdout||'').trim().split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}}),preflight=rows.findLast(r=>r.operation==='snapshot_pressure_preflight');
+writeFileSync(join(here,'snapshot-pressure-preflight.json'),JSON.stringify({exitCode:probe.status,preflight},null,2),{mode:0o600});console.log(JSON.stringify(preflight||{reason:'PRESSURE_PREFLIGHT_SSH_FAILED',exitCode:probe.status,spawnCode:probe.error?.code}));
+if(probe.status!==0||!preflight||preflight.status==='blocked')process.exit(2);
+const env={...process.env};for(const key of ['ADL_RESUME_BACKUP','ADL_FINALIZE_VERIFIED_SHUTDOWN','ADL_LIVE_OOM_REPAIR','ADL_LIVE_PERSISTENCE_REPAIR','ADL_SNAPSHOT_PRESSURE_REPAIR','ADL_EXPECTED_LIVE_IMAGE'])delete env[key];
+let mode='--feed-validation-resume';
+if(preflight.action==='apply_verified_spool_pressure_patch'){
+ if(preflight.imageId!=='sha256:702122d02cd113c7a0ec1256f5c94d08c167141da924af04da2ade617b09d397'||preflight.imageRef!=='adl-worker-partitioned:184df259e1da7f2d92408106')throw Error('OBSERVED_PRESSURE_IMAGE_CHANGED_NO_UPDATE');
+ Object.assign(env,{ADL_LIVE_PERSISTENCE_REPAIR:'1',ADL_SNAPSHOT_PRESSURE_REPAIR:'1',ADL_EXPECTED_LIVE_IMAGE:preflight.imageRef});mode='--snapshot-memory-repair';
+ console.log('Etapa: preparar correção de um único arquivo, testar imagem, backup e atualização controlada; limites mantidos.');
+}else if(!['validate_existing_candidate','validate_existing_recovery'].includes(preflight.action)){
+ console.error('Nenhuma alteração: '+preflight.action+'. O worker permanece ativo; decisão salva em snapshot-pressure-preflight.json.');process.exit(2);
+}else console.log('Etapa: validar worker existente; implantação e reinício dispensados.');
+const result=spawnSync(process.execPath,[join(here,'complete-adl-cutover.mjs'),'--pid','12811','--parent','12809',mode],{env,stdio:'inherit'});process.exitCode=result.status??2;

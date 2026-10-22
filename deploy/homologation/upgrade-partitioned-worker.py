@@ -15,6 +15,13 @@ def verify_live_oom_sources(old_files,files,old_digest):
     changed={name for name in files if files[name]!=old_files[name]}
     require(changed and changed<= {'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts'},'CURRENT_OOM_PATCH_SCOPE_UNVERIFIED')
 
+def verify_live_snapshot_pressure_sources(old_files,files,old_digest):
+    require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_PRESSURE_SOURCE_DIGEST_MISMATCH')
+    changed={name for name in files if files[name]!=old_files[name]}
+    require(changed=={'apps/worker/src/full-snapshot.ts'},'CURRENT_PRESSURE_PATCH_SCOPE_UNVERIFIED')
+    # Existing identity, memory, source and preparation receipt gates still apply.
+    # This explicit path does not relax the separate historical OOM patch scope.
+
 def partition_base(meta):
     release=Path(meta['release']);require(release.parent==RELEASES and re.fullmatch('[0-9a-f]{40}',release.name) and not release.is_symlink(),'RELEASE_UNVERIFIED')
     base=['docker','compose','-p','adl-homologation','--env-file',str(SECURE/'deploy.env'),'-f',str(release/'deploy/homologation/compose.yaml'),'-f',str(release/'deploy/homologation/compose.existing-caddy.yaml')]
@@ -805,7 +812,10 @@ def upgrade_partitioned(request):
                 old=json.loads(old_receipt.read_bytes());require(old.get('digest')==old_digest and old.get('image')==original_image and old.get('oomRestoreVerified') is True,'CURRENT_OOM_SOURCE_RECEIPT_UNVERIFIED')
                 export="const fs=require('node:fs');const names="+json.dumps(sorted(files))+";console.log(JSON.stringify(Object.fromEntries(names.map(n=>[n,fs.readFileSync('/app/'+n,'utf8')]))))"
                 old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',original_image,'-e',export],timeout=30))
-                verify_live_oom_sources(old_files,files,old_digest)
+                if request.get('snapshotPressureRepair'):
+                    require(request.get('livePersistenceRepair') is True and request.get('liveOomRepair') is not True,'PRESSURE_REPAIR_REQUIRES_VERIFIED_LIVE_WORKER')
+                    verify_live_snapshot_pressure_sources(old_files,files,old_digest)
+                else:verify_live_oom_sources(old_files,files,old_digest)
             else:require(hashes==request['baseHashes'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH')
             backup=Path(tempfile.mkdtemp(prefix='adl-partitioned-upgrade-',dir=BACKUPS));os.chmod(backup,0o700)
             private(backup/'deployment.before.json',(SECURE/'deployment.json').read_bytes());private(backup/'model.before.private.json',json.dumps(before).encode())
@@ -884,6 +894,15 @@ def upgrade_partitioned(request):
             args=durable_ingress_proof_command(backup,progress['image'],check,'snapshot-memory-proof.mjs');args[-1:-1]=['--import','tsx'];args[args.index('512m')]='1g'
             output=run(args,timeout=90,log=backup/'snapshot-memory-test.private.log')
             require(b'snapshot-memory-offline-ok' in output,'SNAPSHOT_MEMORY_OFFLINE_FAILED');progress['snapshotMemoryVerified']=True;save(progress)
+        if request.get('snapshotPressureRepair') and not progress.get('snapshotPressureVerified'):
+            stage='partitioned_upgrade.offline_snapshot_pressure'
+            args=durable_ingress_proof_command(backup,progress['image'],SNAPSHOT_PRESSURE_PROOF,'snapshot-pressure-proof.mjs')
+            args[args.index('512m')]='4g';args[args.index('0.5')]='2';args[args.index('/tmp:size=268435456,mode=1777')]='/tmp:size=1073741824,mode=1777';args[args.index('--memory')+2:args.index('--memory')+2]=['--memory-swap','4g']
+            args[-1:-1]=['--max-old-space-size=2560','--import','tsx']
+            output=run(args,timeout=45,log=backup/'snapshot-pressure-test.private.log')
+            require(b'snapshot-pressure-offline-ok' in output,'SNAPSHOT_PRESSURE_OFFLINE_TEST_FAILED')
+            progress['snapshotPressureVerified']=True;save(progress)
+        if request.get('snapshotPressureRepair'):require(progress.get('snapshotPressureVerified') is True,'SNAPSHOT_PRESSURE_PROOF_REQUIRED_NO_START')
         if phase=='prepare':
             if request.get('spoolMemoryFix') and not progress.get('spoolMemoryVerified'):
                 stage='partitioned_upgrade.offline_spool_memory'
@@ -895,7 +914,7 @@ def upgrade_partitioned(request):
                 check="import{writeFile,mkdtemp,rm}from'node:fs/promises';import{walkSnapshot,convertSnapshotRow}from'/app/apps/worker/src/full-snapshot.ts';const d=await mkdtemp('/tmp/parser-'),p=d+'/body';let ticks=0,rows=0;const timer=setInterval(()=>ticks++,1);try{const bets=Array.from({length:300},(_,i)=>({Id:String(i+1),Price:'2.00',Status:1}));await writeFile(p,JSON.stringify({Body:Array.from({length:200},(_,i)=>({FixtureId:i+1,Fixture:{Status:1},Markets:[{Id:1,Bets:bets}]})),Header:{}}));await walkSnapshot(p,async raw=>{convertSnapshotRow(raw);rows++});if(rows!==200||ticks<2)throw Error('parser did not yield');console.log('snapshot-throughput-offline-ok')}finally{clearInterval(timer);await rm(d,{recursive:true,force:true})}"
                 output=run(['docker','run','--rm','--network','none','--memory','512m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--max-old-space-size=384','--import','tsx','--input-type=module','-e',check],timeout=60,log=backup/'snapshot-throughput-test.private.log')
                 require(b'snapshot-throughput-offline-ok' in output,'SNAPSHOT_THROUGHPUT_OFFLINE_FAILED');progress['snapshotThroughputVerified']=True;save(progress)
-            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlineType38Verified=True,offlinePartitionsVerified=True,offlineRestoreVerified=progress.get('oomRestoreVerified',False),offlineSnapshotMemoryVerified=progress.get('snapshotMemoryVerified',False),offlineDurableIngressVerified=progress.get('durableIngressVerified',False),offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),offlineNullableMarketsVerified=progress.get('nullableMarketsVerified',False),offlineThroughputVerified=progress.get('throughputVerified',False),offlineSpoolMemoryVerified=progress.get('spoolMemoryVerified',False),offlineSnapshotThroughputVerified=progress.get('snapshotThroughputVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
+            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlineType38Verified=True,offlinePartitionsVerified=True,offlineRestoreVerified=progress.get('oomRestoreVerified',False),offlineSnapshotMemoryVerified=progress.get('snapshotMemoryVerified',False),offlineDurableIngressVerified=progress.get('durableIngressVerified',False),offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),offlineNullableMarketsVerified=progress.get('nullableMarketsVerified',False),offlineThroughputVerified=progress.get('throughputVerified',False),offlineSpoolMemoryVerified=progress.get('spoolMemoryVerified',False),offlineSnapshotThroughputVerified=progress.get('snapshotThroughputVerified',False),offlineSnapshotPressureVerified=progress.get('snapshotPressureVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
         stage='partitioned_upgrade.fresh_mac_gate'
         handoff=request['handoff'];audit=handoff['audit'];require(audit['status']=='ok' and audit['workerLockAbsent'] and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(request['freshAuditAt'].endswith('Z') and -5<=time.time()-datetime.datetime.fromisoformat(request['freshAuditAt'].replace('Z','+00:00')).timestamp()<60,'MAC_REAUDIT_EXPIRED')

@@ -1,6 +1,6 @@
 import fs from'node:fs/promises';import path from'node:path';
 export const helperParts=['resume-adl-api.py','inspect-cutover-aws.py','patch-adl-worker-image.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'];
-export async function assembleRemoteHelper(here){const proof=await fs.readFile(path.join(here,'pre-exit-replay-proof.mjs'),'utf8');return 'PRE_EXIT_REPLAY_PROOF = '+JSON.stringify(proof)+'\n'+(await Promise.all(helperParts.map(async(name,i)=>{const source=await fs.readFile(path.join(here,name),'utf8');return i<2?source.split("if __name__=='__main__':")[0]:source;}))).join('\n');}
+export async function assembleRemoteHelper(here){const proof=await fs.readFile(path.join(here,'pre-exit-replay-proof.mjs'),'utf8'),pressure=await fs.readFile(path.join(here,'snapshot-pressure-proof.mjs'),'utf8');return 'PRE_EXIT_REPLAY_PROOF = '+JSON.stringify(proof)+'\nSNAPSHOT_PRESSURE_PROOF = '+JSON.stringify(pressure)+'\n'+(await Promise.all(helperParts.map(async(name,i)=>{const source=await fs.readFile(path.join(here,name),'utf8');return i<2?source.split("if __name__=='__main__':")[0]:source;}))).join('\n');}
 const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
 export async function helperInvocation(here,source,request){const bootstrap=await fs.readFile(path.join(here,'remote-helper-bootstrap.py'),'utf8');return{command:'sudo -n python3 -c '+quote(bootstrap),input:JSON.stringify({source,request})};}
 export function sanitizedHelperExit({stage,action,code,signal,stderr='',rows=[],spawnCode}){
