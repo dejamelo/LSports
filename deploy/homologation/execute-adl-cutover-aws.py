@@ -84,9 +84,19 @@ def kernel_oom_evidence(container_id,start,end):
             return {'available':True,'records':records[-8:],'matchedContainerEvents':bool(records),'rawLogPrinted':False}
     except (OSError,subprocess.SubprocessError):return {'available':False,'reason':'kernel_log_unavailable'}
 
-def worker_exit_report(rehearsal_backup=None,rehearsal_log=None,expected_worker_id=None):
+def verify_exit_target(consumers,expected_worker_id=None,expected_worker_prefix=None):
+    require(not (expected_worker_id and expected_worker_prefix),'CONFLICTING_EXPECTED_WORKER_IDENTITY')
+    if expected_worker_id is not None:
+        require(re.fullmatch('[0-9a-f]{64}',str(expected_worker_id)) and len(consumers)==1 and consumers[0]['id']==expected_worker_id,'EXPECTED_OOM_CONTAINER_NOT_CURRENT_NO_RESTART')
+    if expected_worker_prefix is not None:
+        require(re.fullmatch('[0-9a-f]{12,63}',str(expected_worker_prefix)) and len(consumers)==1,'EXPECTED_OOM_PREFIX_NOT_UNIQUE')
+        c=consumers[0]
+        require(re.fullmatch('[0-9a-f]{64}',str(c.get('id',''))) and c['id'].startswith(expected_worker_prefix) and c.get('name')=='/adl-homologation-worker-1' and c.get('state')=='exited' and c.get('running') is False and c.get('exitCode')==137 and c.get('oomKilled') is True,'EXPECTED_OOM_PREFIX_IDENTITY_NOT_VERIFIED')
+        emit(operation='cutover.aws',stage='worker_exit_target',status='verified',requestedPrefix=expected_worker_prefix,resolvedContainerId=c['id'],state=c['state'],exitCode=137,oomKilled=True,readOnly=True,workerRestarted=False)
+
+def worker_exit_report(rehearsal_backup=None,rehearsal_log=None,expected_worker_id=None,expected_worker_prefix=None):
     consumers=states('worker');reports=[]
-    if expected_worker_id is not None:require(re.fullmatch('[0-9a-f]{64}',str(expected_worker_id)) and len(consumers)==1 and consumers[0]['id']==expected_worker_id,'EXPECTED_OOM_CONTAINER_NOT_CURRENT_NO_RESTART')
+    verify_exit_target(consumers,expected_worker_id,expected_worker_prefix)
     for c in consumers:
         require(re.fullmatch('[0-9a-f]{12,64}',c['id']) is not None,'WORKER_CONTAINER_ID_UNVERIFIED')
         item=json.loads(run(['docker','inspect',c['id']]))[0]
@@ -218,7 +228,7 @@ def cutover_main():
         require(action in ('import','start','status','startup_report','worker_exit_report','recover_start','recovery_evidence'),'INVALID_ACTION')
         require(audit['status']=='ok' and audit['workerLockAbsent'] is True and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(audit['operation']=='cutover.audit' and audit['readOnly'] is True,'INVALID_AUDIT')
-        if action=='worker_exit_report':return worker_exit_report(request.get('rehearsalBackup'),request.get('rehearsalLog'),request.get('expectedWorkerId'))
+        if action=='worker_exit_report':return worker_exit_report(request.get('rehearsalBackup'),request.get('rehearsalLog'),request.get('expectedWorkerId'),request.get('expectedWorkerPrefix'))
         deadline=datetime.datetime.fromisoformat(audit['notBeforeUTC'].replace('Z','+00:00')).timestamp()
         require(audit['notBeforeUTC'].endswith('Z') and math.isfinite(deadline),'INVALID_DEADLINE')
         digest=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest()

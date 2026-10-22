@@ -62,6 +62,15 @@ class Cutover(unittest.TestCase):
    now=NS['datetime'].datetime.now(NS['datetime'].timezone.utc);result=NS['kernel_oom_evidence'](current,now,now)
    self.assertEqual(len(result['records']),2);self.assertEqual(result['records'][-1]['anonymousRSSBytes'],2097152);self.assertNotIn('999',json.dumps(result));self.assertFalse(result['rawLogPrinted'])
   finally:NS['subprocess']=original
+ def test_explicit_prefix_resolves_only_one_confirmed_oom_worker(self):
+  c={'id':'7f43cb2939c7'+'a'*52,'name':'/adl-homologation-worker-1','state':'exited','running':False,'exitCode':137,'oomKilled':True}
+  out=io.StringIO()
+  with contextlib.redirect_stdout(out):NS['verify_exit_target']([c],expected_worker_prefix='7f43cb2939c7')
+  self.assertEqual(json.loads(out.getvalue())['resolvedContainerId'],c['id'])
+  for changes in ({'running':True},{'oomKilled':False},{'id':'b'*64},{'name':'/posnet-worker-1'},{'exitCode':0}):
+   with self.assertRaises(RuntimeError):NS['verify_exit_target']([{**c,**changes}],expected_worker_prefix='7f43cb2939c7')
+  with self.assertRaises(RuntimeError):NS['verify_exit_target']([c,c],expected_worker_prefix='7f43cb2939c7')
+  with self.assertRaises(RuntimeError):NS['verify_exit_target']([c],expected_worker_id=c['id'][:-2])
  def test_amqp_comparison_reports_secret_drift_without_values_or_hashes(self):
   before={'LSPORTS_PREMATCH_USERNAME':'SECRET_USER','LSPORTS_PREMATCH_PASSWORD':'SECRET_PASSWORD','LSPORTS_INPLAY_USERNAME':'SECRET_USER_2','LSPORTS_INPLAY_PASSWORD':'SECRET_PASS_2'}
   current=dict(before);current['LSPORTS_PREMATCH_PASSWORD']='NEW_SECRET'

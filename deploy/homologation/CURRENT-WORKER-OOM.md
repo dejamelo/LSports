@@ -34,3 +34,14 @@ Tests: millisecond/nanosecond UTC, invalid/missing timestamps and redaction, exa
 container fencing, kernel correlation excluding another container, existing checkpoint
 and collector regressions. Actual server evidence and preserved-data replay remain
 necessary before selecting and deploying a proven memory correction.
+
+## Truncated reported ID
+
+The supplied/copied identifier contained 62 hexadecimal characters, not a full
+64-character Docker ID. Full-ID validation continues to reject it. The explicit
+`ADL_EXPECTED_WORKER_PREFIX=7f43cb2939c7` mode resolves the authoritative full ID
+from Docker only if exactly one compose worker exists, its name is
+`/adl-homologation-worker-1`, its full ID matches the prefix, and it is stopped
+with exit 137 and OOMKilled=true. Otherwise it blocks. Supplying both a full-ID
+selector and a prefix is rejected. The resolved full ID is emitted and used for
+inspect, kernel correlation and logs; missing characters are never guessed.
