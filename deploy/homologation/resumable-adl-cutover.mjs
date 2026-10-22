@@ -74,7 +74,7 @@ export async function run(args){
   const source=await assembleRemoteHelper(here);
   const remote=async(action,extra={},quiet=false)=>{
    const invocation=await helperInvocation(here,source,{action,...extra});
-   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,action==='upgrade_partitioned'&&extra.snapshotMemoryRepair?900000:360000,false,quiet,{stage,action});
+   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,action==='upgrade_partitioned'&&extra.finalizeAfterRecovery?4500000:action==='upgrade_partitioned'&&extra.snapshotMemoryRepair?900000:360000,false,quiet,{stage,action});
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
    if(args[4]==='--pipeline-report'){
@@ -243,6 +243,7 @@ export async function run(args){
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||''))throw Error('EXPECTED_CURRENT_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'){const image=persistenceExpectedImage(ledger);repairOptions.livePersistenceRepair=true;repairOptions.expectedLiveImage=image;}
     if(snapshotMemoryRepair&&process.env.ADL_RESUME_BACKUP){if(!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(process.env.ADL_RESUME_BACKUP))throw Error('RESUME_BACKUP_UNVERIFIED');repairOptions.resumeBackup=process.env.ADL_RESUME_BACKUP;const prepared=ledger.steps.throughput_image;if(prepared?.status==='ok'&&prepared.result?.backup===repairOptions.resumeBackup&&/^adl-worker-partitioned:[0-9a-f]{24}$/.test(prepared.result?.image||''))repairOptions.resumePreparedImage=prepared.result.image;emit({stage:'resume_preparation_reference',status:'resolved',backup:repairOptions.resumeBackup,preparedImage:repairOptions.resumePreparedImage??null,source:repairOptions.resumePreparedImage?'protected_local_progress':'unique_protected_remote_receipt_required',workerStarted:false});}
+    if(snapshotMemoryRepair&&process.env.ADL_FINALIZE_VERIFIED_SHUTDOWN==='1'){if(!repairOptions.resumeBackup)throw Error('FINALIZATION_REQUIRES_PINNED_PREPARATION');repairOptions.finalizeAfterRecovery=true;}
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
     const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
     if(snapshotMemoryRepair&&prepared.offlineSnapshotMemoryVerified!==true)throw Error('SNAPSHOT_MEMORY_OFFLINE_UNVERIFIED');

@@ -243,7 +243,9 @@ def preserved_rehearsal_report(expected_backup,expected_log=None):
     return {'backup':str(backup),'receiptPhase':entry.get('phase') if entry.get('phase') in ('prepared','stopped','configured','activated','rolled_back_stopped') else 'unknown','offlineRestoreVerified':entry.get('oomRestoreVerified') is True,'snapshotMemoryVerified':entry.get('snapshotMemoryVerified') is True,'preservedSpoolHash':entry.get('preservedSpoolHash') if re.fullmatch('[0-9a-f]{64}',str(entry.get('preservedSpoolHash',''))) else None,'failureOrigin':origin,'heapEvidence':rehearsal_heap_evidence(raw_bytes),'memoryConfiguration':rehearsal_memory_configuration(entry,backup,summary['attemptLog']) if summary['present'] else None,'exceptionTypes':exceptions,'knownExceptionMessages':known_messages,'validationDetails':details,'fieldPaths':fields,'actualTypes':types,'fixtureIds':fixtures,'stackFrames':frames,'privateLog':summary,'checkpointImageBuild':checkpoint_build_log_summary(backup),'distributionState':'not_queried_saved_stop_evidence_only','readOnly':True,'providerRequests':0,'workerRestarted':False}
 
 def archive_oom_locks(directory,backup,progress,workers):
-    require(progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137,'OOM_LOCK_OWNER_NOT_CONFIRMED')
+    verified_oom=progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137
+    verified_exit=progress.get('verifiedExitContainerId') and len(workers)==1 and workers[0]['id']==progress['verifiedExitContainerId'] and not workers[0]['running'] and progress.get('preExitProof',{}).get('verified') is True and progress.get('verifiedExitSignal',{}).get('status') in ('docker_accepted','exit_observed_after_intent')
+    require(verified_oom or verified_exit,'OOM_OR_VERIFIED_EXIT_LOCK_OWNER_NOT_CONFIRMED')
     # Verify no other running container can write this feed volume, not merely its Compose service label.
     ids=run(['docker','ps','-q']).decode().split()
     for item in json.loads(run(['docker','inspect',*ids])) if ids else []:
@@ -286,6 +288,142 @@ def verify_oom_inboxes(directory):
             result.append({'lane':'prematch' if '.prematch.' in path.name else 'inplay','pendingRows':count,'integrity':'ok'})
         finally:db.close()
     require(len(result)==2,'EXPECTED_BOTH_DURABLE_INBOXES');return result
+
+def container_process_tree(container):
+    info=json.loads(run(['docker','inspect',container]))[0];root=info.get('State',{}).get('Pid')
+    raw=run(['docker','top',container,'-eo','pid,ppid,stat,comm'],timeout=15).decode()
+    require(len(raw)<1024*1024,'PROCESS_TREE_SIZE_LIMIT');rows=[]
+    for line in raw.splitlines()[1:]:
+        fields=line.split(None,3);require(len(fields)==4 and fields[0].isdigit() and fields[1].isdigit(),'PROCESS_TREE_PARSE_FAILED')
+        pid,ppid=int(fields[0]),int(fields[1]);name=Path(fields[3]).name
+        row={'hostPid':pid,'parentHostPid':ppid,'state':fields[2],'executable':name if re.fullmatch('[A-Za-z0-9_.-]{1,80}',name) else 'other','isContainerInit':pid==root}
+        try:
+            for stat_line in Path('/proc/'+str(pid)+'/status').read_text().splitlines():
+                key,_,value=stat_line.partition(':')
+                if key in ('NSpid','VmRSS','Threads'):row[key]=value.strip()
+        except OSError:row['exitedDuringObservation']=True
+        rows.append(row)
+    require(len(rows)<=512 and any(r['hostPid']==root for r in rows),'PROCESS_TREE_ROOT_UNVERIFIED')
+    return {'containerId':container,'initHostPid':root,'processes':rows,'nodeProcesses':[r for r in rows if r['executable'] in ('node','nodejs')],'completeContainerProcessList':True}
+
+def pre_exit_proof_run(command,log,phase):
+    private(log,b'');began=time.monotonic();last=0
+    with log.open('ab') as output:
+        child=subprocess.Popen(command,stdout=output,stderr=output)
+        while child.poll() is None:
+            elapsed=time.monotonic()-began
+            if elapsed>=1200:
+                name=command[command.index('--name')+1];require(re.fullmatch('adl-pre-exit-proof-[0-9a-f]{16}-(replay|readback)',name),'PROOF_CONTAINER_NAME_UNVERIFIED')
+                subprocess.run(['docker','kill','--signal','SIGKILL',name],capture_output=True,timeout=20,check=False)
+                child.wait(timeout=30);raise RuntimeError('PRE_EXIT_PROOF_DEADLINE_EXCEEDED_ORIGINAL_PRESERVED_PAUSED')
+            if elapsed-last>=10:
+                last=elapsed;latest=None
+                for line in read_tail(log).decode(errors='replace').splitlines():
+                    try:r=json.loads(line)
+                    except ValueError:continue
+                    if isinstance(r,dict) and r.get('operation')=='pre_exit.proof':latest=r
+                emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_proof.progress',status='running',proofPhase=phase,elapsedSeconds=round(elapsed),metrics={k:v for k,v in (latest or {}).items() if k in ('processed','rssBytes','heapUsedBytes','heapLimitBytes','maxRSSBytes') and type(v) is int},workerStarted=False,posnetChanged=False)
+            time.sleep(1)
+    if child.returncode:
+        details={}
+        for line in read_tail(log).decode(errors='replace').splitlines():
+            try:r=json.loads(line)
+            except ValueError:continue
+            if isinstance(r,dict) and r.get('operation')=='pre_exit.proof' and r.get('status')=='blocked':details={k:v for k,v in r.items() if k in ('phase','processed','reason','validationCode','validationDetail','rssBytes','heapUsedBytes','heapLimitBytes','maxRSSBytes')}
+        emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_proof',status='blocked',reason='PRE_EXIT_COPY_RECOVERY_FAILED_NO_TERMINATION',proofPhase=phase,childExitCode=child.returncode,diagnostic=details,privateLog=log.name,workerStarted=False,posnetChanged=False)
+        raise RuntimeError('PRE_EXIT_COPY_RECOVERY_FAILED_NO_TERMINATION')
+    require(b'pre-exit-proof-ok' in read_tail(log),'PRE_EXIT_PROOF_COMPLETION_NOT_VERIFIED')
+
+def confirm_pre_exit_finalization(progress,save):
+    cid=progress['oldContainer'];workers=states('worker');require(len(workers)==1 and workers[0]['id']==cid and not workers[0]['running'],'PRE_EXIT_FINALIZE_EXIT_NOT_CONFIRMED')
+    proof=progress.get('preExitProof') or {};signal=progress.get('verifiedExitSignal') or {};require(proof.get('verified') is True and signal.get('containerId')==cid and signal.get('imageId')==progress['baseImageId'] and signal.get('status') in ('intent','docker_accepted','exit_observed_after_intent'),'PRE_EXIT_FINALIZE_RECEIPT_UNVERIFIED')
+    info=json.loads(run(['docker','inspect',cid]))[0];require(info['Image']==progress['baseImageId'],'PRE_EXIT_FINALIZE_IMAGE_CHANGED')
+    mounts=[m for m in info.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed' and m.get('Type')=='volume'];require(len(mounts)==1,'PRE_EXIT_FINALIZE_VOLUME_UNVERIFIED')
+    volume=json.loads(run(['docker','volume','inspect',mounts[0]['Name']]))[0];require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','PRE_EXIT_FINALIZE_VOLUME_PROJECT_UNVERIFIED');directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'PRE_EXIT_FINALIZE_VOLUME_SYMLINK')
+    require(all((directory/name).is_file() and not (directory/name).is_symlink() and snapshot_file_hash(directory/name)==sha for name,sha in proof['sourceHashes'].items()),'PRE_EXIT_DATA_CHANGED_DURING_FINALIZATION')
+    if signal['status']=='intent':signal['status']='exit_observed_after_intent'
+    progress['verifiedExitContainerId']=cid;progress['phase']='stopped';save(progress)
+
+def mark_old_container_if_exited(progress,save):
+    workers=states('worker');require(len(workers)==1 and workers[0]['id']==progress['oldContainer'],'STOP_CONTAINER_IDENTITY_CHANGED')
+    if workers[0]['running']:return False
+    info=json.loads(run(['docker','inspect',workers[0]['id']]))[0];require(info['Image']==progress['baseImageId'],'PRE_EXIT_CONTAINER_IDENTITY_CHANGED')
+    if progress.get('preExitProof',{}).get('verified') and progress.get('verifiedExitSignal'):confirm_pre_exit_finalization(progress,save)
+    else:progress['phase']='stopped';save(progress)
+    return True
+
+def recover_completed_shutdown(progress,save,backup,evidence):
+    cid=progress['oldContainer'];require(progress.get('supplierStoppedBeforeConsumer') is True and not evidence.get('distributionRestartAfterRecordedStop'),'PRE_EXIT_DISTRIBUTION_STOP_UNVERIFIED')
+    require(any(r.get('status')=='ok' for r in evidence.get('shutdownLogs',[])),'PRE_EXIT_APPLICATION_SHUTDOWN_NOT_COMPLETED')
+    if mark_old_container_if_exited(progress,save):return
+    try:tree=container_process_tree(cid)
+    except subprocess.CalledProcessError:
+        if mark_old_container_if_exited(progress,save):return
+        raise
+    progress['shutdownProcessTree']=tree;save(progress)
+    emit(operation='cutover.aws',stage='partitioned_upgrade.shutdown_process_tree',status='collected',tree=tree,workerStarted=False,posnetChanged=False)
+    info=json.loads(run(['docker','inspect',cid]))[0]
+    require(info['Image']==progress['baseImageId'] and info['State']['Running'] and info['HostConfig']['Memory']==4294967296,'PRE_EXIT_CONTAINER_IDENTITY_CHANGED')
+    mounts=[m for m in info.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed' and m.get('Type')=='volume'];require(len(mounts)==1,'PRE_EXIT_VOLUME_UNVERIFIED');mount=mounts[0]
+    volume=json.loads(run(['docker','volume','inspect',mount['Name']]))[0];require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','PRE_EXIT_VOLUME_PROJECT_UNVERIFIED');directory=Path(volume['Mountpoint']);require(not directory.is_symlink(),'PRE_EXIT_VOLUME_SYMLINK')
+    active=run(['docker','ps','-q']).decode().split()
+    for other in json.loads(run(['docker','inspect',*active])) if active else []:
+        require(other['Id']==cid or not any(m.get('Name')==mount['Name'] and m.get('RW') for m in other.get('Mounts',[])),'PRE_EXIT_OTHER_FEED_WRITER')
+    freeze=progress.get('recoveryFreeze')
+    require(not info['State'].get('Paused') or freeze and freeze.get('containerId')==cid and freeze.get('imageId')==info['Image'],'PRE_EXIT_UNOWNED_PAUSE_PRESERVED')
+    if not info['State'].get('Paused'):
+        progress['recoveryFreeze']={'containerId':cid,'imageId':info['Image'],'status':'intent'};save(progress)
+        try:run(['docker','pause',cid])
+        except subprocess.CalledProcessError:
+            if mark_old_container_if_exited(progress,save):return
+            raise
+        info=json.loads(run(['docker','inspect',cid]))[0]
+    require(info['State'].get('Paused') is True,'PRE_EXIT_FREEZE_NOT_CONFIRMED')
+    progress['recoveryFreeze']['status']='paused';save(progress)
+    emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_freeze',status='verified',containerId=cid,paused=True,originalsPreserved=True,posnetChanged=False)
+    paths=[directory/'trade-feed.json',directory/'trade-feed.json.regular-checkpoint.json',*sorted(directory.glob('trade-feed.json.*.inbox.sqlite*'))]
+    require(all(p.is_file() and not p.is_symlink() for p in paths) and len(list(directory.glob('trade-feed.json.*.inbox.sqlite')))==2,'PRE_EXIT_PERSISTED_FILES_UNVERIFIED')
+    hashes={p.name:snapshot_file_hash(p) for p in paths};total=sum(p.stat().st_size for p in paths)
+    proof_code_hash=hashlib.sha256(PRE_EXIT_REPLAY_PROOF.encode()).hexdigest();proof=progress.get('preExitProof') or {};valid=proof.get('verified') is True and proof.get('sourceHashes')==hashes and proof.get('proofCodeHash')==proof_code_hash
+    if valid:
+        output=Path(proof['output']);require(output.parent==backup and not output.is_symlink(),'PRE_EXIT_PROOF_OUTPUT_UNVERIFIED')
+        require(snapshot_file_hash(output/'receipt.json')==proof['receiptHash'] and snapshot_file_hash(output/'readback.json')==proof['readbackHash'] and snapshot_file_hash(output/'projection.json')==proof['projectionHash'] and snapshot_file_hash(output/'projection.json.regular-checkpoint.json')==proof['regularHash'],'PRE_EXIT_PROOF_RECEIPT_CHANGED')
+    else:
+        require(shutil.disk_usage(backup).free>=total*5+512*1024**2,'PRE_EXIT_COPY_DISK_HEADROOM_INSUFFICIENT');require(snapshot_host_memory()>=6*1024**3,'PRE_EXIT_COPY_MEMORY_HEADROOM_INSUFFICIENT')
+        nonce=os.urandom(8).hex();original=backup/('pre-exit-original-'+nonce);original.mkdir(mode=0o700);work=backup/('rehearsal-'+os.urandom(12).hex());work.mkdir(mode=0o700);output=backup/('pre-exit-output-'+nonce);output.mkdir(mode=0o700)
+        progress['preExitProof']={'verified':False,'originalCopy':str(original),'workingCopy':str(work),'output':str(output),'sourceHashes':hashes,'proofCodeHash':proof_code_hash};save(progress)
+        copies=[]
+        for src in paths:
+            raw=original/src.name;shutil.copyfile(src,raw);os.chmod(raw,0o600)
+            with raw.open('rb') as file:os.fsync(file.fileno())
+            require(snapshot_file_hash(raw)==hashes[src.name] and snapshot_file_hash(src)==hashes[src.name],'PRE_EXIT_RAW_COPY_HASH_MISMATCH')
+            dst=work/src.name;shutil.copyfile(raw,dst);os.chmod(dst,0o600);copies.append((raw,dst,hashes[src.name]))
+        image=json.loads(run(['docker','image','inspect',progress['image']]))[0];require((image.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==progress['digest'],'PRE_EXIT_PREPARED_IMAGE_IDENTITY_CHANGED')
+        user=image['Config'].get('User');require(user in ('node','1000','1000:1000'),'PRE_EXIT_REHEARSAL_USER_UNVERIFIED')
+        common=['docker','run','--rm','--network','none','--memory','4g','--memory-swap','4g','--cpus','2','--read-only','--user',user,'--mount','type=bind,source='+str(work)+',target=/recovery','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image['Id']]
+        access=json.loads(run(common+['-e',REHEARSAL_ACCESS_PROBE],timeout=30));rehearsal_copy_permissions(backup,work,copies,access)
+        access=json.loads(run(common+['-e',REHEARSAL_ACCESS_PROBE],timeout=30));require(access.get('opened') is True and not access.get('linkDetected'),'PRE_EXIT_COPY_READ_ACCESS_FAILED')
+        st=work.stat();os.chown(output,st.st_uid,st.st_gid);os.chmod(output,0o700)
+        script=backup/('pre-exit-replay-proof-'+proof_code_hash[:24]+'.mjs')
+        if script.exists():require(script.is_file() and not script.is_symlink() and script.read_text()==PRE_EXIT_REPLAY_PROOF,'PRE_EXIT_PROOF_SCRIPT_CHANGED')
+        else:private(script,PRE_EXIT_REPLAY_PROOF.encode());os.chmod(script,0o644)
+        command=common[:-1]+['--mount','type=bind,source='+str(output)+',target=/output','--mount','type=bind,source='+str(script)+',target=/offline-proof.mjs,readonly','--name','adl-pre-exit-proof-'+nonce+'-replay',common[-1],'--max-old-space-size=2560','--import','tsx','/offline-proof.mjs']
+        progress['preExitProof']['attemptLog']='pre-exit-replay-'+nonce+'.private.log';save(progress)
+        pre_exit_proof_run(command,backup/progress['preExitProof']['attemptLog'],'restore_replay_serialize')
+        command[command.index('--name')+1]='adl-pre-exit-proof-'+nonce+'-readback'
+        pre_exit_proof_run(command+['readback'],backup/('pre-exit-readback-'+nonce+'.private.log'),'full_readback_restore')
+        receipt=json.loads((output/'receipt.json').read_bytes());readback=json.loads((output/'readback.json').read_bytes())
+        require(readback.get('verified') is True and readback.get('projectionSha256')==receipt.get('sha256') and readback.get('stateRows')==receipt.get('stateRows') and readback.get('stateSha256')==receipt.get('stateSha256') and len(receipt.get('inboxes',[]))==2 and {r.get('lane') for r in receipt['inboxes']}=={'prematch','inplay'} and all(type(r.get('pendingCommittedRows')) is int and r['pendingCommittedRows']>=0 and r['pendingCommittedRows']==r.get('replayedRows') and re.fullmatch('[0-9a-f]{64}',str(r.get('rawRecordSha256'))) for r in receipt['inboxes']),'PRE_EXIT_RECOVERY_RECEIPT_INVALID')
+        progress['preExitProof'].update(verified=True,receiptHash=snapshot_file_hash(output/'receipt.json'),readbackHash=snapshot_file_hash(output/'readback.json'),projectionHash=snapshot_file_hash(output/'projection.json'),regularHash=snapshot_file_hash(output/'projection.json.regular-checkpoint.json'),inboxes=receipt['inboxes'],stateRows=readback['stateRows'],memory=readback);save(progress)
+    require(all(snapshot_file_hash(directory/name)==sha for name,sha in hashes.items()),'PRE_EXIT_ORIGINAL_CHANGED_WHILE_FROZEN')
+    current=json.loads(run(['docker','inspect',cid]))[0];require(current['Image']==progress['baseImageId'] and current['State']['Running'] and current['State'].get('Paused'),'PRE_EXIT_CONTAINER_CHANGED_AFTER_PROOF')
+    emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_recovery_verified',status='verified',proof=progress['preExitProof'],tree=tree,forceStopEvidenceVerified=True,workerStarted=False,posnetChanged=False)
+    require(not progress.get('verifiedExitSignal'),'PRE_EXIT_FINALIZE_INTENT_ALREADY_RECORDED_NO_REPEAT')
+    progress['verifiedExitSignal']={'containerId':cid,'imageId':current['Image'],'status':'intent','signal':'SIGKILL','recoveryReceiptHash':progress['preExitProof']['receiptHash']};save(progress)
+    run(['docker','kill','--signal','SIGKILL',cid],log=backup/'verified-finalize.private.log')
+    progress['verifiedExitSignal']['status']='docker_accepted';save(progress)
+    confirm_pre_exit_finalization(progress,save)
+    emit(operation='cutover.aws',stage='partitioned_upgrade.old_container_finalized',status='verified',containerId=cid,originalHashesUnchanged=True,forceStopEvidenceVerified=True,workerStarted=False,posnetChanged=False)
 
 def collect_graceful_signal_evidence(progress):
     workers=states('worker');require(len(workers)==1 and workers[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
@@ -722,6 +860,8 @@ def upgrade_partitioned(request):
                 emit(operation='cutover.aws',stage=stage,status='collected',decision=decision,backup=str(backup),evidence=evidence,forceStopEvidenceVerified=False,posnetChanged=False)
                 require(decision not in ('signal_history_inconclusive','signal_intent_delivery_inconclusive'),'STOP_SIGNAL_HISTORY_INCONCLUSIVE_NO_REPEAT')
                 if decision=='first_request_verified':request_graceful_signal_once(progress,save,backup)
+                elif decision=='already_requested' and request.get('finalizeAfterRecovery') and any(r.get('status')=='ok' for r in evidence.get('shutdownLogs',[])):
+                    stage='partitioned_upgrade.pre_exit_recovery';recover_completed_shutdown(progress,save,backup,evidence)
                 elif decision=='already_requested' and progress.get('shutdownObservation',{}).get('samples'):
                     previous=progress['shutdownObservation']['samples'][-1];fresh=upgrade_stop_sample(progress)
                     if fresh['running'] and not previous.get('progressSincePreviousSample') and previous.get('observationElapsedSeconds',0)>=90 and fresh.get('files')==previous.get('files') and fresh.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence'):
@@ -731,8 +871,10 @@ def upgrade_partitioned(request):
                 def observed(report):
                     progress['shutdownObservation']=report;save(progress)
                     emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='observing',backup=str(backup),**report['samples'][-1],forceStopEvidenceVerified=False,posnetChanged=False)
-                watch_upgrade_stop(lambda:upgrade_stop_sample(progress),observed)
-            else:emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='exited',container=current[0],backup=str(backup),signalsSent=0,posnetChanged=False)
+                if any(w['running'] for w in states('worker')):watch_upgrade_stop(lambda:upgrade_stop_sample(progress),observed)
+            else:
+                if progress.get('preExitProof',{}).get('verified') and progress.get('verifiedExitSignal'):confirm_pre_exit_finalization(progress,save)
+                emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='exited',container=current[0],backup=str(backup),signalsSent=0,posnetChanged=False)
             require(not any(c['running'] for c in states('worker')),'UPGRADE_GRACEFUL_STOP_PENDING_NO_MORE_SIGNALS');progress['phase']='stopped';save(progress)
         stage='partitioned_upgrade.persistence'
         api=states('api');require(len(api)==1 and api[0]['health']=='healthy','API_NOT_HEALTHY');api_info=json.loads(run(['docker','inspect',api[0]['id']]))[0]
@@ -754,7 +896,7 @@ def upgrade_partitioned(request):
             if request.get('snapshotMemoryRepair'):
                 stage='partitioned_upgrade.oom_integrity'
                 require(not any(w['running'] for w in states('worker')),'OOM_RECOVERY_REQUIRES_NO_CONSUMER')
-                if progress.get('oomContainerId'):archive_oom_locks(directory,backup,progress,states('worker'))
+                if progress.get('oomContainerId') or progress.get('verifiedExitContainerId'):archive_oom_locks(directory,backup,progress,states('worker'))
                 require(not (directory/'trade-feed.json.lock').exists() and not list(directory.glob('trade-feed.json*.reclaim')) and not list(directory.glob('trade-feed.json.snapshot-*.lock')),'OOM_LOCKS_NOT_ARCHIVED')
                 progress['inboxIntegrity']=verify_oom_inboxes(directory)
                 if not progress.get('oomRestoreVerified'):
