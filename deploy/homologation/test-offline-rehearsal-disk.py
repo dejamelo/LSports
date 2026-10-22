@@ -16,4 +16,18 @@ class OfflineDisk(unittest.TestCase):
  def test_partial_removed_only_with_failure_evidence(self):self.exercise()
  def test_verified_serialization_preserved(self):self.exercise(verified=True)
  def test_receipt_protected(self):self.exercise(receipt=True)
+ def test_40_gib_device_not_38_gib_ext4_drives_target(self):
+  ns=m.load();ns.update(emit=lambda **r:None,oom_restore_log_summary=lambda _: {'signals':[]})
+  def run(cmd):
+   if cmd[0]=='findmnt':return b'{"filesystems":[{"source":"/dev/nvme0n1p1"}]}'
+   return json.dumps({'blockdevices':[{'name':'nvme0n1','type':'disk','size':40*1024**3,'children':[{'name':'nvme0n1p1','type':'part'}]}]}).encode()
+  ns['run']=run
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);usage=type('Usage',(),{'free':784728064,'total':38*1024**3})()
+   source=root/'source';source.touch()
+   # Reserve 24,211,793,008 bytes from observed case through a sparse input.
+   with source.open('r+b') as file:file.truncate((24211793008-4*1024**3)//8)
+   with patch.object(ns['shutil'],'disk_usage',return_value=usage):
+    with self.assertRaisesRegex(RuntimeError,'DISK_EXPANSION_REQUIRED'):ns['offline_rehearsal_disk_plan'](root,[(source,source,None)],{},'a'*64)
+   report=json.loads((root/'offline-rehearsal-disk-plan.json').read_text());self.assertEqual(report['additionalGiB'],22);self.assertEqual(report['minimumEbsGiB'],62);self.assertEqual(report['suggestedEbsGiB'],64);self.assertEqual(report['ebsGrowthGiB'],24);self.assertEqual(report['estimatedEbsGrowthUSDPerMonth'],1.92)
 if __name__=='__main__':unittest.main()

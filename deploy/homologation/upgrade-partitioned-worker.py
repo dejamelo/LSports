@@ -337,7 +337,20 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
             for name in files:allocated+=(Path(root)/name).lstat().st_blocks*512
         copies.append({'path':str(folder),'allocatedBytes':allocated,'preserved':True})
     gib=(short+1024**3-1)//1024**3
-    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'suggestedFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':'conservative planning reserve, not measured complete serialization peak','removed':removed,'copies':copies}
+    source=str((filesystem.get('filesystems') or [{}])[0].get('source','')).split('[')[0]
+    def backing_disk(nodes,parent=None):
+        for node in nodes:
+            disk=node if node.get('type')=='disk' else parent
+            if '/dev/'+str(node.get('name'))==source:return disk
+            found=backing_disk(node.get('children',[]),disk)
+            if found:return found
+    disk=backing_disk(block_devices.get('blockdevices',[]))
+    physical=int(disk['size']) if disk and str(disk.get('size','')).isdigit() else None
+    physical_gib=(physical+1024**3-1)//1024**3 if physical else None
+    # EBS is provisioned in whole GiB; ext4 capacity is smaller than its device.
+    minimum=(physical_gib+gib) if physical_gib is not None else None
+    target=max(64,((minimum+3)//4)*4) if minimum is not None else None
+    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'minimumFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'currentEbsGiB':physical_gib,'minimumEbsGiB':minimum,'suggestedEbsGiB':target,'ebsGrowthGiB':target-physical_gib if target is not None else None,'estimatedEbsGrowthUSDPerMonth':round((target-physical_gib)*0.08,2) if target is not None else None,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':'conservative planning reserve, not measured complete serialization peak','removed':removed,'copies':copies}
     private(backup/'offline-rehearsal-disk-plan.json',json.dumps(report).encode())
     emit(operation='cutover.aws',stage='partitioned_upgrade.offline_disk',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
     require(short==0,'OFFLINE_REHEARSAL_DISK_EXPANSION_REQUIRED_NO_START')
