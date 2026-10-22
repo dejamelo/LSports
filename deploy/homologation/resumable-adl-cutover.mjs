@@ -51,7 +51,7 @@ export async function run(args){
  if(durableMode)args=[...args.slice(0,4),durableRollback?'--recovery-throughput-rollback':'--snapshot-throughput-repair'];
  let ledger,progress,save,lease,stage='arguments';
  try{
-  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--worker-exit-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--feed-validation-resume','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
+  if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--worker-exit-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--api-validation-resume','--feed-validation-resume','--recovery-progress','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   if(args[4]==='--helper-preflight-report'){stage='remote_consumer_gate';await helperPreflightReport(stage);return;}
   lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
@@ -87,7 +87,7 @@ export async function run(args){
     await writeProtectedReport(reportFile,JSON.stringify(report,null,2));
     emit({stage,status:'collected',readOnly:true,providerRequests:0,workerRestarted:false,offlineRehearsal:report.offlineRehearsal,workers:report.workers?.map(({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})=>({id,state,running,exitCode,oomKilled,startedAtUTC,finishedAtUTC,finalLogSignals,oomConclusion})),reportFile,posnetChanged:false});return;
    }
-  if(['--api-validation-resume','--feed-validation-resume'].includes(args[4])){
+  if(['--api-validation-resume','--feed-validation-resume','--recovery-progress'].includes(args[4])){
    stage='api_health';
    if(!['local_exit','journal_export','journal_import','aws_start','throughput_upgrade'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_THROUGHPUT_UPGRADE');
    const {writeProtectedReport}=await import('./distribution-validation.mjs');
@@ -109,6 +109,10 @@ export async function run(args){
    const mac=rows.find(r=>r.operation==='cutover.audit');
    if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
+   if(args[4]==='--recovery-progress'){
+    stage='recovery_progress';const {observeRecovery}=await import('./recovery-progress.mjs');
+    await observeRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,path.join(folder,`recovery-progress-${pid}-${parent}.json`),writeProtectedReport);return;
+   }
    stage='full_feed_validation';
    await validateFullRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,progress,{requireSupplierOrder:true,allowTransientReconnect:true,stableForMs:args[4]==='--feed-validation-resume'?1800000:120000,requireIngress:args[4]==='--feed-validation-resume',compact:args[4]==='--feed-validation-resume'});
    return;
