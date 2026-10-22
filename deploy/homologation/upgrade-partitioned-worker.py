@@ -3,6 +3,9 @@ PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-
 def verify_live_oom_identity(worker,request):
     require(request.get('snapshotMemoryRepair') and worker.get('oomKilled') is True and worker.get('exitCode')==137 and not worker.get('running') and worker.get('name')=='/adl-homologation-worker-1' and re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))) and str(worker.get('id','')).startswith(request['expectedOomPrefix']),'CURRENT_OOM_IDENTITY_UNVERIFIED')
 
+def verify_live_persistence_identity(worker,request,image):
+    require(request.get('snapshotMemoryRepair') and worker.get('running') is True and not worker.get('oomKilled') and worker.get('name')=='/adl-homologation-worker-1' and re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',str(request.get('expectedLiveImage',''))) and image==request['expectedLiveImage'],'CURRENT_PERSISTENCE_IMAGE_UNVERIFIED')
+
 def verify_live_oom_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_OOM_SOURCE_DIGEST_MISMATCH')
     changed={name for name in files if files[name]!=old_files[name]}
@@ -295,7 +298,7 @@ def upgrade_partitioned(request):
         # A failed preserved-data rehearsal has already stopped distribution and
         # protected the data. Derive only the parser fix from that prepared image.
         prior_backup=request.get('checkpointRepairBackup')
-        if not receipt_path.exists() and request.get('snapshotMemoryRepair') and prior_backup and not request.get('liveOomRepair'):
+        if not receipt_path.exists() and request.get('snapshotMemoryRepair') and prior_backup and not request.get('liveOomRepair') and not request.get('livePersistenceRepair'):
             source_backup=Path(prior_backup)
             require(source_backup.parent==BACKUPS and not source_backup.is_symlink() and source_backup.is_dir() and source_backup.stat().st_uid==os.geteuid() and source_backup.stat().st_mode&0o077==0,'CHECKPOINT_REPAIR_BACKUP_UNVERIFIED')
             previous=[]
@@ -360,8 +363,9 @@ def upgrade_partitioned(request):
             container=json.loads(run(['docker','inspect',workers[0]['id']]))[0];require(container['Image']==base_info['Id'],'UPGRADE_RUNNING_IMAGE_MISMATCH');require(snapshot_memory_bytes(container['HostConfig']['Memory'])==4294967296,'UPGRADE_CONTAINER_MEMORY_LIMIT_MISMATCH')
             probe="const fs=require('node:fs'),h=require('node:crypto');let result={};for(const name of "+json.dumps(sorted(files))+ "){const p='/app/'+name;result[name]=fs.existsSync(p)?h.createHash('sha256').update(fs.readFileSync(p)).digest('hex'):null;}console.log(JSON.stringify(result));"
             hashes=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',original_image,'-e',probe]))
-            if request.get('liveOomRepair'):
-                verify_live_oom_identity(workers[0],request)
+            if request.get('liveOomRepair') or request.get('livePersistenceRepair'):
+                if request.get('livePersistenceRepair'):verify_live_persistence_identity(workers[0],request,original_image)
+                else:verify_live_oom_identity(workers[0],request)
                 old_digest=(base_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch');require(re.fullmatch('[0-9a-f]{64}',str(old_digest)),'CURRENT_OOM_IMAGE_LABEL_UNVERIFIED')
                 old_receipt=SECURE/('partitioned-upgrade-'+old_digest[:24]+'.json');require(old_receipt.is_file() and not old_receipt.is_symlink() and old_receipt.stat().st_uid==os.geteuid() and old_receipt.stat().st_mode&0o077==0,'CURRENT_OOM_SOURCE_RECEIPT_MISSING')
                 old=json.loads(old_receipt.read_bytes());require(old.get('digest')==old_digest and old.get('image')==original_image and old.get('oomRestoreVerified') is True,'CURRENT_OOM_SOURCE_RECEIPT_UNVERIFIED')

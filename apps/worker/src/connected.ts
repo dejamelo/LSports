@@ -10,7 +10,7 @@ import type { FeedMessageMetadata } from "@lsports/contracts";
 import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
 import { acquireWorkerLock } from "./worker-lock.js";
-import { setTimeout as delay } from "node:timers/promises";
+import { setTimeout as delay, setImmediate as nextTurn } from "node:timers/promises";
 import { createPublisher, statePath } from "@lsports/feed-store";
 import { loadConfig } from "./config.js";
 import type { PackageConfig } from "./config.js";
@@ -38,6 +38,12 @@ const transportEnd=(reason:"connection_closed"|"channel_closed"|"consumer_cancel
 
 // Join only a not-yet-started save. Joining an active write could ACK changes
 // made after its capture; every caller must await a capture after its request.
+// Let the bounded inbox batch already waiting on a completed publication finish
+// its microtask chain before another expensive publication joins the FIFO gate.
+// Never yield inside the publication: its checkpoint remains one stable state.
+export async function publicationTurn<T>(state:TradeState,persist:()=>Promise<T>){
+ await nextTurn();return state.exclusive(persist);
+}
 export function coalescedPersistence(persist:()=>Promise<void>){
  let tail:Promise<void>=Promise.resolve(),queued:Promise<void>|undefined;
  return()=>{if(queued)return queued;let job:Promise<void>;job=tail.then(()=>{if(queued===job)queued=undefined;return persist();});queued=job;tail=job.catch(()=>{});return job;};
@@ -76,7 +82,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const publish = createPublisher(path);
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0,loopWindowStart=Date.now();
-    const save = coalescedPersistence(()=>state.exclusive(()=>operation("file.persist", "local", async () => {
+    const save = coalescedPersistence(()=>publicationTurn(state,()=>operation("file.persist", "local", async () => {
         const memoryStage=(stage:string)=>{const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
         memoryStage('capture');
         const started=performance.now();const feed = state.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();

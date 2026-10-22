@@ -95,3 +95,14 @@ test('failed publication releases the local mutation gate without marking recove
  await s.exclusive(()=>s.apply('prematch',[{fixtureId:1,fixture:{status:1},markets:[]}],Date.now()));
  assert.equal(s.rows.prematch.size,1);assert.ok(!s.feed().events.some(e=>e.selections.some(selection=>selection.available)));
 });
+
+test('publication scheduling drains an already queued bounded replay batch before the next full write',async()=>{
+ const {publicationTurn}=await import('./connected.js');
+ async function exercise(fair:boolean){const state=new TradeState();let release!:()=>void,processed=0,observed=-1;
+ const active=state.exclusive(()=>new Promise<void>(r=>release=r));await Promise.resolve();
+ const processing=(async()=>{for(let i=0;i<4096;i++)await state.exclusive(()=>{processed++;});})();
+ const write=()=>{observed=processed;return Promise.resolve();};
+ const next=fair?publicationTurn(state,write):state.exclusive(write);release();await active;await next;await processing;return observed;}
+ assert.equal(await exercise(false),1,'reproduce a full write between successive messages');
+ assert.equal(await exercise(true),4096,'finish bounded replay batch before taking the next checkpoint');
+});

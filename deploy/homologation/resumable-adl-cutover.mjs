@@ -224,6 +224,7 @@ export async function run(args){
     if(durableMode)repairOptions.durableIngress=true;
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||''))throw Error('EXPECTED_CURRENT_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
+    if(snapshotMemoryRepair&&process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'){const image=process.env.ADL_EXPECTED_LIVE_IMAGE;if(!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(image||'')||process.env.ADL_LIVE_OOM_REPAIR==='1')throw Error('EXPECTED_CURRENT_PERSISTENCE_IMAGE_REQUIRED');repairOptions.livePersistenceRepair=true;repairOptions.expectedLiveImage=image;}
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
     const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
     if(snapshotMemoryRepair&&prepared.offlineSnapshotMemoryVerified!==true)throw Error('SNAPSHOT_MEMORY_OFFLINE_UNVERIFIED');

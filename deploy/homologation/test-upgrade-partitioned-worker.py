@@ -15,6 +15,12 @@ class Upgrade(unittest.TestCase):
   NS['verify_live_oom_sources'](old,new,digest)
   for candidate,source_hash in ((old,digest),({**new,'apps/worker/src/messages.ts':'unexpected'},digest),(new,'0'*64)):
    with self.assertRaises(Exception):NS['verify_live_oom_sources'](old,candidate,source_hash)
+ def test_live_persistence_identity_requires_exact_running_worker_image(self):
+  image='adl-worker-partitioned:'+'a'*24;worker={'running':True,'oomKilled':False,'name':'/adl-homologation-worker-1'};request={'snapshotMemoryRepair':True,'expectedLiveImage':image}
+  NS['verify_live_persistence_identity'](worker,request,image)
+  for changed in ({'running':False},{'oomKilled':True},{'name':'/api'}):
+   with self.assertRaises(Exception):NS['verify_live_persistence_identity']({**worker,**changed},request,image)
+  with self.assertRaises(Exception):NS['verify_live_persistence_identity'](worker,request,image+'b')
  def test_readback_failure_resumes_without_repeating_serialization(self):
   self.test_prepare_activate_reuse_preserves_every_non_worker_field(oom=True,readback_fails=True)
  @unittest.skipUnless(os.environ.get('ADL_OFFLINE_PROOF_IMAGE'),'opt-in isolated Docker proof')
