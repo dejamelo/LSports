@@ -60,3 +60,10 @@ test('broker count one is separate from current worker registration and ACK evid
  for(const l of Object.values(s.lanes))Object.assign(l.consumerProgress,{active:true,registeredAt:end});
  r=fullRecoveryResult(s,{requireSupplierOrder:true});assert.equal(r.consumerRegistrationObserved,true);assert.equal(r.ackObserved.prematch,false);assert.equal(r.reason,'NO_CURRENT_ACK_EVIDENCE');
 });
+
+test('restored pre-activation errors and ACKs never become current failure or recovery evidence',()=>{
+ const s=status();s.validationSinceUTC='2026-10-22T04:44:14.076679Z';
+ for(const lane of Object.values(s.lanes)){lane.phase='error';lane.diagnostic={category:'network',operation:'distribution.status'};lane.consumerProgress.active=true;lane.consumerProgress.registeredAt=start;lane.updates={lastMarketDecodedAt:end};lane.distributionObservations=[{stage:'after_propagation',observedAtUTC:end,bodyIsDistributionOn:true,sdkIsDistributionOn:true}];}
+ const result=fullRecoveryResult(s);assert.equal(result.reason,'SNAPSHOT_RECOVERY_PENDING');assert.equal(result.snapshotsVerified,false);assert.equal(result.consumerRegistrationObserved,false);assert.equal(result.marketUpdatesVerified,false);assert.equal(result.distributionActiveVerified,false);assert.deepEqual(result.ackObserved,{prematch:false,inplay:false});
+ s.lanes.prematch.session.startedAt=s.validationSinceUTC;assert.equal(fullRecoveryResult(s).reason,'CURRENT_LANE_ERROR_SEE_DIAGNOSTIC');
+});
