@@ -167,3 +167,16 @@ test('persistent pressure and disconnection cannot turn retained spool into a pa
   }finally{process.availableMemory=available;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
  }
 });
+
+test('apply progress zero is a 100-row checkpoint, not proof of zero completed callbacks',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'adl-apply-progress-'));const original=process.availableMemory;process.availableMemory=()=>1024**3;
+ const server=createServer((_req,res)=>res.end(JSON.stringify({Body:Array.from({length:100},(_,i)=>row(i+1)),Header:{HttpStatusCode:200}})));
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const progress:import('./full-snapshot.js').FullSnapshotProgress[]=[];let applied=0;
+ try{
+  const result=await fullSnapshot({url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory,assertOpen(){},progress:p=>progress.push(p),async apply(){
+   if(applied===99){assert.equal(progress.at(-1)?.stage,'apply');assert.equal(progress.at(-1)?.appliedRows,0);}
+   applied++;
+  }});
+  assert.equal(applied,100);assert.equal(result.rows,100);assert.equal(progress.at(-1)?.appliedRows,100);assert.equal(progress.at(-1)?.stage,'complete');
+ }finally{process.availableMemory=original;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(directory,{recursive:true,force:true});}
+});

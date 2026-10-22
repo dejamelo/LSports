@@ -15,6 +15,18 @@ def post_limit_decision(connection,threshold):
     if progress>=threshold:return 'existing_spool_progress_after_limit'
     return 'waiting_for_post_limit_attempt_or_fresh_progress'
 
+def apply_pending_processes(cid):
+    lines=run(['docker','top',cid,'-eo','pid,ppid,stat,comm']).decode().splitlines()[1:]
+    require(len(lines)<=64,'CONTAINER_PROCESS_COUNT_LIMIT');out=[]
+    for line in lines:
+        fields=line.split();require(len(fields)==4 and fields[0].isdigit() and fields[1].isdigit(),'CONTAINER_PROCESS_IDENTITY_UNVERIFIED')
+        pid=int(fields[0]);p=Path('/proc/'+str(pid))
+        try:
+            raw=(p/'stat').read_text();stat=raw[raw.rfind(')')+2:].split();wchan=(p/'wchan').read_text().strip()
+            out.append({'hostPid':pid,'parentHostPid':int(fields[1]),'state':fields[2] if re.fullmatch('[A-Za-z+<NsLl]*',fields[2]) else 'other','executable':fields[3] if fields[3] in ('node','docker-init','tini') else 'other','cpuUserTicks':int(stat[11]),'cpuSystemTicks':int(stat[12]),'startTicks':int(stat[19]),'waitChannel':wchan if re.fullmatch('[A-Za-z0-9_]{1,100}',wchan) else 'unverified'})
+        except FileNotFoundError:out.append({'hostPid':pid,'exitedDuringObservation':True})
+    return out
+
 def post_limit_main():
     import fcntl
     lock=os.open('/run/lock/adl-post-limit-watch.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600);fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -34,7 +46,7 @@ def post_limit_main():
     require(probe.get('constrainedMemoryBytes')==6442450944,'NODE_RUNTIME_DOES_NOT_SEE_SIX_GIB_LIMIT')
     emit(operation='post_limit_scheduler',stage='runtime_capacity_verified',workerId=cid,appliedAtUTC=LIMIT_APPLIED_AT,probe=probe,runningWorkerHeapNotProbed=True,workerRestarted=False,providerRequests=0)
     began=time.monotonic();samples=[];result=None
-    for index in range(31):
+    for index in range(WATCH_SAMPLE_COUNT):
         current=json.loads(run(['docker','inspect',cid]))[0];require(current['State']['Running'] and current['State']['StartedAt']==started and current['Image']==info['Image'],'WORKER_CHANGED_NO_ACTION')
         now=datetime.datetime.now(datetime.timezone.utc).isoformat();metadata=pressure_metadata(directory/'trade-feed.json');connections=metadata.get('connections') or {};schedules=[]
         paths=list(directory.glob('trade-feed.json.snapshot-*.json'));require(len(paths)<=32,'SCHEDULER_FILE_COUNT_LIMIT')
@@ -48,20 +60,25 @@ def post_limit_main():
             lockpath=Path(str(path)+'.lock');owner=None
             if lockpath.exists():
                 require(not lockpath.is_symlink() and lockpath.stat().st_size<64,'SCHEDULER_LOCK_UNVERIFIED');value=lockpath.read_text().strip();owner=int(value) if value.isdigit() else None
-            schedules.append({'file':path.name,'hostNextAtUTC':datetime.datetime.fromtimestamp(saved['nextAt']/1000,datetime.timezone.utc).isoformat() if type(saved.get('nextAt')) in (int,float) else None,'dueUTC':{k:datetime.datetime.fromtimestamp(v/1000,datetime.timezone.utc).isoformat() for k,v in (saved.get('due') or {}).items() if k in rows and type(v) in (int,float)},'requests':rows,'lockPresent':lockpath.exists(),'ownerNamespacePid':owner,'ownerProcPresent':(base.parent/'proc'/str(owner)).exists() if owner else None})
+            schedules.append({'file':path.name,'hostNextAtUTC':datetime.datetime.fromtimestamp(saved['nextAt']/1000,datetime.timezone.utc).isoformat() if type(saved.get('nextAt')) in (int,float) else None,'dueUTC':{k:datetime.datetime.fromtimestamp(v/1000,datetime.timezone.utc).isoformat() for k,v in (saved.get('due') or {}).items() if k in rows and type(v) in (int,float)},'requests':rows,'lastRequest':{k:v for k,v in (saved.get('lastRequest') or {}).items() if k in ('packageId','operation','pid','at','completedAt','outcome')},'lockPresent':lockpath.exists(),'ownerNamespacePid':owner,'ownerProcPresent':(base.parent/'proc'/str(owner)).exists() if owner else None,'operationOwnerMatches':owner==(saved.get('lastRequest') or {}).get('pid') if owner else None,'activityEvidence':'reservation_with_live_owner_not_proof_of_forward_progress' if owner and (base.parent/'proc'/str(owner)).exists() and (saved.get('lastRequest') or {}).get('outcome')=='reserved' else 'no_live_reservation_proven'})
         lanes={}
         for lane in ('prematch','inplay'):
             c=connections.get(lane) or {};ingress=c.get('ingressProgress') or {}
             lanes[lane]={'decision':post_limit_decision(c,threshold),'phase':c.get('phase'),'sessionStartedAt':(c.get('session') or {}).get('startedAt'),'snapshot':{k:v for k,v in (c.get('fullSnapshot') or {}).items() if k in ('stage','bytes','startedAt','lastProgressAt','validatedRows','appliedRows','completedAt')},'recovery':{k:v for k,v in (c.get('recoveryProgress') or {}).items() if k in ('stage','startedAt','lastProgressAt','nextRegularAttemptAt','regularSnapshotReady','completedAt')},'lastSnapshotAt':c.get('lastSnapshotAt'),'lastSnapshotErrorAt':c.get('lastSnapshotErrorAt'),'errorIsHistorical':0<scheduler_time(c.get('lastSnapshotErrorAt'))<threshold,'diagnostic':safe_feed_diagnostic(c.get('lastSnapshotDiagnostic')),'ingress':{k:v for k,v in ingress.items() if k in ('received','acknowledged','processed','checkpointed','processingBacklog','oldestProcessingAgeMs','metricWindowEndUTC')},'updates':{k:v for k,v in ({**(c.get('updates') or {}),**{k:v for k,v in c.items() if k in ('lastMarketDecodedAt','lastDataDecodedAt','lastControlDecodedAt')}}).items() if k in ('lastMarketDecodedAt','lastDataDecodedAt','lastControlDecodedAt')},'persistence':{k:v for k,v in (c.get('persistenceProgress') or {}).items() if k in ('writes','lastCompletedAt','lastDurationMs','metricWindowEndUTC')}}
         spools=[{'directory':p.parent.name,'bytes':p.stat().st_size,'modifiedAtUTC':datetime.datetime.fromtimestamp(p.stat().st_mtime,datetime.timezone.utc).isoformat(),'validityNotAssumed':True} for p in directory.glob('.full-snapshot-*/response.private.json') if not p.is_symlink() and not p.parent.is_symlink()][:16]
-        cg=memory_cgroup(pid);sample={'atUTC':now,'elapsedSeconds':round(time.monotonic()-began,1),'memoryMaxBytes':cg['memory.max'],'memoryCurrentBytes':cg['memory.current'],'availableByCgroupBytes':cg['limitMinusCurrentBytes'],'lanes':lanes,'schedules':schedules,'spools':spools,'recentPostLimitLogs':pressure_logs(cid,LIMIT_APPLIED_AT)[-5:]};samples.append(sample)
+        cg=memory_cgroup(pid);sample={'atUTC':now,'elapsedSeconds':round(time.monotonic()-began,1),'memoryMaxBytes':cg['memory.max'],'memoryCurrentBytes':cg['memory.current'],'availableByCgroupBytes':cg['limitMinusCurrentBytes'],'lanes':lanes,'schedules':schedules,'spools':spools,'recentPostLimitLogs':pressure_logs(cid,LIMIT_APPLIED_AT)[-5:],'applicationProcesses':apply_pending_processes(cid) if WATCH_SAMPLE_COUNT==7 else None};samples.append(sample)
         emit(operation='post_limit_scheduler',stage='observation',**sample,workerRestarted=False,providerRequests=0)
         decision=lanes['prematch']['decision']
         if decision in ('failure_after_limit','snapshot_completed_after_limit'):result=decision;break
-        if index==30:break
+        if index==WATCH_SAMPLE_COUNT-1:break
         time.sleep(20)
+    correlations={}
+    for lane in ('prematch','inplay'):
+        a=samples[0]['lanes'][lane];b=samples[-1]['lanes'][lane];x=a['ingress'];y=b['ingress'];dt=scheduler_time(y.get('metricWindowEndUTC'))-scheduler_time(x.get('metricWindowEndUTC'))
+        fresh=dt>0 and a.get('sessionStartedAt')==b.get('sessionStartedAt') and scheduler_time(x.get('metricWindowEndUTC'))>=scheduler_time(samples[0]['atUTC'])-5 and scheduler_time(y.get('metricWindowEndUTC'))>=scheduler_time(samples[-1]['atUTC'])-30 and all(type(x.get(k)) is int and type(y.get(k)) is int and y[k]>=x[k] for k in ('received','processed','checkpointed'))
+        correlations[lane]={'comparableMetricWindows':fresh,'windowSeconds':dt,'processingBacklogStart':x.get('processingBacklog'),'processingBacklogEnd':y.get('processingBacklog'),'receivedPerSecond':(y['received']-x['received'])/dt if fresh else None,'processedPerSecond':(y['processed']-x['processed'])/dt if fresh else None,'checkpointedPerSecond':(y['checkpointed']-x['checkpointed'])/dt if fresh else None,'persistentWritesStart':a['persistence'].get('writes'),'persistentWritesEnd':b['persistence'].get('writes'),'etaSeconds':None}
     logs=pressure_logs(cid,LIMIT_APPLIED_AT)
-    emit(operation='post_limit_scheduler_complete',result=result or 'observation_deadline_not_proof_of_stall',observedAtUTC=datetime.datetime.now(datetime.timezone.utc).isoformat(),workerId=cid,appliedAtUTC=LIMIT_APPLIED_AT,samples=samples,postLimitLogs=logs,workerRestarted=False,providerRequests=0,integrationVerified=False,spoolReusePolicy='existing_active_attempt_only_no_external_replay_or_cooldown_reset',backlogEtaSeconds=None)
+    emit(operation='post_limit_scheduler_complete',result=result or 'observation_deadline_not_proof_of_stall',applyCounterPublicationGranularityRows=100,applyZeroCounterMeaning='zero_to_99_completed_rows_or_wait_before_first_row_not_distinguishable_without_new_worker_instrumentation',observedAtUTC=datetime.datetime.now(datetime.timezone.utc).isoformat(),workerId=cid,appliedAtUTC=LIMIT_APPLIED_AT,samples=samples,correlations=correlations,postLimitLogs=logs,workerRestarted=False,providerRequests=0,integrationVerified=False,spoolReusePolicy='existing_active_attempt_only_no_external_replay_or_cooldown_reset',backlogEtaSeconds=None)
 try:post_limit_main()
 except Exception as error:
     emit(operation='post_limit_scheduler_failure',status='blocked',reason=str(error) if re.fullmatch('[A-Z_0-9]{3,120}',str(error)) else 'POST_LIMIT_SCHEDULER_OBSERVATION_FAILED',diagnostic=recovery_exception_details(error),workerRestarted=False,providerRequests=0)
