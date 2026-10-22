@@ -306,6 +306,38 @@ def container_process_tree(container):
     require(len(rows)<=512 and any(r['hostPid']==root for r in rows),'PROCESS_TREE_ROOT_UNVERIFIED')
     return {'containerId':container,'initHostPid':root,'processes':rows,'nodeProcesses':[r for r in rows if r['executable'] in ('node','nodejs')],'completeContainerProcessList':True}
 
+def pre_exit_disk_plan(backup,total,hashes,proof,previous_original):
+    # Working SQLite may have changed after replay. Only byte-identical, unreferenced
+    # copies are disposable; retained outputs, logs and pristine copies are evidence.
+    required=total*(4 if previous_original is not None else 5)+512*1024**2
+    free=shutil.disk_usage(backup).free;candidates=[];removed=[]
+    if free<required:
+        ids=run(['docker','ps','-aq']).decode().split()
+        mounts=[]
+        if ids:
+            for container in json.loads(run(['docker','inspect',*ids])):
+                mounts.extend(Path(m['Source']).resolve() for m in container.get('Mounts',[]) if m.get('Source'))
+        for folder in sorted(backup.iterdir()):
+            if folder.is_symlink() or not folder.is_dir() or not re.fullmatch('(rehearsal-[0-9a-f]{24}|pre-exit-(original|output)-[0-9a-f]{16})',folder.name):continue
+            allocated=0
+            for root,dirs,files in os.walk(folder,followlinks=False):
+                dirs[:]=[d for d in dirs if not (Path(root)/d).is_symlink()]
+                for name in files:allocated+=(Path(root)/name).lstat().st_blocks*512
+            reason='preserved_evidence_or_modified_copy';safe=False
+            if re.fullmatch('rehearsal-[0-9a-f]{24}',folder.name) and str(folder)!=proof.get('workingCopy') and not any(folder.resolve()==m or folder.resolve() in m.parents or m in folder.resolve().parents for m in mounts):
+                entries=list(folder.iterdir())
+                safe=set(p.name for p in entries)==set(hashes) and all(p.is_file() and not p.is_symlink() and p.stat().st_nlink==1 and snapshot_file_hash(p)==hashes[p.name] for p in entries)
+                if safe:
+                    for p in entries:p.unlink()
+                    folder.rmdir();removed.append(str(folder));reason='removed_byte_identical_unmounted_work_copy'
+            candidates.append({'path':str(folder),'allocatedBytes':allocated,'decision':reason})
+        free=shutil.disk_usage(backup).free
+    missing=max(0,required-free)
+    report={'destination':str(backup),'filesystemDevice':backup.stat().st_dev,'sourceBytes':total,'requiredFreeBytes':required,'availableFreeBytes':free,'missingBytes':missing,'minimumExpansionGiB':(missing+1024**3-1)//1024**3,'pristineCopyReused':previous_original is not None,'reserveBytes':512*1024**2,'copies':candidates,'removed':removed}
+    private(backup/'pre-exit-disk-plan.json',json.dumps(report).encode())
+    emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_disk',status='verified' if missing==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
+    require(missing==0,'PRE_EXIT_COPY_DISK_HEADROOM_INSUFFICIENT')
+
 def pre_exit_proof_run(command,log,phase):
     private(log,b'');began=time.monotonic();last=0
     with log.open('ab') as output:
@@ -390,16 +422,21 @@ def recover_completed_shutdown(progress,save,backup,evidence):
         output=Path(proof['output']);require(output.parent==backup and not output.is_symlink(),'PRE_EXIT_PROOF_OUTPUT_UNVERIFIED')
         require(snapshot_file_hash(output/'receipt.json')==proof['receiptHash'] and snapshot_file_hash(output/'readback.json')==proof['readbackHash'] and snapshot_file_hash(output/'projection.json')==proof['projectionHash'] and snapshot_file_hash(output/'projection.json.regular-checkpoint.json')==proof['regularHash'],'PRE_EXIT_PROOF_RECEIPT_CHANGED')
     else:
-        require(shutil.disk_usage(backup).free>=total*5+512*1024**2,'PRE_EXIT_COPY_DISK_HEADROOM_INSUFFICIENT');require(snapshot_host_memory()>=6*1024**3,'PRE_EXIT_COPY_MEMORY_HEADROOM_INSUFFICIENT')
         previous_original=Path(proof['originalCopy']) if proof.get('sourceHashes')==hashes and proof.get('originalCopy') else None
         if previous_original is not None:
             require(previous_original.parent==backup and not previous_original.is_symlink() and previous_original.is_dir() and all((previous_original/name).is_file() and not (previous_original/name).is_symlink() and snapshot_file_hash(previous_original/name)==sha for name,sha in hashes.items()),'PRE_EXIT_PRESERVED_COPY_IDENTITY_CHANGED')
-        nonce=os.urandom(8).hex();original=backup/('pre-exit-original-'+nonce);original.mkdir(mode=0o700);work=backup/('rehearsal-'+os.urandom(12).hex());work.mkdir(mode=0o700);output=backup/('pre-exit-output-'+nonce);output.mkdir(mode=0o700)
+        pre_exit_disk_plan(backup,total,hashes,proof,previous_original)
+        require(snapshot_host_memory()>=6*1024**3,'PRE_EXIT_COPY_MEMORY_HEADROOM_INSUFFICIENT')
+        nonce=os.urandom(8).hex();original=previous_original if previous_original is not None else backup/('pre-exit-original-'+nonce)
+        if previous_original is None:original.mkdir(mode=0o700)
+        work=backup/('rehearsal-'+os.urandom(12).hex());work.mkdir(mode=0o700);output=backup/('pre-exit-output-'+nonce);output.mkdir(mode=0o700)
         progress['preExitProof']={'verified':False,'originalCopy':str(original),'workingCopy':str(work),'output':str(output),'sourceHashes':hashes,'proofCodeHash':proof_code_hash};save(progress)
         copies=[]
         for src in paths:
-            raw=original/src.name;shutil.copyfile(previous_original/src.name if previous_original is not None else src,raw);os.chmod(raw,0o600)
-            with raw.open('rb') as file:os.fsync(file.fileno())
+            raw=original/src.name
+            if previous_original is None:
+                shutil.copyfile(src,raw);os.chmod(raw,0o600)
+                with raw.open('rb') as file:os.fsync(file.fileno())
             require(snapshot_file_hash(raw)==hashes[src.name] and snapshot_file_hash(src)==hashes[src.name],'PRE_EXIT_RAW_COPY_HASH_MISMATCH')
             dst=work/src.name;shutil.copyfile(raw,dst);os.chmod(dst,0o600);copies.append((raw,dst,hashes[src.name]))
         image=json.loads(run(['docker','image','inspect',progress['image']]))[0];require((image.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==progress['digest'],'PRE_EXIT_PREPARED_IMAGE_IDENTITY_CHANGED')
