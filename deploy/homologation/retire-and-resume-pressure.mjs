@@ -1,0 +1,12 @@
+import {spawnSync} from 'node:child_process';
+import {readFileSync,writeFileSync,readdirSync} from 'node:fs';
+import {dirname,join} from 'node:path';import {fileURLToPath} from 'node:url';import {homedir} from 'node:os';
+const here=dirname(fileURLToPath(import.meta.url));
+console.log('Etapa: verificar identidade exata e encerrar somente executor local suspenso e seu SSH; sem SIGKILL.');
+const local=spawnSync('python3',[join(here,'retire-stopped-executor.py')],{stdio:'inherit',timeout:45000});if(local.status!==0)process.exit(local.status??2);
+console.log('Etapa: confirmar ausência de helper remoto concorrente e estado atual do worker; somente leitura.');
+const keys=readdirSync(join(homedir(),'Downloads')).filter(n=>/Lottery.*Key\.pem$/.test(n));if(keys.length!==1)throw Error('SSH_KEY_NOT_UNIQUE_OR_AVAILABLE');
+const r=spawnSync('ssh',['-i',join(homedir(),'Downloads',keys[0]),'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2','ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com','sudo -n python3 -'],{input:readFileSync(join(here,'audit-interrupted-collector.py')),encoding:'utf8',timeout:35000,maxBuffer:1048576});
+const rows=(r.stdout||'').trim().split('\n').flatMap(s=>{try{return[JSON.parse(s)];}catch{return[];}}),report=rows.at(-1);writeFileSync(join(here,'remote-before-resume-'+Date.now()+'.json'),JSON.stringify(report||{exitCode:r.status},null,2),{mode:0o600});console.log(JSON.stringify(report||{reason:'REMOTE_AUDIT_UNAVAILABLE',exitCode:r.status}));
+if(r.status!==0||report?.safeToStartAnotherCollector!==true||report?.worker?.running!==true||report?.worker?.oomKilled!==false)process.exit(2);
+const next=spawnSync(process.execPath,[join(here,'diagnose-and-resume-pressure.mjs')],{stdio:'inherit',env:process.env});process.exitCode=next.status??2;
