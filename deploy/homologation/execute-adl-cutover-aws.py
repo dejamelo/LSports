@@ -683,7 +683,7 @@ def existing_recovery_timeline(consumers,window):
                         if type(row.get(k)) is int and 0<=row[k]<=2**40:record[k]=row[k]
                     if row.get('stage') in ('waiting_http','download','validate','apply','complete'):record['stage']=row['stage']
                 elif op=='worker.shutdown':
-                    record.update(operation=op,status=row.get('status') if row.get('status') in ('ok','error') else 'unknown',lock=row.get('lock') if row.get('lock') in ('released','ownership_changed_preserved') else 'unknown')
+                    record.update(operation=op,status=row.get('status') if row.get('status') in ('stopping','ok','error') else 'unknown',lock=row.get('lock') if row.get('lock') in ('released','ownership_changed_preserved') else 'unknown')
                 elif op=='feed.coverage':
                     record.update(operation=op,lanes={})
                     for lane in ('prematch','inplay'):

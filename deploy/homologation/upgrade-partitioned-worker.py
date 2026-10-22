@@ -287,6 +287,87 @@ def verify_oom_inboxes(directory):
         finally:db.close()
     require(len(result)==2,'EXPECTED_BOTH_DURABLE_INBOXES');return result
 
+def collect_graceful_signal_evidence(progress):
+    workers=states('worker');require(len(workers)==1 and workers[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
+    worker=workers[0];info=json.loads(run(['docker','inspect',worker['id']]))[0]
+    require(info['Image']==progress['baseImageId'] and info['HostConfig']['Memory']==4294967296,'STOP_IMAGE_IDENTITY_CHANGED')
+    start=timeline_timestamp(info['State']['StartedAt'],'container.StartedAt');end=datetime.datetime.now(datetime.timezone.utc)
+    evidence={'containerId':worker['id'],'imageId':info['Image'],'running':worker['running'],'dockerTermAccepted':False,'applicationStoppingObserved':False,'dockerHistoryCoversStart':False,'logHistoryCoversStart':False,'distributionRestartAfterRecordedStop':False,'events':[],'shutdownLogs':[],'shutdownErrors':[],'signalsSent':0}
+    try:result=subprocess.run(['docker','events','--since',(start-datetime.timedelta(seconds=1)).isoformat(),'--until',end.isoformat(),'--filter','container='+worker['id'],'--format','{{json .}}'],capture_output=True,timeout=20,check=False)
+    except subprocess.TimeoutExpired:result=None
+    evidence['eventsReadFailed']=result is None or result.returncode!=0
+    if result is not None and result.returncode==0 and len(result.stdout)<=4*1024**2:
+        for line in result.stdout.decode(errors='replace').splitlines():
+            try:r=json.loads(line)
+            except ValueError:continue
+            if (r.get('Actor') or {}).get('ID',r.get('id'))!=worker['id']:continue
+            action=r.get('Action',r.get('status'));signal=str(((r.get('Actor') or {}).get('Attributes') or {}).get('signal',''));at=r.get('timeNano')
+            if action=='start' and type(at) is int and abs(at/1e9-start.timestamp())<5:evidence['dockerHistoryCoversStart']=True
+            if action in ('kill','stop') and signal in ('15','SIGTERM','TERM'):evidence['dockerTermAccepted']=True
+            if action in ('start','kill','stop','die','oom','restart'):evidence['events'].append({'action':action,'signal':signal if signal in ('15','SIGTERM','TERM','2','SIGINT','9','SIGKILL') else 'other' if signal else None,'timeNano':at if type(at) is int else None})
+    with tempfile.TemporaryFile() as raw:
+        child=subprocess.Popen(['docker','logs','--since',start.isoformat(),'--tail','20000','--timestamps',worker['id']],stdout=raw,stderr=raw)
+        try:code=child.wait(timeout=20)
+        except subprocess.TimeoutExpired:child.terminate();child.wait(timeout=5);code=-1
+        size=raw.tell();evidence['logBytes']=size;evidence['logReadExitCode']=code
+        if code==0 and size<=64*1024**2:
+            raw.seek(0);first=None
+            for line in raw:
+                m=re.match(rb'^(\d{4}-\d{2}-\d{2}T[0-9:.]+Z) (.*)$',line)
+                if not m:continue
+                at=timeline_timestamp(m[1].decode(),'shutdown.log')
+                if first is None:first=at
+                try:r=json.loads(m[2])
+                except ValueError:continue
+                if not isinstance(r,dict):continue
+                if r.get('operation')=='worker.shutdown' and r.get('status') in ('stopping','ok','error'):
+                    evidence['shutdownLogs'].append({'atUTC':m[1].decode(),'status':r['status']})
+                    if r['status']=='stopping':evidence['applicationStoppingObserved']=True
+                if r.get('operation') in ('distribution.stop','distribution.status','amqp.connection','feed.apply','worker.start') and (not progress.get('supplierStoppedAtUTC') or at>=timeline_timestamp(progress['supplierStoppedAtUTC'],'supplierStoppedAtUTC')):
+                    diagnostic=safe_feed_diagnostic(r)
+                    if diagnostic.get('category'):evidence['shutdownErrors'].append({'atUTC':m[1].decode(),**diagnostic});evidence['shutdownErrors']=evidence['shutdownErrors'][-16:]
+                if r.get('operation')=='distribution.start' and progress.get('supplierStoppedAtUTC') and at>=timeline_timestamp(progress['supplierStoppedAtUTC'],'supplierStoppedAtUTC'):evidence['distributionRestartAfterRecordedStop']=True
+            evidence['logHistoryCoversStart']=first is not None and first<=start+datetime.timedelta(seconds=30)
+    evidence['events']=evidence['events'][-32:];evidence['shutdownLogs']=evidence['shutdownLogs'][-16:]
+    pid=info.get('State',{}).get('Pid');process_info={}
+    if worker['running'] and type(pid) is int and pid>1:
+        try:
+            exe=Path(os.readlink('/proc/'+str(pid)+'/exe')).name;process_info['executable']=exe if exe in ('node','nodejs','tini','docker-init','dumb-init','sh','bash') else 'other'
+            status=Path('/proc/'+str(pid)+'/status').read_text()
+            for line in status.splitlines():
+                key,_,value=line.partition(':')
+                if key in ('State','VmRSS','VmSwap','Threads','SigPnd','ShdPnd','SigCgt'):process_info[key]=value.strip()
+            wchan=Path('/proc/'+str(pid)+'/wchan').read_text().strip();process_info['waitChannel']=wchan if re.fullmatch('[A-Za-z0-9_]{1,100}',wchan) else 'unverified'
+        except (OSError,ValueError):process_info['unavailable']=True
+    evidence['process']=process_info
+    return evidence
+
+def graceful_signal_decision(progress,evidence):
+    if not evidence.get('running'):return 'already_exited'
+    recorded=progress.get('gracefulSignal') or {}
+    if recorded:
+        require(recorded.get('containerId')==evidence['containerId'] and recorded.get('imageId')==evidence['imageId'],'STOP_SIGNAL_RECEIPT_IDENTITY_CHANGED')
+        if recorded.get('status')=='docker_accepted':return 'already_requested'
+        if evidence.get('dockerTermAccepted') or evidence.get('applicationStoppingObserved'):return 'already_requested'
+        return 'signal_intent_delivery_inconclusive'
+    if evidence.get('dockerTermAccepted') or evidence.get('applicationStoppingObserved'):return 'already_requested'
+    if evidence.get('dockerHistoryCoversStart') and evidence.get('logHistoryCoversStart') and not evidence.get('eventsReadFailed') and not evidence.get('distributionRestartAfterRecordedStop') and not any(r.get('action') in ('kill','stop','die','restart') for r in evidence.get('events',[])):
+        return 'first_request_verified'
+    return 'signal_history_inconclusive'
+
+def request_graceful_signal_once(progress,save,backup,distribution_required=True):
+    # Intent is durable BEFORE the one Docker operation. An interrupted intent
+    # is never treated as proof of either delivery or absence of delivery.
+    current=states('worker');require(len(current)==1 and current[0]['id']==progress['oldContainer'],'STOP_CONTAINER_IDENTITY_CHANGED')
+    if not current[0]['running']:return
+    info=json.loads(run(['docker','inspect',current[0]['id']]))[0]
+    require(info['Image']==progress['baseImageId'] and info['HostConfig']['Memory']==4294967296 and (not distribution_required or progress.get('supplierStoppedBeforeConsumer') is True),'STOP_SIGNAL_PRECONDITIONS_UNVERIFIED')
+    require(not progress.get('gracefulSignal'),'STOP_SIGNAL_ALREADY_RECORDED_NO_REPEAT')
+    at=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')
+    progress['phase']='stop_requested';progress['stopRequestedAtUTC']=at;progress['gracefulSignal']={'containerId':current[0]['id'],'imageId':info['Image'],'signal':'SIGTERM','intentAtUTC':at,'status':'intent'};save(progress)
+    run(['docker','kill','--signal','SIGTERM',current[0]['id']],log=backup/'graceful-stop.private.log')
+    progress['gracefulSignal'].update(status='docker_accepted',exitCode=0,acceptedAtUTC=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z'));save(progress)
+
 def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None):
     now=now or time.monotonic;sleep=sleep or time.sleep;began=now();observations=[];previous=None;last_change=began
     while True:
@@ -628,14 +709,25 @@ def upgrade_partitioned(request):
                 progress['supplierStoppedBeforeConsumer']=True;progress['supplierStoppedAtUTC']=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z');save(progress)
             progress['oldContainer']=worker_states[0]['id']
             if worker_states[0]['running']:
-                progress['phase']='stop_requested';progress['stopRequestedAtUTC']=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z');save(progress)
-                stage='partitioned_upgrade.graceful_stop';run(['docker','kill','--signal','SIGTERM',worker_states[0]['id']])
+                stage='partitioned_upgrade.graceful_stop';request_graceful_signal_once(progress,save,backup,distribution_required=request.get('fullRecovery') is True)
             else:
                 progress['phase']='stopped';save(progress)
         if progress['phase']=='stop_requested':
             stage='partitioned_upgrade.stop_observation'
             current=states('worker');require(len(current)==1 and current[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
             if current[0]['running']:
+                stage='partitioned_upgrade.stop_signal_evidence'
+                evidence=collect_graceful_signal_evidence(progress);decision=graceful_signal_decision(progress,evidence)
+                progress['stopSignalEvidence']=evidence;progress['stopSignalDecision']=decision;save(progress)
+                emit(operation='cutover.aws',stage=stage,status='collected',decision=decision,backup=str(backup),evidence=evidence,forceStopEvidenceVerified=False,posnetChanged=False)
+                require(decision not in ('signal_history_inconclusive','signal_intent_delivery_inconclusive'),'STOP_SIGNAL_HISTORY_INCONCLUSIVE_NO_REPEAT')
+                if decision=='first_request_verified':request_graceful_signal_once(progress,save,backup)
+                elif decision=='already_requested' and progress.get('shutdownObservation',{}).get('samples'):
+                    previous=progress['shutdownObservation']['samples'][-1];fresh=upgrade_stop_sample(progress)
+                    if fresh['running'] and not previous.get('progressSincePreviousSample') and previous.get('observationElapsedSeconds',0)>=90 and fresh.get('files')==previous.get('files') and fresh.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence'):
+                        emit(operation='cutover.aws',stage='partitioned_upgrade.stop_diagnosis',status='blocked',reason='SHUTDOWN_ALREADY_REQUESTED_RECOVERY_PROOF_REQUIRED',applicationStoppingObserved=evidence.get('applicationStoppingObserved'),process=evidence.get('process'),lastPersistence=fresh.get('lastCompletedPersistence'),persistenceStage=fresh.get('persistenceStage'),backup=str(backup),forceStopEvidenceVerified=False,posnetChanged=False)
+                        raise RuntimeError('SHUTDOWN_ALREADY_REQUESTED_RECOVERY_PROOF_REQUIRED')
+                stage='partitioned_upgrade.stop_observation'
                 def observed(report):
                     progress['shutdownObservation']=report;save(progress)
                     emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='observing',backup=str(backup),**report['samples'][-1],forceStopEvidenceVerified=False,posnetChanged=False)
