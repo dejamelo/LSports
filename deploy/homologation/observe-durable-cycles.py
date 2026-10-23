@@ -40,7 +40,8 @@ def safe_connection(c):
  session=c.get('session') or {};full=c.get('fullSnapshot') or {};progress=c.get('recoveryProgress') or {};start=stamp(session.get('startedAt'));last=stamp(c.get('lastSnapshotAt'))
  keys=('stage','startedAt','completedAt','lastProgressAt','bytes','validatedRows','appliedRows')
  market_decoded=stamp(c.get('lastMarketDecodedAt'));market_received=stamp(c.get('lastMarketReceivedAt'))
- return dict(phase=c.get('phase'),sessionId=session.get('id'),sessionStartedAt=session.get('startedAt'),snapshot={k:full[k] for k in keys if k in full},lastSnapshotAt=c.get('lastSnapshotAt'),regularSnapshotReady=progress.get('regularSnapshotReady'),snapshotCurrentSession=bool(progress.get('regularSnapshotReady') and last is not None and start is not None and last>=start),marketReceiveAndDecodeCurrentSession=bool(start is not None and market_decoded is not None and market_received is not None and market_decoded>=start and market_received>=start),updates={k:c.get(k) for k in ('lastDataDecodedAt','lastMarketDecodedAt','lastMarketReceivedAt','lastSettlementDecodedAt','lastControlDecodedAt')},headersByType={str(k):v for k,v in ((c.get('ingressProgress') or {}).get('headersByType') or {}).items() if re.fullmatch(r'\d{1,3}|unknown',str(k)) and type(v) is int})
+ diagnostic=c.get('diagnostic') or {};safe_diagnostic={k:v for k,v in diagnostic.items() if k in ('operation','category','reason','protocol','networkCode','amqpCode','errorType') and (type(v) is int or isinstance(v,str) and re.fullmatch('[A-Za-z0-9_.-]{1,100}',v))}
+ return dict(phase=c.get('phase'),diagnostic=safe_diagnostic,consumerRegisteredAt=(c.get('consumerProgress') or {}).get('registeredAt'),consumerActive=(c.get('consumerProgress') or {}).get('active'),sessionId=session.get('id'),sessionStartedAt=session.get('startedAt'),snapshot={k:full[k] for k in keys if k in full},lastSnapshotAt=c.get('lastSnapshotAt'),regularSnapshotReady=progress.get('regularSnapshotReady'),snapshotCurrentSession=bool(progress.get('regularSnapshotReady') and last is not None and start is not None and last>=start),marketReceiveAndDecodeCurrentSession=bool(start is not None and market_decoded is not None and market_received is not None and market_decoded>=start and market_received>=start),updates={k:c.get(k) for k in ('lastDataDecodedAt','lastMarketDecodedAt','lastMarketReceivedAt','lastSettlementDecodedAt','lastControlDecodedAt')},headersByType={str(k):v for k,v in ((c.get('ingressProgress') or {}).get('headersByType') or {}).items() if re.fullmatch(r'\d{1,3}|unknown',str(k)) and type(v) is int})
 
 def logs(cid,since):
  p=subprocess.run(['docker','logs','--timestamps','--since',since,'--tail','3000',cid],capture_output=True,timeout=20,check=True);raw=p.stdout+p.stderr
@@ -57,6 +58,8 @@ def logs(cid,since):
    if isinstance(r.get(k),str) and re.fullmatch('[A-Za-z0-9_.-]{1,120}',r[k]):out[k]=r[k]
   for k in ('rows','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','elapsedMs','publicationElapsedMs','waitedMs','appliedRows','validatedRows','rssBytes','heapUsedBytes','errorCode'):
    if type(r.get(k)) in (int,float):out[k]=r[k]
+  if isinstance(r.get('errorCode'),str) and re.fullmatch('[A-Z_0-9]{1,64}',r['errorCode']):out['errorCode']=r['errorCode']
+  if isinstance(r.get('signals'),list):out['signals']=[v for v in r['signals'][:8] if isinstance(v,str) and re.fullmatch('[A-Z_0-9]{1,80}',v)]
   if isinstance(r.get('ingress'),dict):out['ingress']={k:r['ingress'][k] for k in ('processed','checkpointed','backlog','metricWindowEndUTC') if k in r['ingress']}
   if op=='feed.coverage':out['coverage']={lane:{k:(r.get('coverage',{}).get(lane) or {}).get(k) for k in ('eventsWithSelectableOdds','rowsPublished','messagesByType','activity')} for lane in ('prematch','inplay')}
   rows.append(out)
@@ -108,7 +111,7 @@ def main():
  host=Path(mounts[0]['Source'])/state.relative_to(mounts[0]['Destination']);paths={lane:Path(str(host)+'.'+lane+'.inbox.sqlite') for lane in ('prematch','inplay')}
  for p in [host,*paths.values()]:
   if not p.is_file() or p.is_symlink():raise RuntimeError('PRESERVED_FILE_IDENTITY_UNVERIFIED')
- begin=time.monotonic();window_start=time.time();since=datetime.datetime.now(datetime.timezone.utc).isoformat();points={l:[] for l in paths};advances={l:[] for l in paths};seen=set();publications=[];recent=[];latest={};last_progress=0;last_progress_publications=0;reason=None
+ begin=time.monotonic();window_start=time.time();since=datetime.datetime.now(datetime.timezone.utc).isoformat();points={l:[] for l in paths};advances={l:[] for l in paths};seen=set();publications=[];recent=[];critical=[];latest={};last_progress=0;last_progress_publications=0;reason=None
  emit(stage='durable_cycles_started',containerId=cid,imageId=c['Image'],startedAtUTC=start,maxObservationSeconds=MAX_SECONDS,sampleIntervalSeconds=INTERVAL,readOnly=True,providerRequests=0,workerRestarted=False)
  while True:
   current=inspect()
@@ -119,6 +122,8 @@ def main():
    key=json.dumps(row,sort_keys=True)
    if key in seen:continue
    seen.add(key);recent.append(row)
+   if row['operation'] in ('inbox.actor_failure','inbox.actor_lifecycle','worker.start','inbox.transport_ack'):
+    critical.append(row);critical=critical[-64:];emit(**{**row,'stage':'current_lane_lifecycle'})
    if row['operation']=='file.persist' and row.get('status')=='ok':publications.append(row);emit(**{**row,'stage':'publication_cycle_completed'})
    if row['operation']=='inbox.checkpoint' and row.get('status')=='persisted':emit(**{**row,'stage':'business_checkpoint_completed'})
   if fresh:since=fresh[-1]['atUTC']
@@ -141,7 +146,7 @@ def main():
  elapsed=time.monotonic()-begin
  summary={lane:drain_summary(p,elapsed,advances[lane]) for lane,p in points.items()}
  totals={k:sum(r.get(k,0) for r in publications) for k in ('captureDurationMs','regularDurationMs','publishDurationMs','lastDurationMs')}
- emit(stage='durable_cycles_result',reason=reason,containerId=cid,lanes=summary,feedEvidence=latest,api=api_evidence(),publicationCompletedCycles=len(publications),publicationDurationTotalsMs=totals,publicationMetricMeaning='Only completed file.persist metrics are summed. publicationElapsedMs is cumulative and cannot identify a single write duration. Encode/write/fsync split is not exposed as cumulative timings by this image.',recentEvents=recent[-100:],readOnly=True,providerRequests=0,workerRestarted=False,posnetChanged=False,integrationVerified=False)
+ emit(stage='durable_cycles_result',reason=reason,containerId=cid,lanes=summary,feedEvidence=latest,api=api_evidence(),publicationCompletedCycles=len(publications),publicationDurationTotalsMs=totals,publicationMetricMeaning='Only completed file.persist metrics are summed. publicationElapsedMs is cumulative and cannot identify a single write duration. Encode/write/fsync split is not exposed as cumulative timings by this image.',recentEvents=recent[-100:],recentCriticalEvents=critical,readOnly=True,providerRequests=0,workerRestarted=False,posnetChanged=False,integrationVerified=False)
 if __name__=='__main__':
  try:main()
  except Exception as e:emit(stage='durable_cycles_result',status='blocked',reason=str(e) if isinstance(e,RuntimeError) else 'READ_ONLY_CYCLE_OBSERVATION_FAILED',exceptionType=type(e).__name__,workerRestarted=False,providerRequests=0,integrationVerified=False);sys.exit(2)
