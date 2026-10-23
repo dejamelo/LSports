@@ -848,3 +848,18 @@ test('snapshot confirmation shares bounded immutable observations instead of dup
  s.apply('prematch',[{fixtureId:1,marketRecovery:true,markets:[{id:1,bets:[{...bets[0],lastUpdate:new Date(100)}]}]}],300);
  assert.equal(row.snapshotBets?.get('1:0')?.decision,'older_than_stored');assert.equal(row.freshBets?.has('1:0'),true);
 });
+
+test('capacity pressure drains the durable inbox before snapshot and between apply batches without a circular wait',{timeout:10000},async()=>{
+ const state=new TradeState(),abort=new AbortController();let paused=true,acks=0,staged=0,persisted=0;let deliver:(m:ConsumeMessage)=>void=()=>{};
+ const message=(n:number)=>({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'pressure-'+n,ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'1',Price:'2.8',Status:1}]}]}]}})),properties:{headers:{}},fields:{inboxId:n,inboxReceived:Date.now(),redelivered:false}} as unknown as ConsumeMessage);
+ const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(_q:string,cb:typeof deliver){deliver=cb;cb(message(1));return{consumerTag:'durable-inbox-exclusive'};},stage(){staged++;},ack(){assert.ok(persisted>=acks+1);acks++;paused=false;},nack(){assert.fail('durable rows must not be discarded');}});
+ const connection=Object.assign(new EventEmitter(),{intakePaused:()=>paused,async createChannel(){return channel;},async close(){connection.emit('close');}});
+ const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'unused',port:5672,tls:false,queue:'unused'};
+ const api:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async catalog(){return[];},async snapshot(){throw Error('full only');},async snapshotFull(sink){
+  assert.equal(acks,1,'startup capacity must be relieved before snapshot');sink.progress?.({stage:'apply',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date().toISOString()});paused=true;deliver(message(2));
+  await sink.apply({fixtureId:1,fixture:{status:1,sport:{name:'Football'}},markets:[{id:1,status:1,bets:[{id:'1',price:'2.1',status:1,isChanged:0}]}]},Date.now()-10000);
+  assert.equal(acks,2,'apply must release replay while capacity is paused');return{ids:new Set([1]),rows:1,bytes:100};
+ }};
+ await session(pkg,{packages:[pkg],snapshotUrl:'https://snapshot.invalid',customersUrl:'https://customers.invalid',recoveryMs:300000,staleMs:90000},state,async()=>{persisted=state.feed().coverage?.prematch.messages??0;if(state.connections.prematch.phase==='connected')abort.abort();},abort.signal,{clientFactory:()=>api,connect:(async()=>{throw Error('not live');}) as any,durableConnect:(async()=>connection) as any},'/isolated/inbox.sqlite');
+ assert.equal(acks,2);assert.equal(staged,2);assert.equal(paused,false);
+});

@@ -741,6 +741,7 @@ def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None
         previous=fingerprint;sleep(min(interval,timeout-elapsed))
 
 def resumed_stop_budget(progress):
+    if progress.get('pipelineRepair') is True and partition_memory(progress)==6442450944:return 600
     previous=progress.get('shutdownObservation',{}).get('samples',[])
     # Only a pinned interrupted operation with measured write progress qualifies.
     # No repeated signal; inactivity and identity checks remain unchanged.
@@ -1014,7 +1015,7 @@ def upgrade_partitioned_unlocked(request):
                 raw=read_tail(log);known=re.findall(rb'(?:Error: )(PIPELINE_[A-Z_]{3,100})',raw)
                 emit(operation='cutover.aws',stage=stage,status='blocked',reason='PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP',signals=classify(raw),knownFailureCode=known[-1].decode() if known else None,privateLog=log.name,childExitCode=getattr(error,'returncode',None),workerStarted=False,posnetChanged=False)
                 raise RuntimeError('PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP') from None
-            require(b'pipeline-load-offline-ok' in output,'PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP')
+            require(b'pipeline-load-offline-ok' in output and b'inbox-capacity-offline-ok' in output,'PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP')
             for line in output.decode().splitlines():
                 try:r=json.loads(line)
                 except ValueError:continue
@@ -1139,7 +1140,7 @@ def upgrade_partitioned_unlocked(request):
                     progress['shutdownObservation']=report;save(progress)
                     emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='observing',backup=str(backup),**report['samples'][-1],forceStopEvidenceVerified=False,posnetChanged=False)
                 if any(w['running'] for w in states('worker')):
-                    budget=resumed_stop_budget(progress) if request.get('resumeBackup') else 180
+                    budget=resumed_stop_budget(progress) if request.get('resumeBackup') or request.get('pipelineRepair') else 180
                     initial=upgrade_stop_sample(progress)
                     emit(operation='cutover.aws',stage='partitioned_upgrade.resume_stop_status',status='collected',backup=str(backup),current=initial,shutdownLogs=evidence.get('shutdownLogs',[]),observationBudgetSeconds=budget,signalsSent=0,forceStopEvidenceVerified=False,posnetChanged=False)
                     try:watch_upgrade_stop(lambda:upgrade_stop_sample(progress),observed,timeout=budget)

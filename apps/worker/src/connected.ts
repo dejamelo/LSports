@@ -116,6 +116,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
     const heartbeat = setInterval(() => {
+      if(signal.aborted)return; // No new periodic publications during the explicit final flush.
       if (Date.now() - lastCoverageLog >= 60000) {
         lastCoverageLog = Date.now();
         console.info(
@@ -460,7 +461,7 @@ export async function session(
     // A reconnect must establish its own regular snapshot baseline; a previous
     // session's lastSnapshotAt is not proof that this connection recovered.
     let regularSnapshotReady = false;
-    const durableConnection=connection as typeof connection & {recoveryAnchor?:()=>number|undefined;checkpointAnchor?:(seconds:number)=>Promise<boolean>};
+    const durableConnection=connection as typeof connection & {recoveryAnchor?:()=>number|undefined;intakePaused?:()=>boolean;checkpointAnchor?:(seconds:number)=>Promise<boolean>};
     const recoveryAnchor=durableConnection.recoveryAnchor?.();
     let timestampRecoveryPending=recoveryAnchor!==undefined;
     let checkpointAnchorSeconds:number|undefined;
@@ -478,6 +479,20 @@ export async function session(
       requireOpen();
       await save();
       requireOpen();
+      // A full durable inbox must make room before snapshot application can pause
+      // replay. Capacity backpressure is not a transport/session failure.
+      let lastCapacityLog=0;
+      const waitForInboxCapacity=async()=>{
+        if(!durableConnection.intakePaused?.())return;
+        const applying=snapshotApplicationActive;snapshotApplicationActive=false;
+        if(buffered.length)scheduleDrain();
+        try{while(durableConnection.intakePaused?.()){
+          requireOpen();await processing;if(backgroundCommit)await backgroundCommit;
+          if(Date.now()-lastCapacityLog>=10000){lastCapacityLog=Date.now();console.info(JSON.stringify({operation:'inbox.capacity_drain',lane,status:'snapshot_deferred_for_durable_drain',atUTC:new Date().toISOString(),ingress:state.connections[lane].ingressProgress}));}
+          await delay(250,undefined,{signal});
+        }}finally{snapshotApplicationActive=applying;}
+      };
+      await waitForInboxCapacity();
       let rows: import("./state.js").TradeEvent[] | undefined;let partitionCompleted=false,fullCompleted=false;
       if (Date.now() >= nextDue["snapshot.events"]) {
         const started = Date.now();
@@ -495,6 +510,7 @@ export async function session(
             const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
             regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();
             const applySnapshotBatch=async(rows:import('./state.js').TradeEvent[],at:number)=>{
+              await waitForInboxCapacity();
               const prefix=processing;const applied=(async()=>{for(let index=0;index<rows.length;index++)await snapshotApplyTurn(index===0?prefix:Promise.resolve(),state,()=>{requireOpen();state.apply(lane,[{...rows[index],marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{
                 if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,atUTC:new Date().toISOString()}));
               });})();processing=applied;await applied;

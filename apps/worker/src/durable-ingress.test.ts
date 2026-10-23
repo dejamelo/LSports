@@ -71,3 +71,27 @@ test('adding receipt index to a legacy inbox preserves original ids, bytes and t
   const inbox=openInbox(path);try{const rows=inbox.peek();assert.equal(rows.length,1);assert.equal(rows[0].id,19);assert.equal(rows[0].received,12345);assert.equal(rows[0].content.toString(),'preserved bytes');assert.equal(inbox.processingStats(0).processingBacklog,1);}finally{inbox.close();}
  }finally{await rm(directory,{recursive:true,force:true});}
 });
+
+test('full restored inbox pauses intake but replays, checkpoints, frees capacity and resumes without losing pending delivery',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-full-replay-')),path=join(dir,'raw.sqlite');
+ const seed=Array.from({length:20},(_,i)=>({...message(i),content:Buffer.from(JSON.stringify({n:i,padding:'x'.repeat(128)}))}));
+ const db=openInbox(path);db.append(seed);const maxBytes=db.stats().bytes+1;db.close();
+ let latest:any;const transport=await connectDurableMq({} as any,path,m=>latest=m,{offline:true,maxBytes});const errors:any[]=[];transport.on('error',e=>errors.push(e));
+ try{
+  transport.offline([message(999)]);
+  for(let i=0;i<100&&!transport.intakePaused();i++)await sleep(10);
+  assert.equal(transport.intakePaused(),true);assert.equal(errors.length,0);
+  const channel=await transport.createChannel(),rows:any[]=[];await channel.consume('offline',m=>{if(m)rows.push(m);});
+  for(let i=0;i<100&&rows.length<20;i++)await sleep(10);
+  assert.equal(rows.length,20);const check=openInbox(path);assert.equal(check.stats().backlog,20);check.close();
+  // Completing the business checkpoint is explicit: stage alone never deletes rows.
+  for(const row of rows)(channel as any).stage(row);await sleep(30);
+  const before=openInbox(path);assert.equal(before.stats().backlog,20);before.close();
+  for(const row of rows)channel.ack(row);
+  for(let i=0;i<200&&(transport.intakePaused()||rows.length<21);i++)await sleep(10);
+  assert.equal(transport.intakePaused(),false);assert.equal(rows.length,21);assert.equal(JSON.parse(rows[20].content.toString()).n,999);
+  channel.ack(rows[20]);
+  for(let i=0;i<200&&latest?.backlog!==0;i++)await sleep(10);
+  assert.equal(latest.backlog,0);assert.equal(latest.acknowledged,1);assert.equal(latest.processed,21);assert.equal(latest.checkpointed,21);assert.equal(errors.length,0);
+ }finally{await transport.close();await rm(dir,{recursive:true,force:true});}
+});

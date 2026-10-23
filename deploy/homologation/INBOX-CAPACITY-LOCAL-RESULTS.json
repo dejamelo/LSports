@@ -1,0 +1,101 @@
+{
+  "scope": "local isolated tests, not AWS",
+  "rabbitMQ": [
+    {
+      "test": "full_inbox_live_amqp",
+      "initialBacklog": 120,
+      "received": 660,
+      "processed": 780,
+      "checkpointed": 780,
+      "finalBacklog": 0,
+      "windows": [
+        {
+          "start": "2026-10-23T00:05:10.015Z",
+          "end": "2026-10-23T00:05:16.111Z",
+          "received": 1,
+          "processed": 0,
+          "checkpointed": 0,
+          "backlog": 120,
+          "ageMs": 11235
+        },
+        {
+          "start": "2026-10-23T00:05:16.111Z",
+          "end": "2026-10-23T00:05:17.110Z",
+          "received": 143,
+          "processed": 262,
+          "checkpointed": 262,
+          "backlog": 1,
+          "ageMs": 6
+        },
+        {
+          "start": "2026-10-23T00:05:17.110Z",
+          "end": "2026-10-23T00:05:18.110Z",
+          "received": 515,
+          "processed": 634,
+          "checkpointed": 634,
+          "backlog": 1,
+          "ageMs": 13
+        },
+        {
+          "start": "2026-10-23T00:05:18.110Z",
+          "end": "2026-10-23T00:05:19.110Z",
+          "received": 587,
+          "processed": 706,
+          "checkpointed": 706,
+          "backlog": 1,
+          "ageMs": 9
+        },
+        {
+          "start": "2026-10-23T00:05:19.110Z",
+          "end": "2026-10-23T00:05:20.111Z",
+          "received": 659,
+          "processed": 778,
+          "checkpointed": 778,
+          "backlog": 1,
+          "ageMs": 7
+        },
+        {
+          "start": "2026-10-23T00:05:20.111Z",
+          "end": "2026-10-23T00:05:21.112Z",
+          "received": 660,
+          "processed": 780,
+          "checkpointed": 780,
+          "backlog": 0,
+          "ageMs": 0
+        }
+      ],
+      "awsValidated": false
+    }
+  ],
+  "concurrentSnapshot": {
+    "operation": "pipeline.offline.complete",
+    "snapshotBytes": 9991934,
+    "snapshotRows": 500,
+    "applied": 500,
+    "preload": 12000,
+    "received": 660,
+    "acknowledged": 660,
+    "processed": 12660,
+    "checkpointed": 12660,
+    "processingBacklog": 7975,
+    "finalBacklog": 0,
+    "load": {
+      "event": "load_complete",
+      "sent": 660,
+      "durationMs": 5002.669801
+    },
+    "writes": 13,
+    "maxPersistMs": 2833.5027469999995,
+    "peakRSSBytes": 489017344,
+    "maxEventLoopDelayMs": 314.572799,
+    "readbackRows": 500,
+    "scope": "synthetic_snapshot_plus_real_durable_actor_and_session_not_AWS"
+  },
+  "limitsUnchanged": true,
+  "limitations": [
+    "AMQP load: 72/s for five seconds plus 300 burst; this is not a 30-minute stability proof.",
+    "Concurrent local snapshot was scaled to 500 fixtures and about 10 MB.",
+    "Full 25416-row, approximately 516 MiB snapshot with five-minute load remains mandatory in the protected remote pre-stop gate.",
+    "Current AWS inbox and current production odds have not been validated from this workspace."
+  ]
+}

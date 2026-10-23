@@ -25,6 +25,7 @@ class RetentionOrigin(unittest.TestCase):
 class StopResumeBudget(unittest.TestCase):
  def test_only_actual_previous_progress_gets_bounded_completion_window(self):
   self.assertEqual(ns['resumed_stop_budget']({}),180)
+  self.assertEqual(ns['resumed_stop_budget']({'pipelineRepair':True,'memoryLimitBytes':6442450944}),600)
   self.assertEqual(ns['resumed_stop_budget']({'shutdownObservation':{'samples':[{'progressSincePreviousSample':False}]}}),180)
   self.assertEqual(ns['resumed_stop_budget']({'shutdownObservation':{'samples':[{'progressSincePreviousSample':True}]}}),600)
 class OperationLock(unittest.TestCase):
