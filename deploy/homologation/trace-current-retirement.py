@@ -3,8 +3,8 @@ import datetime,json,re,subprocess,sys
 EXPECTED='0d8d0c7837573feaa10f0bd2a09c299d4f2d69f58fa99e653c5648a94d1ceef7'
 IMAGE='sha256:e4ec062c6118a676a67c577b79c3fec0381ad0b7e60f640e3c82c748debc8b41'
 OPS={'inbox.checkpoint','inbox.processing_progress','inbox.actor_lifecycle','inbox.actor_failure','distribution.recovery_gate','worker.start','worker.shutdown','snapshot.apply_wait','state.publication_wait','file.persist','snapshot.events','amqp.connection'}
-STR={'operation','lane','status','stage','publicationStage','sessionId','ingressActorId','ingressStage','reason','category','errorType','networkCode','atUTC','lastCompletedAt','metricWindowStartUTC','metricWindowEndUTC'}
-NUM={'rows','waitedMs','elapsedMs','publicationElapsedMs','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','heapUsedBytes','heapHeadroomBytes','rssBytes','validatedRows','appliedRows','bytes','errorCode','sqliteErrcode','exitCode','workerEventLoopMaxMs'}
+STR={'operation','lane','status','stage','publicationStage','sessionId','ingressActorId','batchId','ingressStage','reason','category','errorType','networkCode','atUTC','lastCompletedAt','metricWindowStartUTC','metricWindowEndUTC'}
+NUM={'publicationId','rows','waitedMs','elapsedMs','publicationElapsedMs','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','heapUsedBytes','heapHeadroomBytes','rssBytes','validatedRows','appliedRows','bytes','errorCode','sqliteErrcode','exitCode','workerEventLoopMaxMs'}
 def extract(raw):
  rows=[]
  for line in raw.splitlines():
@@ -38,10 +38,15 @@ def correlate(rows):
   if r.get('status')=='waiting_persistence':
    if key in outstanding:unmatched.append(outstanding[key])
    outstanding[key]=r
+  if r.get('status')=='reserved_before_capture':
+   waiting=outstanding.get(key)
+   if waiting and waiting.get('batchId')==r.get('batchId'):
+    outstanding[key]={**waiting,'rows':r.get('rows'),'publicationId':r.get('publicationId'),'reservedAtUTC':r['loggedAtUTC']}
+   else:unmatched.append(r)
   if r.get('status')=='persisted':
    waiting=outstanding.get(key)
-   if waiting and waiting.get('rows')==r.get('rows'):
-    pairs.append({'sessionId':session,'ingressActorId':actor,'rows':r['rows'],'requestedAtUTC':waiting['loggedAtUTC'],'persistedAtUTC':r['loggedAtUTC'],'waitedMs':r.get('waitedMs')});del outstanding[key]
+   if waiting and waiting.get('rows')==r.get('rows') and (not waiting.get('batchId') or waiting.get('batchId')==r.get('batchId')):
+    pairs.append({'sessionId':session,'ingressActorId':actor,'rows':r['rows'],'batchId':r.get('batchId'),'publicationId':r.get('publicationId'),'requestedAtUTC':waiting['loggedAtUTC'],'persistedAtUTC':r['loggedAtUTC'],'waitedMs':r.get('waitedMs')});del outstanding[key]
    else:unmatched.append(r)
  return {'completedCheckpoints':pairs[-20:],'waitingCheckpoints':list(outstanding.values()),'unmatchedCheckpointEvents':unmatched[-8:],'correlationRule':'One serialized background checkpoint per session/actor; count and ordered request/completion must match. Shared publication completion alone is insufficient.'}
 def run(args,timeout=20,input=None):

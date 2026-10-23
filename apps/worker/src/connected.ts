@@ -45,9 +45,9 @@ export async function publicationTurn<T>(state:TradeState,persist:()=>Promise<T>
  await nextTurn();return state.exclusive(persist);
 }
 // Only immutable capture holds the state gate. File I/O uses frozen row references.
-export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable:TradeState)=>Promise<T>){
+export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable:TradeState)=>Promise<T>,publicationId?:number){
  await nextTurn();const captured=await state.exclusive(()=>state.capturePublication());
- const began=Date.now(),timer=setInterval(()=>{const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'waiting',...state.publicationStatus(),elapsedMs:Date.now()-began,heapUsedBytes:m.heapUsed,rssBytes:m.rss}));},10000);timer.unref();
+ const began=Date.now(),timer=setInterval(()=>{const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'waiting',publicationId,...state.publicationStatus(),elapsedMs:Date.now()-began,heapUsedBytes:m.heapUsed,rssBytes:m.rss}));},10000);timer.unref();
  try{return await persist(captured.state);}finally{clearInterval(timer);captured.release();}
 }
 // Preserve the same processing/FIFO barriers; expose which one is actually awaited.
@@ -72,9 +72,21 @@ export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,
  const applying=Object.values(state.connections).some(c=>c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&Date.parse(c.lastSnapshotErrorAt||'')<Date.parse(c.fullSnapshot.startedAt||'') || c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&!c.lastSnapshotErrorAt);
  return !applying||now-lastCompletedAt>=60000;
 }
-export function coalescedPersistence(persist:()=>Promise<void>){
- let tail:Promise<void>=Promise.resolve(),queued:Promise<void>|undefined;
- return()=>{if(queued)return queued;let job:Promise<void>;job=tail.then(()=>{if(queued===job)queued=undefined;return persist();});queued=job;tail=job.catch(()=>{});return job;};
+export type PersistenceSave = (()=>Promise<void>) & {beforeCapture?:(reserve:(publicationId:number)=>void)=>Promise<void>};
+export function coalescedPersistence(persist:(publicationId:number)=>Promise<void>){
+ let tail:Promise<void>=Promise.resolve(),queued:{job:Promise<void>;reserves:((publicationId:number)=>void)[]}|undefined,sequence=0;
+ const request=(reserve?:(publicationId:number)=>void)=>{
+  if(queued){if(reserve)queued.reserves.push(reserve);return queued.job;}
+  const reserves=reserve?[reserve]:[];const publicationId=++sequence;let job:Promise<void>;
+  job=tail.then(()=>{if(queued?.job===job)queued=undefined;
+   // Reserve only an already-applied prefix, immediately BEFORE invoking the
+   // writer. Its subsequent immutable capture must include that prefix. Never
+   // extend it after capture or acknowledge on a preceding publication.
+   for(const include of reserves)include(publicationId);
+   return persist(publicationId);
+  });queued={job,reserves};tail=job.catch(()=>{});return job;
+ };
+ return Object.assign(()=>request(),{beforeCapture:(reserve:(publicationId:number)=>void)=>request(reserve)});
 }
 export async function runConnected(signal: AbortSignal, dependencies: {
   config?: ReturnType<typeof loadConfig>;
@@ -110,8 +122,8 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const publish = createPublisher(path);
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0,lastCompletedPublication=0,loopWindowStart=Date.now();
-    const save = coalescedPersistence(()=>publicationCaptureTurn(state,stable=>operation("file.persist", "local", async () => {
-        const memoryStage=(stage:string)=>{state.setPublicationPhase(stage);const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
+    const save = coalescedPersistence(publicationId=>publicationCaptureTurn(state,stable=>operation("file.persist", "local", async () => {
+        const memoryStage=(stage:string)=>{state.setPublicationPhase(stage);const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',publicationId,stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
         memoryStage('capture');
         const started=performance.now();const feed = stable.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
         tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
@@ -122,10 +134,10 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
         memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
         lastCompletedPublication=Date.now();
-        const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
+        const metric={publicationId,writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
-    })));
+    }),publicationId));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
     const heartbeat = setInterval(() => {
@@ -235,7 +247,7 @@ export async function session(
   pkg: PackageConfig,
   config: ReturnType<typeof loadConfig>,
   state: TradeState,
-  save: () => Promise<void>,
+  save: PersistenceSave,
   signal: AbortSignal,
   dependencies: {connect:typeof amqp.connect;clientFactory:typeof clients;durableConnect?:typeof connectDurableMq} = { connect: amqp.connect, clientFactory: clients },
   ingressPath?: string,
@@ -419,9 +431,14 @@ export async function session(
     const stageDelivery=(channel as typeof channel & {stage?:(msg:ConsumeMessage)=>void}).stage;
     const commitPending=()=>{
       if(backgroundCommit||closed||!pendingAcks.length)return;
-      const prefix=pendingAcks.splice(0);checkpointPending=prefix.length;const metadata=pendingMetadata.get(prefix[0]);
-      const requestedAt=Date.now();console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,status:'waiting_persistence',rows:prefix.length,atUTC:new Date().toISOString()}));
-      backgroundCommit=save().then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(durable||!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
+      let prefix:ConsumeMessage[]=[],publicationId:number|undefined;const batchId=randomUUID();const metadata=pendingMetadata.get(pendingAcks[0]);
+      const requestedAt=Date.now();console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,batchId,status:'waiting_persistence',rows:pendingAcks.length,atUTC:new Date().toISOString()}));
+      const reserve=(id?:number)=>{publicationId=id;prefix=pendingAcks.splice(0);checkpointPending=prefix.length;console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,batchId,publicationId,status:'reserved_before_capture',rows:prefix.length,atUTC:new Date().toISOString()}));};
+      // Plain test/legacy writers retain the original eager-prefix contract.
+      let persisted:Promise<void>;
+      if(durable&&save.beforeCapture)persisted=save.beforeCapture(reserve);
+      else{reserve();persisted=save();}
+      backgroundCommit=persisted.then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,batchId,publicationId,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(durable||!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
     };
     let drainScheduled=false;
     const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;

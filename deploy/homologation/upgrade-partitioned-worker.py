@@ -33,6 +33,19 @@ def partition_heap_mib(progress):
     require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('oldSpaceMiB')==3584 and plan.get('previousOldSpaceMiB')==2560 and plan.get('containerLimitUnchanged') is True,'HEAP_BUDGET_PLAN_UNVERIFIED')
     return 3584
 
+def existing_pipeline_heap_plan(worker):
+    options=worker.get('environment',{}).get('NODE_OPTIONS')
+    if options=='--max-old-space-size=2560':return None
+    require(options=='--max-old-space-size=3584' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944,'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
+    image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
+    path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
+    require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'PIPELINE_HEAP_RECEIPT_UNVERIFIED')
+    old=json.loads(path.read_bytes());require(old.get('image')==image and isinstance(old.get('digest'),str) and old['digest'][:24]==image.split(':')[1] and old.get('oomRestoreVerified') is True,'PIPELINE_HEAP_RESTORE_RECEIPT_UNVERIFIED')
+    require(partition_heap_mib(old)==3584,'PIPELINE_HEAP_PLAN_UNVERIFIED')
+    found=json.loads(run(['docker','image','inspect',image]))[0]
+    require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
+    return copy.deepcopy(old['heapBudgetPlan'])
+
 def preserved_heap_budget_plan(progress,backup,workers):
     # This bounded adjustment is tied to the exact failed preparation, not a
     # general heap override. The six-GiB cgroup remains unchanged.
@@ -679,7 +692,7 @@ def recover_completed_shutdown(progress,save,backup,evidence):
         if script.exists():require(script.is_file() and not script.is_symlink() and script.read_text()==PRE_EXIT_REPLAY_PROOF,'PRE_EXIT_PROOF_SCRIPT_CHANGED')
         else:private(script,PRE_EXIT_REPLAY_PROOF.encode());os.chmod(script,0o644)
         common=partition_rehearsal_args(common,progress)
-        command=common[:-1]+['--mount','type=bind,source='+str(output)+',target=/output','--mount','type=bind,source='+str(script)+',target=/offline-proof.mjs,readonly','--name','adl-pre-exit-proof-'+nonce+'-replay',common[-1],'--max-old-space-size=2560','--import','tsx','/offline-proof.mjs']
+        command=common[:-1]+['--mount','type=bind,source='+str(output)+',target=/output','--mount','type=bind,source='+str(script)+',target=/offline-proof.mjs,readonly','--name','adl-pre-exit-proof-'+nonce+'-replay',common[-1],'--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx','/offline-proof.mjs']
         progress['preExitProof']['attemptLog']='pre-exit-replay-'+nonce+'.private.log';save(progress)
         pre_exit_proof_run(command,backup/progress['preExitProof']['attemptLog'],'restore_replay_serialize')
         command[command.index('--name')+1]='adl-pre-exit-proof-'+nonce+'-readback'
@@ -879,10 +892,13 @@ def upgrade_partitioned_unlocked(request):
         meta=json.loads((SECURE/'deployment.json').read_bytes());base=partition_base(meta);before=model(base)
         require(control_status()==200,'API_NOT_HEALTHY')
         memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
+        inherited_heap_plan=None
         if request.get('pipelineRepair'):
             require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and memory_limit==6442450944,'PIPELINE_REQUIRES_SIX_GIB_VERIFIED_IDENTITY')
             require(run(['systemctl','is-active','adl-worker-cache-reserve.service']).strip()==b'active','CACHE_RESERVE_NOT_ACTIVE_NO_WORKER_CHANGE')
-            require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') in (('--max-old-space-size=2560','--max-old-space-size=3584') if request.get('preservedHeapBudgetRepair') and request.get('resumeBackup') else ('--max-old-space-size=2560',)),'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
+            if request.get('preservedHeapBudgetRepair') and request.get('resumeBackup'):
+                require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') in ('--max-old-space-size=2560','--max-old-space-size=3584'),'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
+            else:inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'])
         def save(p):
             tmp=SECURE/(receipt_path.name+'.tmp');private(tmp,json.dumps(p).encode());durable_replace(tmp,receipt_path)
         # A failed preserved-data rehearsal has already stopped distribution and
@@ -993,7 +1009,7 @@ def upgrade_partitioned_unlocked(request):
             check="""import{decodeMessage}from'/app/apps/worker/src/messages.ts';import{partitionedSnapshot,subscriptionInventory}from'/app/apps/worker/src/partitioned-snapshot.ts';await import('/app/apps/worker/src/connected.ts');const sdk=await import('trade360-nodejs-sdk');if(sdk.knownEntityKeys.get(38)!=='OutrightLeagueFixtureUpdate')throw Error();const body={Competition:{Id:1,Competitions:[{Id:2,Events:[{FixtureId:3,OutrightLeague:{FixtureName:'ISOLATED OFFLINE',Status:1,LastUpdate:'2026-10-19T06:00:00Z'}}]}]}};const decoded=decodeMessage(Buffer.from(JSON.stringify({Header:{Type:38,MsgGuid:'offline-38',ServerTimestamp:1792389601000},Body:body})),{});if(decoded.events[0]?.outright?.fixture?.fixtureName!=='ISOLATED OFFLINE')throw Error();if(subscriptionInventory({fixtures:[2,1]},{Body:{Fixtures:[2,1]}}).join(',')!=='1,2')throw Error();let rejected=false;try{subscriptionInventory({fixtures:['PRIVATE_OFFLINE']},{Body:{Fixtures:['PRIVATE_OFFLINE']}})}catch(e){rejected=e.diagnostic?.snapshotValidation?.code==='inventory_invalid_ids'}if(!rejected)throw Error();let applied=0;const p=await partitionedSnapshot({async inventory(){return[11,12]},async events(ids){return ids.map(fixtureId=>({fixtureId,fixture:{status:1}}))}},{assertOpen(){},async begin(){},async batch(rows){applied+=rows.length},async progress(){}},{batchSize:1});if(p.stage!=='complete'||applied!==2)throw Error();console.log('partitioned-offline-ok');"""
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',check],timeout=30)
             require(b'partitioned-offline-ok' in output,'UPGRADE_OFFLINE_TEST_FAILED')
-            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True};save(progress)
+            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
         if request.get('preservedHeapBudgetRepair'):
             require(request.get('resumeBackup') and request.get('pipelineRepair') and request.get('snapshotMemoryRepair'),'HEAP_REPAIR_RESUME_SCOPE_UNVERIFIED')
             plan=progress['heapBudgetPlan'] if progress.get('heapBudgetPlan') and progress.get('oomRestoreVerified') else preserved_heap_budget_plan(progress,backup,states('worker'))
