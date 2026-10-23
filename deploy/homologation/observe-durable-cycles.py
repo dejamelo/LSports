@@ -36,12 +36,13 @@ def metadata(path):
   if key=='connections':return value
  raise RuntimeError('CONNECTIONS_PREFIX_MISSING')
 
-def safe_connection(c):
+def safe_connection(c,activity=None):
+ activity=activity or {}
  session=c.get('session') or {};full=c.get('fullSnapshot') or {};progress=c.get('recoveryProgress') or {};start=stamp(session.get('startedAt'));last=stamp(c.get('lastSnapshotAt'))
  keys=('stage','startedAt','completedAt','lastProgressAt','bytes','validatedRows','appliedRows')
- market_decoded=stamp(c.get('lastMarketDecodedAt'));market_received=stamp(c.get('lastMarketReceivedAt'))
+ market_decoded=stamp(activity.get('lastMarketDecodedAt'));market_received=stamp(activity.get('lastMarketReceivedAt'))
  diagnostic=c.get('diagnostic') or {};safe_diagnostic={k:v for k,v in diagnostic.items() if k in ('operation','category','reason','protocol','networkCode','amqpCode','errorType') and (type(v) is int or isinstance(v,str) and re.fullmatch('[A-Za-z0-9_.-]{1,100}',v))}
- return dict(phase=c.get('phase'),diagnostic=safe_diagnostic,consumerRegisteredAt=(c.get('consumerProgress') or {}).get('registeredAt'),consumerActive=(c.get('consumerProgress') or {}).get('active'),sessionId=session.get('id'),sessionStartedAt=session.get('startedAt'),snapshot={k:full[k] for k in keys if k in full},lastSnapshotAt=c.get('lastSnapshotAt'),regularSnapshotReady=progress.get('regularSnapshotReady'),snapshotCurrentSession=bool(progress.get('regularSnapshotReady') and last is not None and start is not None and last>=start),marketReceiveAndDecodeCurrentSession=bool(start is not None and market_decoded is not None and market_received is not None and market_decoded>=start and market_received>=start),updates={k:c.get(k) for k in ('lastDataDecodedAt','lastMarketDecodedAt','lastMarketReceivedAt','lastSettlementDecodedAt','lastControlDecodedAt')},headersByType={str(k):v for k,v in ((c.get('ingressProgress') or {}).get('headersByType') or {}).items() if re.fullmatch(r'\d{1,3}|unknown',str(k)) and type(v) is int})
+ return dict(phase=c.get('phase'),diagnostic=safe_diagnostic,consumerRegisteredAt=(c.get('consumerProgress') or {}).get('registeredAt'),consumerActive=(c.get('consumerProgress') or {}).get('active'),sessionId=session.get('id'),sessionStartedAt=session.get('startedAt'),snapshot={k:full[k] for k in keys if k in full},lastSnapshotAt=c.get('lastSnapshotAt'),regularSnapshotReady=progress.get('regularSnapshotReady'),snapshotCurrentSession=bool(progress.get('regularSnapshotReady') and last is not None and start is not None and last>=start),marketReceiveAndDecodeCurrentSession=bool(start is not None and market_decoded is not None and market_received is not None and market_decoded>=start and market_received>=start),updateEvidenceSource='feed.coverage' if activity else 'not_observed_in_log_window',updates={k:activity.get(k) for k in ('lastDataDecodedAt','lastMarketDecodedAt','lastMarketReceivedAt','lastSettlementDecodedAt','lastControlDecodedAt')},headersByType={str(k):v for k,v in ((c.get('ingressProgress') or {}).get('headersByType') or {}).items() if re.fullmatch(r'\d{1,3}|unknown',str(k)) and type(v) is int})
 
 def logs(cid,since):
  p=subprocess.run(['docker','logs','--timestamps','--since',since,'--tail','3000',cid],capture_output=True,timeout=20,check=True);raw=p.stdout+p.stderr
@@ -97,7 +98,7 @@ def api_evidence():
   except urllib.error.HTTPError as e:response=e
   result['httpStatus']=response.code;raw=response.read(512*1024+1);response.close()
   if len(raw)>512*1024:raise RuntimeError('API_HEALTH_RESPONSE_LIMIT')
-  data=json.loads(raw);result.update(status=data.get('status'),apiEventCount=data.get('apiEventCount'),lanes={lane:{'eventsWithSelectableOdds':(data.get('coverage',{}).get(lane) or {}).get('eventsWithSelectableOdds'),'apiSelectableOddsObserved':result['httpStatus']==200 and ((data.get('coverage',{}).get(lane) or {}).get('eventsWithSelectableOdds') or 0)>0,'activity':(data.get('coverage',{}).get(lane) or {}).get('activity')} for lane in ('prematch','inplay')})
+  data=json.loads(raw);result.update(status=data.get('status'),apiEventCount=data.get('apiEventCount'),lanes={lane:{'eventsWithSelectableOdds':(data.get('coverage',{}).get(lane) or {}).get('eventsWithSelectableOdds'),'apiSelectableOddsObserved':((data.get('coverage',{}).get(lane) or {}).get('eventsWithSelectableOdds') or 0)>0 if result['httpStatus']==200 else None,'activity':(data.get('coverage',{}).get(lane) or {}).get('activity')} for lane in ('prematch','inplay')})
  except Exception as e:result['errorType']=type(e).__name__
  return result
 
@@ -135,7 +136,9 @@ def main():
     if lane=='prematch':last_progress=elapsed;last_progress_publications=len(publications)
    points[lane].append(sample)
    emit(stage='durable_cycle_sample',lane=lane,containerId=cid,**sample,checkpointAdvanceObservations=len(advances[lane]),completedPublications=len(publications))
-  try:latest={l:safe_connection(v) for l,v in metadata(host).items() if l in paths}
+  try:
+   coverage=next((r for r in reversed(recent) if r['operation']=='feed.coverage'),{})
+   latest={l:{**safe_connection(v,((coverage.get('coverage') or {}).get(l) or {}).get('activity')),'coverageLoggedAtUTC':coverage.get('atUTC')} for l,v in metadata(host).items() if l in paths}
   except Exception as e:emit(stage='publication_metadata_unavailable',errorType=type(e).__name__)
   emit(stage='cycle_wait_context',elapsedSeconds=round(elapsed,1),containerResources=container_resources(current['State']['Pid']),latestWaits=[r for r in recent if r['operation'] in ('state.publication_wait','snapshot.apply_wait')][-4:],lanes=latest,readOnly=True)
   if points['prematch'][-1]['pendingRows']==0:reason='PREMATCH_INBOX_DRAINED';break

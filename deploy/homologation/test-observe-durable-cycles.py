@@ -17,6 +17,9 @@ class Cycles(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d)/'feed';p.write_text('{"mode":"connected","connections":{"prematch":{"phase":"recovering"}},"events":INVALID_NOT_PARSED')
    self.assertEqual(ns['metadata'](p)['prematch']['phase'],'recovering')
+ def test_market_activity_comes_from_coverage_not_connection_prefix(self):
+  c={'session':{'startedAt':'2026-10-23T18:39:11Z'}};activity={'lastMarketDecodedAt':'2026-10-23T17:42:31Z','lastMarketReceivedAt':'2026-10-22T18:17:10Z'}
+  result=ns['safe_connection'](c,activity);self.assertEqual(result['updates']['lastMarketReceivedAt'],activity['lastMarketReceivedAt']);self.assertFalse(result['marketReceiveAndDecodeCurrentSession']);self.assertEqual(result['updateEvidenceSource'],'feed.coverage')
  def test_snapshot_of_prior_session_does_not_verify_current_snapshot(self):
   c={'phase':'recovering','session':{'id':'current','startedAt':'2026-10-23T17:00:00Z'},'lastSnapshotAt':'2026-10-23T16:00:00Z','recoveryProgress':{'regularSnapshotReady':True}}
   self.assertFalse(ns['safe_connection'](c)['snapshotCurrentSession'])
