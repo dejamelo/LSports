@@ -21,7 +21,9 @@ def main():
  image=run(['docker','image','inspect',r['image']])[0]
  if (image['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')!=digest:raise RuntimeError('PREPARED_IMAGE_IDENTITY_UNVERIFIED')
  c=run(['docker','inspect','adl-homologation-worker-1'])[0];state=c['State']
- if c['Id']!=r.get('oldContainer'):raise RuntimeError('ORIGINAL_CONTAINER_CHANGED_NO_ACTION')
+ original=c['Id']==r.get('oldContainer')
+ activated=r.get('phase') in ('start_requested','running') and c['Config']['Image']==r['image'] and c['Image']==image['Id'] and c['State']['Running'] and not c['State']['OOMKilled']
+ if not original and not activated:raise RuntimeError('ORIGINAL_CONTAINER_CHANGED_NO_ACTION')
  plans=[]
  for p in backup.glob('offline-rehearsal-disk-plan*.json'):
   if p.is_symlink() or not p.is_file() or p.stat().st_size>2*1024**2 or p.stat().st_uid!=0 or p.stat().st_mode&0o077:continue

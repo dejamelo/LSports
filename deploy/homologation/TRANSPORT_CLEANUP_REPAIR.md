@@ -87,3 +87,29 @@ whether termination was the guarded SIGKILL after recovery validation.
 Additional regressions: four storage/stopped-worker cases, seven offline disk
 cases, 22 upgrade cases (one skipped). No AWS capacity or activation result is
 claimed by these local tests.
+
+## Verified 160-GiB destination and 184-GiB continuation
+
+User supplied the exact p1znn7u6 preparation: 29,281,841,152 free bytes,
+46,012,602,712 required and 16,730,761,560 missing. Device is already 160 GiB,
+partition 170,723,884,544 bytes and ext4 165,295,407,104 bytes. This is not the
+old 64/80-GiB volume. Requested 184 GiB adds 24 GiB against the measured 15.58
+GiB deficit, approximately 8.42 GiB extra before ext4 overhead, in addition to
+the existing plan reserve. Conditional gp3 estimate at USD 0.08/GiB-month:
+USD 1.92/month extra; confirm current AWS rate/type, excluding IOPS and taxes.
+
+Console action must verify vol-03fa30ff2fc37a28e is attached to
+instance i-04690a17692088df9 in us-east-2 before modification. No EBS API mutation
+is performed by the continuation. After console modification is optimizing or
+completed, expand-prepared-transport.mjs checks IMDS instance/region, NVMe volume
+serial, exact prepared receipt, root ext4 mount and hashes of the four lifecycle
+source files from 7b8bf4b. It requires visible capacity >=184 GiB, uses growpart
+with explicit NOCHANGE handling and resize2fs, then invokes the guarded receipt
+resume. A failed check never starts a worker. No backups or inbox records are
+removed to make space. Existing completed finalization is reused.
+
+The final JSONL separates image/source verification, activation, old-cohort
+retirement, pending-row decrease, and complete feed validation. InPlay types
+31/32 alone never count as real market recovery. Five additional identity,
+capacity and source-hash tests passed, plus the four storage regressions.
+Neither tests nor preparation imply that AWS recovery has already completed.
