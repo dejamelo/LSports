@@ -498,6 +498,17 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     emit(operation='cutover.aws',stage='partitioned_upgrade.offline_disk',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
     require(short==0,'OFFLINE_REHEARSAL_DISK_EXPANSION_REQUIRED_NO_START')
 
+def storage_before_stop(backup,container):
+    mounts=[m for m in container.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed']
+    require(len(mounts)==1,'PRE_STOP_FEED_MOUNT_UNVERIFIED')
+    directory=Path(mounts[0]['Source'])
+    files=[p for p in directory.rglob('*') if p.is_file() and not p.is_symlink() and (p.name.startswith('trade-feed.json') or p.name=='response.private.json')]
+    total=sum(p.stat().st_size for p in files)
+    # Backup + working copy + conservative 8x projection output + activation margin.
+    required=total*10+4*1024**3;free=shutil.disk_usage(backup).free
+    emit(operation='cutover.aws',stage='partitioned_upgrade.pre_stop_disk',status='verified' if free>=required else 'blocked',freeDiskBytes=free,requiredFreeBytes=required,missingBytes=max(0,required-free),inputBytes=total,budgetBasis='conservative pre-stop upper reserve; stopped-state plan remains authoritative',signalsSent=0,workerStarted=False,posnetChanged=False)
+    require(free>=required,'PRE_STOP_DISK_HEADROOM_INSUFFICIENT_NO_STOP')
+
 def pre_exit_disk_plan(backup,total,hashes,proof,previous_original):
     # Working SQLite may have changed after replay. Only byte-identical, unreferenced
     # copies are disposable; retained outputs, logs and pristine copies are evidence.
@@ -1118,6 +1129,8 @@ def upgrade_partitioned_unlocked(request):
             if request.get('snapshotMemoryRepair') and not worker_states[0]['running']:
                 require(old_container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'OOM_RESTART_POLICY_UNSAFE');progress['oomContainerId']=worker_states[0]['id'];save(progress)
             require(old_container['Image']==progress['baseImageId'] and snapshot_memory_bytes(old_container['HostConfig']['Memory'])==partition_memory(progress),'OLD_WORKER_IDENTITY_CHANGED_BEFORE_STOP')
+            if worker_states[0]['running'] and request.get('snapshotMemoryRepair'):
+                storage_before_stop(backup,old_container)
             if request.get('fullRecovery') and not progress.get('supplierStoppedBeforeConsumer'):
                 stage='partitioned_upgrade.distribution_stop'
                 info=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0]

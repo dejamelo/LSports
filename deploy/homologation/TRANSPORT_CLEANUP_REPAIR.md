@@ -59,3 +59,31 @@ patch, then observes actual durable retirement. Full validation stops with an
 explicit not-verified reason if five minutes show no durable PreMatch retirement;
 it never treats ACKs or processed counters as completed recovery. The final
 report separates workflow exit from confirmed image activation.
+
+## Storage-blocked activation follow-up
+
+A later workflow stopped before activation because the full preserved-data disk
+plan runs after guarded old-container finalization. This ordering could leave
+an intentionally finalized worker stopped if rehearsal storage was insufficient.
+The updater now adds a conservative pre-stop capacity gate before provider Stop
+or SIGTERM; the stopped-state plan remains mandatory and authoritative.
+
+`resume-transport-storage.mjs` binds the local preparation reference to exactly
+one protected remote receipt, verifies prepared image label/digest and original
+container identity, reads the latest disk plan within THAT preparation, and
+prints current free/required/missing bytes, findmnt and lsblk capacities. It
+never chooses a backup by recency, deletes data, expands disks or resends stop
+signals. If space suffices it resumes the existing guarded preparation. If not,
+it exits with those exact measurements, leaving all originals intact.
+
+A stopped worker used to make the retirement observer raise
+WORKER_NOT_RUNNING_NO_OBSERVATION, surfaced by the caller as generic
+READ_ONLY_SSH_INSPECTION_FAILED. It now emits an explicit skipped observation;
+actual structured inspection errors propagate with their stage. Neither code
+137 nor the skipped observation is evidence of OOM. The receipt's verified
+finalization signal, matching container identity and recovery proof must establish
+whether termination was the guarded SIGKILL after recovery validation.
+
+Additional regressions: four storage/stopped-worker cases, seven offline disk
+cases, 22 upgrade cases (one skipped). No AWS capacity or activation result is
+claimed by these local tests.
