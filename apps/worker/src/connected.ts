@@ -47,13 +47,26 @@ export async function publicationTurn<T>(state:TradeState,persist:()=>Promise<T>
 // Only immutable capture holds the state gate. File I/O uses frozen row references.
 export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable:TradeState)=>Promise<T>){
  await nextTurn();const captured=await state.exclusive(()=>state.capturePublication());
- try{return await persist(captured.state);}finally{captured.release();}
+ const began=Date.now(),timer=setInterval(()=>{const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'waiting',...state.publicationStatus(),elapsedMs:Date.now()-began,heapUsedBytes:m.heapUsed,rssBytes:m.rss}));},10000);timer.unref();
+ try{return await persist(captured.state);}finally{clearInterval(timer);captured.release();}
 }
 // Preserve the same processing/FIFO barriers; expose which one is actually awaited.
 export async function snapshotApplyTurn<T>(processing:Promise<unknown>,state:Pick<TradeState,'exclusive'|'publicationMutation'>,apply:()=>T|Promise<T>,observe:(phase:string,elapsedMs:number)=>void,intervalMs=10000):Promise<T>{
  let phase='processing_queue',completed=false;const began=performance.now();const report=(stage:string)=>{try{observe(stage,Math.ceil(performance.now()-began));}catch{/* Instrumentation must not replace an application failure. */}};const timer=setInterval(()=>report(phase),intervalMs);timer.unref();
  try{await processing;phase='state_exclusive';const result=await state.publicationMutation(()=>{phase='apply';return apply();},waiting=>{phase=waiting?'publication_heap_pressure':'state_exclusive';});completed=true;return result;}
  finally{clearInterval(timer);report(completed?'completed':'failed');}
+}
+// Decode only after the copy-on-write reserve is available, inside the same
+// synchronous turn as apply. Return metadata, never the decoded event graph:
+// neither the reserve wait nor persistence may retain that second full graph.
+export function decodeApplyTurn(state:TradeState,lane:import('@lsports/contracts').Lane,msg:ConsumeMessage,seen:Set<string>){
+ return state.publicationMutation(()=>{
+  const decoded=decodeMessage(msg.content,msg.properties.headers||{},msg.properties,msg.fields?.redelivered);
+  const received=Number((msg.fields as unknown as {inboxReceived?:number})?.inboxReceived)||Date.now();
+  state.recordMessage(lane,decoded.type,decoded.events.length,seen.has(decoded.guid),decoded.keepAliveActiveEvents,Date.now(),received);
+  if(!decoded.interrupted&&!seen.has(decoded.guid))state.apply(lane,decoded.events,decoded.at,{source:'amqp',receivedAt:received});
+  const {events,...metadata}=decoded;return {...metadata,eventCount:events.length};
+ });
 }
 export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,now=Date.now()){
  const applying=Object.values(state.connections).some(c=>c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&Date.parse(c.lastSnapshotErrorAt||'')<Date.parse(c.fullSnapshot.startedAt||'') || c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&!c.lastSnapshotErrorAt);
@@ -98,16 +111,16 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0,lastCompletedPublication=0,loopWindowStart=Date.now();
     const save = coalescedPersistence(()=>publicationCaptureTurn(state,stable=>operation("file.persist", "local", async () => {
-        const memoryStage=(stage:string)=>{const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
+        const memoryStage=(stage:string)=>{state.setPublicationPhase(stage);const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
         memoryStage('capture');
         const started=performance.now();const feed = stable.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
         tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
         const {regular,...saved}=streamCheckpoint(stable);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
-        memoryStage('regular_checkpoint');await persistRegularCheckpoint(path,stable);
+        memoryStage('regular_checkpoint');await persistRegularCheckpoint(path,stable,phase=>state.setPublicationPhase(phase));
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
         const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
-        memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks);
+        memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
         lastCompletedPublication=Date.now();
         const metric={writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
@@ -228,7 +241,7 @@ export async function session(
   ingressPath?: string,
 ) {
   const lane = pkg.lane;
-  let acknowledgedMessages=0,lastReceived=Date.now(),processedSourceFloor:number|undefined;
+  let acknowledgedMessages=0,lastReceived=Date.now(),processedSourceFloor:number|undefined,lastIngressLog=0;
   const durable=!!ingressPath;
   state.set(lane, {
     consumerProgress:{acknowledgedMessages:0},fullSnapshot:undefined,
@@ -254,6 +267,7 @@ export async function session(
     acknowledgedMessages=metrics.acknowledged;
     lastReceived=Math.max(lastReceived,Date.parse(metrics.lastReceiveAt||"")||0);
     state.set(lane,{ingressProgress:metrics,consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages,lastAckAt:metrics.lastAckAt||undefined}});
+    if(Date.now()-lastIngressLog>=10000){lastIngressLog=Date.now();const {received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC}=metrics;console.info(JSON.stringify({operation:'inbox.processing_progress',lane,ingress:{received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC}}));}
   }) : await connectMq(pkg, dependencies.connect);}catch(error){
     // Distribution must not remain ON without our consumer after failed connect.
     try{await api.stopDistribution?.();}catch(stopError){console.error(JSON.stringify({lane,status:'failed',...describeFailure(stopError,'distribution.stop','http')}));}
@@ -322,21 +336,8 @@ export async function session(
       if (closed) return;
       let messageMetadata: FeedMessageMetadata | undefined;
       try {
-        const decoded = decodeMessage(
-          msg.content,
-          msg.properties.headers || {},
-          msg.properties,
-          msg.fields?.redelivered,
-        );
-        messageMetadata = decoded.metadata;
-        state.recordMessage(
-          lane,
-          decoded.type,
-          decoded.events.length,
-          seen.has(decoded.guid),
-          decoded.keepAliveActiveEvents,
-          Date.now(),Number((msg.fields as unknown as {inboxReceived?:number})?.inboxReceived)||Date.now(),
-        );
+        const decoded=await operation('feed.apply','local',()=>decodeApplyTurn(state,lane,msg,seen));
+        messageMetadata=decoded.metadata;
         if (decoded.interrupted) {
           const diagnostic = {
             operation: "feed.decode" as const,
@@ -364,12 +365,7 @@ export async function session(
           fail(new OperationError(diagnostic));
           return;
         }
-        if (!seen.has(decoded.guid)) {
-          await operation("feed.apply", "local", async () =>
-            state.publicationMutation(()=>state.apply(lane, decoded.events, decoded.at,{source:"amqp",receivedAt:Number((msg.fields as unknown as {inboxReceived?:number}|undefined)?.inboxReceived)||Date.now()})),
-          );
-        }
-        if(decoded.events.length>0&&decoded.metadata.timestampSource!=='received_control')processedSourceFloor=Math.min(processedSourceFloor??Infinity,decoded.at);
+        if(decoded.eventCount>0&&decoded.metadata.timestampSource!=='received_control')processedSourceFloor=Math.min(processedSourceFloor??Infinity,decoded.at);
         state.set(lane, {
           lastMessageAt: new Date(lastReceived).toISOString(),
         });
@@ -415,7 +411,8 @@ export async function session(
     const commitPending=()=>{
       if(backgroundCommit||closed||!pendingAcks.length)return;
       const prefix=pendingAcks.splice(0);checkpointPending=prefix.length;const metadata=pendingMetadata.get(prefix[0]);
-      backgroundCommit=save().then(()=>{if(!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
+      const requestedAt=Date.now();console.info(JSON.stringify({operation:'inbox.checkpoint',lane,status:'waiting_persistence',rows:prefix.length,atUTC:new Date().toISOString()}));
+      backgroundCommit=save().then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
     };
     let drainScheduled=false;
     const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;

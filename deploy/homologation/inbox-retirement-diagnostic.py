@@ -18,6 +18,7 @@ def sample(path,boundary=None):
         return dict(boundaryId=boundary,insertId=seq,pendingOldRows=old[0],pendingNewRows=new[0],pendingRows=old[0]+new[0],oldestReceivedMs=min([v for v in (old[1],new[1]) if v is not None],default=None))
 def main():
     info=worker();identity=info['Id']
+    if not info['State']['Running']:raise RuntimeError('WORKER_NOT_RUNNING_NO_OBSERVATION')
     env=dict(v.split('=',1) for v in info['Config'].get('Env',[]) if '=' in v)
     state=Path(env.get('LSPORTS_STATE_FILE','.runtime/trade-feed.json'))
     if not state.is_absolute():state=Path(info['Config'].get('WorkingDir') or '/app')/state

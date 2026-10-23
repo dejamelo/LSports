@@ -109,22 +109,34 @@ export class TradeState {
   private publicationCaptured=new WeakSet<Row>();
   private publicationDone?:Promise<void>;
   publicationIdle(){return this.publicationDone??Promise.resolve();}
+  private publicationPhase='idle';
+  private publicationStarted=0;
+  setPublicationPhase(phase:string){this.publicationPhase=phase;}
+  publicationStatus(){return {publicationStage:this.publicationPhase,publicationElapsedMs:this.publicationStarted?Date.now()-this.publicationStarted:0};}
   async publicationMutation<T>(operation:()=>T,waiting?:(active:boolean)=>void):Promise<T>{
-    return this.exclusive(async()=>{
-      // The writer never needs this gate after capture: waiting here cannot
-      // deadlock publication. Do not build a second unbounded state graph.
-      if(this.publicationDone){const v=getHeapStatistics();if(v.heap_size_limit-v.used_heap_size<512*1024**2){waiting?.(true);console.info(JSON.stringify({operation:'state.publication_wait',stage:'heap_reserve',heapHeadroomBytes:v.heap_size_limit-v.used_heap_size,atUTC:new Date().toISOString()}));await this.publicationDone;waiting?.(false);}}
-      return operation();
-    });
+    for(;;){
+      // Inspect under the gate, but wait outside it. Recheck after every wait:
+      // another publication may have captured before this mutation gets its turn.
+      const turn=await this.exclusive(async()=>{
+        if(this.publicationDone){const v=getHeapStatistics();if(v.heap_size_limit-v.used_heap_size<512*1024**2){
+          console.info(JSON.stringify({operation:'state.publication_wait',stage:'heap_reserve',heapHeadroomBytes:v.heap_size_limit-v.used_heap_size,...this.publicationStatus(),atUTC:new Date().toISOString()}));
+          return {wait:this.publicationDone};
+        }}
+        return {value:await operation()};
+      });
+      if(!('wait' in turn))return turn.value as T;
+      waiting?.(true);try{await turn.wait;}finally{waiting?.(false);}
+    }
   }
   capturePublication(){
     if(this.publicationDone)throw Error('PUBLICATION_CAPTURE_OVERLAP');
+    this.publicationStarted=Date.now();this.publicationPhase='capture';
     const captured=Object.create(this) as TradeState;
     captured.rows={prematch:new Map(this.rows.prematch),inplay:new Map(this.rows.inplay)};
     captured.connections=structuredClone(this.connections);captured.metrics=structuredClone(this.metrics);
     for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.add(row);
     let done!:()=>void;this.publicationDone=new Promise<void>(resolve=>done=resolve);let released=false;
-    return {state:captured,release:()=>{if(released)return;released=true;for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.delete(row);this.publicationDone=undefined;done();}};
+    return {state:captured,release:()=>{if(released)return;released=true;for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.delete(row);this.publicationDone=undefined;this.publicationStarted=0;this.publicationPhase='idle';done();}};
   }
   private projectionCache=new WeakMap<Row,{context:string;event:SportEvent}>();
   restoration?:import("@lsports/contracts").EventFeed["restoration"];

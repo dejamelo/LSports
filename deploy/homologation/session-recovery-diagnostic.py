@@ -20,10 +20,10 @@ try:
   if r.get('operation') not in allowed and r.get('lane') not in ('prematch','inplay'):continue
   if not re.fullmatch(r'\d{4}-\d\d-\d\dT[0-9:.]+Z',stamp):continue
   safe={'atUTC':stamp}
-  for key in ('lane','operation','stage','status','category','reason','retryPolicy','rateLimitSource'):
+  for key in ('lane','operation','stage','status','category','reason','retryPolicy','rateLimitSource','publicationStage'):
    v=r.get(key)
    if isinstance(v,str) and re.fullmatch('[a-zA-Z0-9_.-]{1,100}',v):safe[key]=v
-  for key in ('bytes','validatedRows','appliedRows','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','waitedMs','rssBytes','heapUsedBytes','heapHeadroomBytes'):
+  for key in ('bytes','validatedRows','appliedRows','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','waitedMs','publicationElapsedMs','elapsedMs','rows','rssBytes','heapUsedBytes','heapHeadroomBytes'):
    if type(r.get(key)) in (int,float):safe[key]=r[key]
   if isinstance(r.get('ingress'),dict):safe['ingress']={k:r['ingress'][k] for k in ('received','acknowledged','processed','checkpointed','backlog','processingBacklog','oldestProcessingAgeMs','metricWindowStartUTC','metricWindowEndUTC','intakePaused') if k in r['ingress']}
   records.append(safe)

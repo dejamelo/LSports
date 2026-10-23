@@ -141,16 +141,17 @@ export async function writeJsonRecord(file:Awaited<ReturnType<typeof open>>,reco
 // One local worker writes a single atomic projection; API only reads. Never store credentials here.
 export function createPublisher(path = statePath()) {
   let tail = Promise.resolve();
-  return (feed: EventFeed, workerCheckpoint?: unknown,availabilityBlocks?:AvailabilityBlocks) => {
+  return (feed: EventFeed, workerCheckpoint?: unknown,availabilityBlocks?:AvailabilityBlocks,observe?:(phase:string)=>void) => {
     const masks=availabilityBlocks?structuredClone(availabilityBlocks):undefined;
     const body = { ...feed, ...(workerCheckpoint === undefined ? {} : { workerCheckpoint }) };
     const operation = tail.then(async () => {
       await mkdir(dirname(path), { recursive: true });
       const temp = `${path}.${process.pid}.tmp`;
-      const file=await open(temp,'w',0o600);
-      try{await writeJsonObject(file,body,masks);await file.sync();}finally{await file.close();}
-      await rename(temp,path);
-      const directory=await open(dirname(path),'r');try{await directory.sync();}finally{await directory.close();}
+      observe?.('projection.open');const file=await open(temp,'w',0o600);
+      const writer={writeFile:async(text:string)=>{observe?.('projection.write');await file.writeFile(text);observe?.('projection.encode');}} as typeof file;
+      try{await writeJsonObject(writer,body,masks);observe?.('projection.fsync');await file.sync();}finally{await file.close();}
+      observe?.('projection.rename');await rename(temp,path);
+      const directory=await open(dirname(path),'r');try{observe?.('projection.directory_fsync');await directory.sync();}finally{await directory.close();}
     });
     tail = operation.catch(() => {});
     return operation;

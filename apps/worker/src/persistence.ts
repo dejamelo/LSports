@@ -46,22 +46,23 @@ export function streamCheckpoint(state:TradeState){
 
 // Stable private sidecar may be ahead of the public feed after a crash; replay remains
 // idempotent and restored prices remain blocked. ACK is sent only after BOTH writes.
-export async function persistRegularCheckpoint(path:string,regular:ReturnType<typeof checkpoint>['regular']|TradeState){
+export async function persistRegularCheckpoint(path:string,regular:ReturnType<typeof checkpoint>['regular']|TradeState,observe?:(phase:string)=>void){
   await mkdir(dirname(path),{recursive:true});const target=path+'.regular-checkpoint.json',temp=target+'.'+process.pid+'.tmp';
-  const file=await open(temp,'w',0o600);try{
+  observe?.('regular_checkpoint.open');const file=await open(temp,'w',0o600);
+  const writer={writeFile:async(text:string)=>{observe?.('regular_checkpoint.write');await file.writeFile(text);observe?.('regular_checkpoint.encode');}} as typeof file;try{
     if(regular instanceof TradeState){
-      await file.writeFile('{"version":1,"regular":[');let first=true;
+      await writer.writeFile('{"version":1,"regular":[');let first=true;
       // Freeze only row identities/references, not their market/bet maps. A live
       // Map iterator would chase fixtures arriving during this write indefinitely.
       const captured=(['prematch','inplay'] as const).flatMap(lane=>[...regular.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({lane,key,row})));
       for(const {lane,key,row} of captured){
-        if(!first)await file.writeFile(',');first=false;
-        await writeJsonRecord(file,streamedRow(lane,key,row));
+        if(!first)await writer.writeFile(',');first=false;
+        await writeJsonRecord(writer,streamedRow(lane,key,row));
       }
-      await file.writeFile(']}');
-    }else await writeJsonObject(file,{version:1,regular});
-    await file.sync();}finally{await file.close();}
-  await rename(temp,target);const directory=await open(dirname(path),'r');try{await directory.sync();}finally{await directory.close();}
+      await writer.writeFile(']}');
+    }else await writeJsonObject(writer,{version:1,regular});
+    observe?.('regular_checkpoint.fsync');await file.sync();}finally{await file.close();}
+  observe?.('regular_checkpoint.rename');await rename(temp,target);const directory=await open(dirname(path),'r');try{observe?.('regular_checkpoint.directory_fsync');await directory.sync();}finally{await directory.close();}
 }
 
 // Read directly: API freshness protection must not prevent recovery after downtime.
