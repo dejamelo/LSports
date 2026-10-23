@@ -47,3 +47,16 @@ exact-wrapper discovery; advancing file inode; private rename not overstated;
 unchanged file not stall proof; source hashes pinned to commit; matching-FD kernel
 write/fsync decoding without addresses. These validate the collector, NOT AWS
 checkpoint progress. No current AWS integration success is claimed.
+
+Entrypoint correction after 745d6b1:
+The former lexical argv/module path comparison reproduced exit=0 and empty
+stdout/stderr when invoked through a directory alias. This corresponds to macOS
+/var vs /private/var. Both paths now use realpath before comparison. The CLI emits
+collector_start and reportDirectory before discovery, saves start/error/exit JSON
+privately even when discovery fails, and always prints collector_exit after a
+started run. A report-directory failure is explicitly reported without claiming
+files were saved. Imports remain inert.
+Five additional CLI regressions passed (12 analyzer tests total): canonical and
+aliased invocation, report-directory creation failure, import-only behavior, and
+complete report analysis via alias with an isolated fake SSH fixture. No AWS
+worker or deployment is changed by this fix.

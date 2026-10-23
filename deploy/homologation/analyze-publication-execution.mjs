@@ -117,7 +117,9 @@ export async function findExecution(roots){
  if(candidates[1]?.startedMs===candidates[0].startedMs)throw Error('EXECUTION_REPORT_IDENTITY_AMBIGUOUS');
  return {...candidates[0],matchingCompletedReports:candidates.length};
 }
-export async function main(){
+export async function main({reportDirectory}={}){
+ const directory=reportDirectory||join(homedir(),'Library','Application Support','ADL','Diagnostics','CheckpointWrite-'+Date.now()+'-'+process.pid);
+ await mkdir(directory,{recursive:true,mode:0o700});
  const selected=await findExecution([tmpdir(),process.env.TMPDIR||'/tmp','/tmp']);
  const originals=[{file:selected.file,rows:selected.rows}];
  let terminalRaw='';
@@ -137,7 +139,6 @@ export async function main(){
  const identity=rows.findLast(r=>r.stage==='worker_identity'&&/^[0-9a-f]{64}$/.test(r.id||''));
  const lifecycle=rows.filter(r=>r.stage==='recent_lifecycle').map(r=>r.record).filter(Boolean);
  const phases=lifecycle.filter(r=>['file.persist','state.publication_wait','inbox.checkpoint','worker.start','distribution.start','distribution.stop'].includes(r.operation)).map(safePublication);
- const directory=join(homedir(),'Library','Application Support','ADL','Diagnostics','CheckpointWrite-'+Date.now());await mkdir(directory,{recursive:true,mode:0o700});
  // Preserve all existing structured evidence privately, without printing it.
  await writeFile(join(directory,'existing-execution-evidence.json'),JSON.stringify(originals),{mode:0o600,flag:'wx'});
  if(terminalRaw)await writeFile(join(directory,'execution-terminal.private.log'),terminalRaw,{mode:0o600,flag:'wx'});
@@ -166,6 +167,36 @@ export async function main(){
  console.log(JSON.stringify({stage:'checkpoint_analysis_complete',reportDirectory:directory,readOnly:true,providerRequests:0,workerRestarted:false,signalsToWorker:0,exitCode:code,integrationVerified:false}));
  process.exitCode=code||timedOut||tooLarge?2:0;
 }
-if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- try{await main();}catch(error){console.log(JSON.stringify({stage:'existing_execution_analysis',status:'blocked',reason:/^[A-Z_0-9]+$/.test(error.message)?error.message:'EVIDENCE_ANALYSIS_FAILED',errorType:error.name,workerMutationRequested:false}));process.exitCode=2;}
+// macOS /var -> /private/var (and directory/file symlinks generally) must
+// compare filesystem identity, not lexical path strings. Imports stay inert.
+export async function isCollectorEntrypoint(argvPath,moduleUrl){
+ if(!argvPath)return false;
+ const [invoked,loaded]=await Promise.all([realpath(resolve(argvPath)),realpath(fileURLToPath(moduleUrl))]);
+ return invoked===loaded;
+}
+export async function runCollector(){
+ const reportDirectory=join(homedir(),'Library','Application Support','ADL','Diagnostics','CheckpointWrite-'+Date.now()+'-'+process.pid);
+ const start={stage:'collector_start',status:'running',reportDirectory,readOnly:true,workerMutationRequested:false};
+ // First output is before discovery, SSH, or any report-directory I/O.
+ console.log(JSON.stringify(start));
+ let reportAvailable=false;
+ try{
+  await mkdir(reportDirectory,{recursive:true,mode:0o700});reportAvailable=true;
+  await writeFile(join(reportDirectory,'collector-start.json'),JSON.stringify(start,null,2),{mode:0o600,flag:'wx'});
+  await main({reportDirectory});
+ }catch(error){
+  process.exitCode=2;
+  const result={stage:'existing_execution_analysis',status:'blocked',reason:/^[A-Z_0-9]+$/.test(error.message||'')?error.message:'EVIDENCE_ANALYSIS_FAILED',errorType:error.name,systemCode:/^[A-Z_0-9]+$/.test(error.code||'')?error.code:null,reportDirectory,reportAvailable,errorReportSaved:false,workerMutationRequested:false};
+  if(reportAvailable)try{await writeFile(join(reportDirectory,'collector-error.json'),JSON.stringify({...result,errorReportSaved:true},null,2),{mode:0o600,flag:'wx'});result.errorReportSaved=true;}catch{/* Console error still describes the failure; never print raw exception text. */}
+  console.log(JSON.stringify(result));
+ }finally{
+  const result={stage:'collector_exit',status:process.exitCode?'blocked':'complete',exitCode:process.exitCode||0,reportDirectory,reportAvailable,exitReportSaved:false,workerMutationRequested:false};
+  if(reportAvailable)try{await writeFile(join(reportDirectory,'collector-exit.json'),JSON.stringify({...result,exitReportSaved:true},null,2),{mode:0o600,flag:'wx'});result.exitReportSaved=true;}catch(error){process.exitCode=2;result.status='blocked';result.exitCode=2;result.reason='COLLECTOR_EXIT_REPORT_WRITE_FAILED';result.systemCode=/^[A-Z_0-9]+$/.test(error.code||'')?error.code:null;}
+  console.log(JSON.stringify(result));
+ }
+}
+try{
+ if(await isCollectorEntrypoint(process.argv[1],import.meta.url))await runCollector();
+}catch(error){
+ console.log(JSON.stringify({stage:'collector_entrypoint',status:'blocked',reason:'COLLECTOR_ENTRYPOINT_RESOLUTION_FAILED',errorType:error.name,systemCode:/^[A-Z_0-9]+$/.test(error.code||'')?error.code:null,workerMutationRequested:false}));process.exitCode=2;
 }
