@@ -254,24 +254,27 @@ export async function session(
   await save();
   const api = dependencies.clientFactory(pkg, config);
   if(signal.aborted)return;
-  // LSports #217525: OFF distribution rejects AMQP authentication (403).
-  // provider.startDistribution owns the ONE 2000ms SDK-contract propagation wait
-  // and verifies Body.IsDistributionOn before we open any AMQP connection.
-  let distributionReady=false;
-  try{await api.startDistribution();distributionReady=true;}finally{
-    const observations=api.distributionObservations?.();
-    // Observation metadata is persisted by the next normal/final save. Do not
-    // leave distribution filling its broker queue while a full publication runs.
-    if(observations){state.set(lane,{distributionObservations:observations});if(!distributionReady)await save();}
+  // Remote activation gates AMQP, never local SQLite replay. One actor owns
+  // both throughout; no second reader/consumer is created during HTTP retries.
+  const startDistribution=async()=>{
+    let ready=false;
+    try{await api.startDistribution();ready=true;}finally{
+      const observations=api.distributionObservations?.();
+      if(observations){state.set(lane,{distributionObservations:observations});if(!ready&&!durable)await save();}
+    }
+  };
+  if(!durable){
+    await startDistribution();
+    if(signal.aborted){await api.stopDistribution?.();state.set(lane,{phase:'stopped'});await save();return;}
   }
-  if(signal.aborted){await api.stopDistribution?.();state.set(lane,{phase:"stopped"});await save();return;}
+  if(signal.aborted)return;
   let connection:Awaited<ReturnType<typeof connectMq>>;
   try{connection=ingressPath ? await (dependencies.durableConnect ?? connectDurableMq)(pkg,ingressPath,metrics=>{
     ingressActorId=metrics.ingressActorId;acknowledgedMessages=metrics.acknowledged;
     lastReceived=Math.max(lastReceived,Date.parse(metrics.lastReceiveAt||"")||0);
     state.set(lane,{ingressProgress:metrics,consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages,lastAckAt:metrics.lastAckAt||undefined}});
     if(Date.now()-lastIngressLog>=10000){lastIngressLog=Date.now();const {received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC,ingressActorId}=metrics;console.info(JSON.stringify({operation:'inbox.processing_progress',lane,sessionId,ingressActorId,ingress:{received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC}}));}
-  },{sessionId}) : await connectMq(pkg, dependencies.connect);}catch(error){
+  },{sessionId,deferTransport:true}) : await connectMq(pkg, dependencies.connect);}catch(error){
     // Distribution must not remain ON without our consumer after failed connect.
     try{await api.stopDistribution?.();}catch(stopError){console.error(JSON.stringify({lane,status:'failed',...describeFailure(stopError,'distribution.stop','http')}));}
     throw error;
@@ -452,6 +455,36 @@ export async function session(
         { noAck: false, exclusive: true },
       ),
     );
+    // consume() on the durable facade starts bounded LOCAL replay only.
+    // Do not publish a broker registration until transport attachment succeeds.
+    if(durable){
+      state.set(lane,{consumerProgress:{acknowledgedMessages:0,active:false}});
+      const deferred=connection as typeof connection & {activateTransport?:()=>Promise<void>};
+      if(!deferred.activateTransport)throw Error('DEFERRED_TRANSPORT_NOT_SUPPORTED');
+      while(!closed&&!signal.aborted){
+        const began=performance.now(),lag=monitorEventLoopDelay({resolution:20});lag.enable();let retryAfterMs:number|undefined;
+        try{
+          await startDistribution();
+          if(closed||signal.aborted)break;
+          await deferred.activateTransport();
+          break;
+        }catch(error){
+          const diagnostic=describeFailure(error,'distribution.status','http');
+          // Transport attach failure is terminal for this actor. Join it before
+          // next session; only an HTTP gate failure can retry on the same inbox.
+          if((error as {ingressStage?:string})?.ingressStage)throw error;
+          state.set(lane,{phase:'recovering',diagnostic,message:'Inbox en recuperación local; distribución HTTP pendiente. Cuotas bloqueadas.'});
+          console.warn(JSON.stringify({lane,sessionId,ingressActorId,status:'deferred',...diagnostic}));
+          retryAfterMs=Math.max(30000,diagnostic.retryAfterMs??0);
+        }finally{
+          lag.disable();
+          console.info(JSON.stringify({operation:'distribution.recovery_gate',lane,sessionId,ingressActorId,elapsedMs:Math.ceil(performance.now()-began),workerEventLoopMaxMs:Math.ceil(lag.max/1e6),windowIncludesRetryDelay:false,localReplayIndependent:true,atUTC:new Date().toISOString()}));
+        }
+        if(retryAfterMs!==undefined&&!closed&&!signal.aborted)await delay(retryAfterMs,undefined,{signal}).catch(()=>{});
+      }
+      if(closed)throw failure;
+      if(signal.aborted)return;
+    }
     state.set(lane,{consumerProgress:{...state.connections[lane].consumerProgress!,registeredAt:new Date().toISOString(),active:true}});
     await save();
     // Exclusive consumer is live before snapshot/inventory and drains continuously.

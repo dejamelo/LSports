@@ -51,7 +51,7 @@ test('distribution propagation is followed by AMQP connection before any slow pu
  const gate=new Promise<void>(r=>release=r);
  const save=async()=>{if(++calls===2){blocked=true;await gate;}};
  const api={async startDistribution(){started=true;},async stopDistribution(){},distributionObservations(){return [{stage:'after_propagation',bodyIsDistributionOn:true}];},async snapshot(){return []},async catalog(){return []}};
- const task=session(pkg,{packages:[pkg],staleMs:3600000,recoveryMs:300000} as any,state,save,abort.signal,{connect:null as any,clientFactory:()=>api as any,durableConnect:async(p,db,onMetrics)=>{assert.equal(started,true);return actor=await connectDurableMq(p,db,onMetrics,{offline:true});}},path);void task.catch(()=>{});
+ const task=session(pkg,{packages:[pkg],staleMs:3600000,recoveryMs:300000} as any,state,save,abort.signal,{connect:null as any,clientFactory:()=>api as any,durableConnect:async(p,db,onMetrics)=>{actor=await connectDurableMq(p,db,onMetrics,{offline:true,deferTransport:true});const activate=actor.activateTransport.bind(actor);actor.activateTransport=async()=>{assert.equal(started,true);return activate();};return actor;}},path);void task.catch(()=>{});
  try{await until(()=>blocked);assert.ok(actor,'a slow observation publication cannot delay opening the consumer');assert.ok(state.connections.prematch.consumerProgress?.registeredAt);}
  finally{release();abort.abort();await task.catch(()=>{});await actor?.close();await rm(dir,{recursive:true,force:true});}
 });

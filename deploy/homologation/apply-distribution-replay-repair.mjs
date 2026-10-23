@@ -1,0 +1,26 @@
+// Verify the exact installed SDK path before the existing guarded worker update.
+import {spawn,spawnSync} from 'node:child_process';
+import {readdirSync,writeFileSync,appendFileSync} from 'node:fs';
+import {homedir} from 'node:os';import {dirname,join} from 'node:path';import {fileURLToPath} from 'node:url';
+const here=dirname(fileURLToPath(import.meta.url));
+const report=join(here,'distribution-replay-repair-'+Date.now()+'.jsonl');writeFileSync(report,'',{mode:0o600,flag:'wx'});
+const emit=row=>{console.log(JSON.stringify(row));appendFileSync(report,JSON.stringify(row)+'\n');};
+let exitCode=2;
+try{
+ const keys=readdirSync(join(homedir(),'Downloads')).filter(n=>/Lottery.*Key\.pem$/.test(n));if(keys.length!==1)throw Error('SSH_KEY_NOT_UNIQUE');
+ emit({stage:'installed_sdk_identity',status:'checking',report,workerMutationRequested:false});
+ const source="import json,subprocess\nexpected={'api/base-http-client/base-http-client.js': '9b150741dbca3d28b0dcd5eefbc0a75ce4d731dec74abf0f85d069e9d7012c5f', 'api/base-http-client/services/axios.service.js': '96b011f54847cdcc7354b16de4e8e987a63c7046dd797bb820d88523d913600a', 'api/customers-api/services/distribution.service.js': 'f367f8ac40cb7c990076f33b91e7743dc5c14dfa1308951f3ebb381586b9e704', 'utilities/retry-util.js': 'faad209b560798ac8148fb1d974b31e6b8be083b79c171c576b09e09fa71964a'}\ntry:\n c=json.loads(subprocess.run(['docker','inspect','adl-homologation-worker-1'],capture_output=True,text=True,timeout=10,check=True).stdout)[0]\n labels=c['Config'].get('Labels') or {}\n if labels.get('com.docker.compose.project')!='adl-homologation' or labels.get('com.docker.compose.service')!='worker' or not c['State']['Running']:raise RuntimeError('WORKER_IDENTITY_OR_RUNNING_UNVERIFIED')\n js=\"const fs=require('node:fs'),p=require('node:path'),crypto=require('node:crypto');const base=p.dirname(require.resolve('trade360-nodejs-sdk'));const files=\"+json.dumps(list(expected))+\";console.log(JSON.stringify({files:Object.fromEntries(files.map(f=>[f,crypto.createHash('sha256').update(fs.readFileSync(p.join(base,f))).digest('hex')])),sdkVersion:JSON.parse(fs.readFileSync(p.join(base,'../../package.json'),'utf8')).version}));\"\n found=json.loads(subprocess.run(['docker','exec',c['Id'],'node','-e',js],capture_output=True,text=True,timeout=15,check=True).stdout)\n matches=found['files']==expected\n print(json.dumps({'stage':'installed_sdk_identity','status':'verified' if matches else 'blocked','containerId':c['Id'],'imageId':c['Image'],'sdkVersion':found.get('sdkVersion'),'files':[{'file':k,'expectedSha256':v,'foundSha256':found['files'].get(k),'matches':found['files'].get(k)==v} for k,v in expected.items()],'hiddenSdkRetriesInVerifiedStatusPath':False if matches else None,'workerMutationRequested':False}),flush=True)\n raise SystemExit(0 if matches else 2)\nexcept Exception as e:\n print(json.dumps({'stage':'installed_sdk_identity','status':'blocked','reason':str(e) if isinstance(e,RuntimeError) else 'BOUNDED_SOURCE_INSPECTION_FAILED','exceptionType':type(e).__name__}),flush=True);raise SystemExit(2)\n";
+ const r=spawnSync('ssh',['-i',join(homedir(),'Downloads',keys[0]),'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2','ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com','sudo -n python3 -'],{input:source,encoding:'utf8',timeout:40000,maxBuffer:65536});
+ let verified=false;for(const line of (r.stdout||'').split('\n'))try{const row=JSON.parse(line);emit(row);verified ||= row.stage==='installed_sdk_identity'&&row.status==='verified';}catch{}
+ if(r.status!==0||!verified){emit({stage:'installed_sdk_identity',status:'blocked',reason:'INSTALLED_SDK_IDENTITY_NOT_VERIFIED_NO_WORKER_CHANGE',exitCode:r.status,transportErrorCode:r.error?.code,stderrPresent:!!r.stderr});}
+ else{
+  emit({stage:'distribution_replay_patch',status:'starting_guarded_worker_update',report,note:'Local SQLite replay precedes remote distribution gate; AMQP remains gated. Backups, source identity, real-copy proof and retirement validation remain mandatory.'});
+  const child=spawn(process.execPath,[join(here,'apply-transport-cleanup-repair.mjs')],{stdio:['inherit','pipe','pipe']});
+  const privateLog=report.replace('.jsonl','.private.log');writeFileSync(privateLog,'',{mode:0o600,flag:'wx'});
+  child.stdout.on('data',chunk=>{process.stdout.write(chunk);appendFileSync(report,chunk);});
+  child.stderr.on('data',chunk=>{appendFileSync(privateLog,chunk);});
+  exitCode=await new Promise(resolve=>{child.once('error',()=>resolve(2));child.once('close',code=>resolve(code??2));});
+ }
+}catch(e){emit({stage:'distribution_replay_patch',status:'blocked',reason:e.message==='SSH_KEY_NOT_UNIQUE'?e.message:'LOCAL_EXECUTOR_FAILED',errorCode:e.code});}
+emit({stage:'distribution_replay_result',workflowExitCode:exitCode,integrationVerified:false,report,note:'Only full-feed validation can establish recovery; initial activation, local tests or raw ACKs are insufficient. InPlay market delivery remains separate.'});
+process.exitCode=exitCode;

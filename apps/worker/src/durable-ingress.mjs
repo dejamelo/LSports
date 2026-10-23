@@ -121,10 +121,26 @@ if(!isMainThread){
   if(!connection||transportEnded)return;
   return new Promise(resolve=>{let done=false;const finish=()=>{if(done)return;done=true;connection.removeListener('close',finish);resolve();};connection.once('close',finish);Promise.resolve().then(()=>connection.close()).then(finish,finish);});
  });
- let timer,loadTimer;
+ let timer,loadTimer,attaching;
+ const attachTransport=()=>attaching??=(async()=>{
+  if(closed||quiesced)throw Error('INGRESS_CLOSING');
+  if(workerData.offline)return;
+  if(connection&&!transportEnded)return;
+  setStage('amqp.connect');const amqp=await import('amqplib');const p=workerData.pkg;
+  connection=await amqp.connect({protocol:p.tls?'amqps':'amqp',hostname:p.hostname,port:p.port,username:p.mqUsername??p.username,password:p.mqPassword??p.password,vhost:p.vhost,heartbeat:30},{timeout:15000,...(p.tls?{servername:p.hostname}:{})});
+  connection.on('error',fail);connection.on('close',()=>{transportEnded=true;if(!closed&&!quiesced)send({event:'transport_closed'});});
+  // An abort during the opening handshake must not leave a live socket/consumer.
+  if(closed||quiesced){await closeTransport();throw Error('INGRESS_CLOSING');}
+  setStage('amqp.channel');channel=await connection.createChannel();channel.on('error',fail);channel.on('close',()=>{channelEnded=true;if(!closed&&!quiesced)send({event:'transport_closed'});});setStage('amqp.prefetch');await channel.prefetch(100);
+  setStage('amqp.consume');await controlConsumer();
+ })();
  try{
   setStage('inbox.open');inbox=openInbox(workerData.path,workerData.maxBytes);send({event:'opened',safeSeconds:inbox.safeSeconds()});
   parentPort.on('message',async m=>{try{
+   if(m.action==='activate_transport'){
+    try{await attachTransport();send({event:'transport_ready'});}
+    catch(e){send({event:'transport_failed',details:ingressFailureDetails(e,failureStage)});}
+   }
    if(m.action==='quiesce'){quiesced=true;callback=false;clearTimeout(pumpTimer);clearInterval(loadTimer);flush();void controlConsumer();await closeTransport();}
    if(m.action==='consume'){callback=true;pump();}
    if(m.action==='stage'){
@@ -148,13 +164,7 @@ if(!isMainThread){
    if(m.action==='offline'&&workerData.offline){for(const row of m.messages)receive({...row,content:Buffer.from(row.content)});flush();report();}
    if(m.action==='close'){closed=true;clearInterval(timer);clearInterval(loadTimer);clearTimeout(pumpTimer);flush();await closeTransport();loop.disable();inbox.close();send({event:'closed'});parentPort.close();}
   }catch(e){fail(e,m.action==='complete'?'inbox.complete':m.action==='close'?'actor.shutdown':m.action==='quiesce'?'transport.close':failureStage);}});
-  if(!workerData.offline){
-   setStage('amqp.connect');const amqp=await import('amqplib');const p=workerData.pkg;
-   connection=await amqp.connect({protocol:p.tls?'amqps':'amqp',hostname:p.hostname,port:p.port,username:p.mqUsername??p.username,password:p.mqPassword??p.password,vhost:p.vhost,heartbeat:30},{timeout:15000,...(p.tls?{servername:p.hostname}:{})});
-   connection.on('error',fail);connection.on('close',()=>{transportEnded=true;if(!closed&&!quiesced)send({event:'transport_closed'});});
-   setStage('amqp.channel');channel=await connection.createChannel();channel.on('error',fail);channel.on('close',()=>{channelEnded=true;if(!closed&&!quiesced)send({event:'transport_closed'});});setStage('amqp.prefetch');await channel.prefetch(100);
-   setStage('amqp.consume');await controlConsumer();
-  }
+  if(!workerData.offline&&!workerData.deferTransport)await attachTransport();
   setStage('actor.ready');send({event:'ready'});timer=setInterval(report,1000);
  }catch(e){fail(e);parentPort.close();}
 }
@@ -167,6 +177,7 @@ export async function connectDurableMq(pkg,path,onMetrics=()=>{},options={}){
  let worker;try{worker=new Worker(new URL('./durable-ingress.mjs',import.meta.url),{workerData:{pkg,path,...options},resourceLimits:{maxOldGenerationSizeMb:192}});}catch(error){inboxOwners.delete(ownerPath);console.error(JSON.stringify({operation:'inbox.actor_failure',lane:pkg?.lane,sessionId,ingressActorId:actorId,...ingressFailureDetails(error,'actor.spawn')}));throw error;}
  let exited=false,resolveExit;const exitPromise=new Promise(r=>resolveExit=r);let closePromise;
  const connection=new EventEmitter(),channel=new EventEmitter();let callback,closed=false,resolveClose,readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j;});
+ let activationResolve,activationReject,activationPromise;
  let loadResolve;let intakePaused=false;let recoveryAnchor;const anchors=new Map();let anchorId=0;
  const waiting=[];let completing=[],staging=[];let completeScheduled=false;
  const flushOutgoing=()=>{completeScheduled=false;if(staging.length){worker.postMessage({action:'stage',ids:staging});staging=[];}if(completing.length){worker.postMessage({action:'complete',ids:completing});completing=[];}};
@@ -179,6 +190,11 @@ export async function connectDurableMq(pkg,path,onMetrics=()=>{},options={}){
   if(m.event==='opened')recoveryAnchor=m.safeSeconds;
   if(m.event==='safe'){recoveryAnchor=m.seconds;anchors.get(m.id)?.(m.drained);anchors.delete(m.id);}
   if(m.event==='ready')readyResolve();
+  if(m.event==='transport_ready')activationResolve?.();
+  if(m.event==='transport_failed'){
+   console.error(JSON.stringify({operation:'inbox.actor_failure',lane:pkg?.lane,sessionId,ingressActorId:actorId,...m.details}));
+   activationReject?.(Object.assign(Error('INGRESS_TRANSPORT_ATTACH_FAILED'),{ingressStage:m.details?.ingressStage,code:m.details?.errorCode}));
+  }
   if(m.event==='metrics')onMetrics({...m.metrics,ingressActorId:actorId});
   if(m.event==='deliveries'){for(const row of m.rows){const msg={content:Buffer.from(row.content),properties:row.properties,fields:{...row.fields,inboxId:row.id,inboxReceived:row.received}};if(callback)callback(msg);else waiting.push(msg);}}
   if(m.event==='ack_deferred')console.warn(JSON.stringify({operation:'inbox.transport_ack',lane:pkg?.lane,sessionId,ingressActorId:actorId,status:'deferred',committedRows:m.committedRows,...m.details}));
@@ -187,8 +203,8 @@ export async function connectDurableMq(pkg,path,onMetrics=()=>{},options={}){
   if(m.event==='closed')resolveClose?.();
  });
  worker.on('error',e=>{console.error(JSON.stringify({operation:'inbox.actor_failure',lane:pkg?.lane,sessionId,ingressActorId:actorId,...ingressFailureDetails(e,'actor.thread')}));readyReject(e);if(connection.listenerCount('error'))connection.emit('error',new Error('INGRESS_THREAD_FAILED'));});
- worker.on('exit',code=>{console.info(JSON.stringify({operation:'inbox.actor_lifecycle',lane:pkg?.lane,sessionId,ingressActorId:actorId,status:'exited',exitCode:code,closeRequested:closed}));exited=true;if(inboxOwners.get(ownerPath)===owner)inboxOwners.delete(ownerPath);resolveExit();const wasClosed=closed;closed=true;for(const resolve of anchors.values())resolve(false);anchors.clear();if(!wasClosed){readyReject(Error('INGRESS_THREAD_EXITED'));connection.emit('close');}resolveClose?.();});
+ worker.on('exit',code=>{console.info(JSON.stringify({operation:'inbox.actor_lifecycle',lane:pkg?.lane,sessionId,ingressActorId:actorId,status:'exited',exitCode:code,closeRequested:closed}));exited=true;activationReject?.(Error('INGRESS_THREAD_EXITED'));if(inboxOwners.get(ownerPath)===owner)inboxOwners.delete(ownerPath);resolveExit();const wasClosed=closed;closed=true;for(const resolve of anchors.values())resolve(false);anchors.clear();if(!wasClosed){readyReject(Error('INGRESS_THREAD_EXITED'));connection.emit('close');}resolveClose?.();});
  Object.assign(channel,{async prefetch(){},async consume(_queue,cb){callback=cb;worker.postMessage({action:'consume'});for(const row of waiting.splice(0))cb(row);return{consumerTag:'durable-inbox-exclusive'};},stage(msg){staging.push(msg.fields.inboxId);scheduleOutgoing();},ack(msg){completing.push(msg.fields.inboxId);scheduleOutgoing();},nack(){/* Retain durable row. Session failure must block/recover rather than delete it. */}});
- Object.assign(connection,{intakePaused:()=>intakePaused,async crashOfflineForTest(){if(!options.offline)throw Error('OFFLINE_ONLY');await worker.terminate();},offlineLoad(config){const p=new Promise(r=>loadResolve=r);worker.postMessage({action:'offline_load',...config});return p;},recoveryAnchor:()=>recoveryAnchor,async checkpointAnchor(seconds){if(closed)return false;const id=++anchorId;const p=new Promise(r=>anchors.set(id,r));worker.postMessage({action:'safe',seconds,id});const ok=await p;return ok;},async createChannel(){return channel;},quiesce(){if(!closed&&!exited)worker.postMessage({action:'quiesce'});},close(){return closePromise??=(async()=>{if(exited)return;console.info(JSON.stringify({operation:'inbox.actor_lifecycle',lane:pkg?.lane,sessionId,ingressActorId:actorId,status:'closing',ingressStage:'actor.shutdown'}));closed=true;for(const resolve of anchors.values())resolve(false);anchors.clear();const p=new Promise(r=>resolveClose=r);flushOutgoing();worker.postMessage({action:'close'});await p;await exitPromise;})();},offline(messages){worker.postMessage({action:'offline',messages});}});
+ Object.assign(connection,{activateTransport(){return activationPromise??=(async()=>{if(closed||exited)throw Error('INGRESS_CLOSING');if(!options.deferTransport)return;const p=new Promise((r,j)=>{activationResolve=r;activationReject=j;});worker.postMessage({action:'activate_transport'});await p;})();},intakePaused:()=>intakePaused,async crashOfflineForTest(){if(!options.offline)throw Error('OFFLINE_ONLY');await worker.terminate();},offlineLoad(config){const p=new Promise(r=>loadResolve=r);worker.postMessage({action:'offline_load',...config});return p;},recoveryAnchor:()=>recoveryAnchor,async checkpointAnchor(seconds){if(closed)return false;const id=++anchorId;const p=new Promise(r=>anchors.set(id,r));worker.postMessage({action:'safe',seconds,id});const ok=await p;return ok;},async createChannel(){return channel;},quiesce(){if(!closed&&!exited)worker.postMessage({action:'quiesce'});},close(){return closePromise??=(async()=>{if(exited)return;console.info(JSON.stringify({operation:'inbox.actor_lifecycle',lane:pkg?.lane,sessionId,ingressActorId:actorId,status:'closing',ingressStage:'actor.shutdown'}));closed=true;for(const resolve of anchors.values())resolve(false);anchors.clear();const p=new Promise(r=>resolveClose=r);flushOutgoing();worker.postMessage({action:'close'});await p;await exitPromise;})();},offline(messages){worker.postMessage({action:'offline',messages});}});
  try{await ready;}catch(e){await connection.close();throw e;}return connection;
 }
