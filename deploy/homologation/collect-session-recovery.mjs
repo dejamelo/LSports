@@ -1,3 +1,4 @@
+import {startupLifecycleRows} from './startup-lifecycle-rows.mjs';
 import {spawn} from 'node:child_process';
 import {readFileSync,readdirSync,writeFileSync} from 'node:fs';
 import {homedir} from 'node:os';
@@ -27,7 +28,7 @@ clearInterval(heartbeat);clearTimeout(timeout);
 const report=join(here,(api?'api-worker-health-':'session-recovery-')+Date.now()+'.json');
 const exitCode=overflow||errorCode?2:code??2;
 writeFileSync(report,JSON.stringify({rows,exitCode,readOnly:true,signalsSent:0,providerRequests:0,collectorError:errorCode,outputLimitExceeded:overflow},null,2),{mode:0o600,flag:'wx'});
-for(const row of rows.filter(r=>r.stage==='recent_lifecycle').slice(-8))console.log(JSON.stringify(row));
+for(const row of startupLifecycleRows(rows))console.log(JSON.stringify(row));
 console.log('Relatório: '+report);
 if(exitCode!==0){const cause=[...rows].reverse().find(r=>r.status==='blocked'&&typeof r.reason==='string');const transportFailure=/permission denied/i.test(stderrText)?'SSH_AUTHENTICATION_FAILED':/timed out/i.test(stderrText)?'SSH_CONNECTION_TIMEOUT':/sudo/i.test(stderrText)?'SSH_REMOTE_SUDO_FAILED':undefined;console.log(JSON.stringify({status:'blocked',reason:errorCode||cause?.reason||transportFailure||'READ_ONLY_SSH_INSPECTION_FAILED',failedStage:cause?.stage,exitCode,rawStderrPrinted:false}));}
 process.exitCode=exitCode;
