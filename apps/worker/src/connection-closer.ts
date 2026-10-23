@@ -1,7 +1,10 @@
 // amqplib's close() promise needs CloseOk; a socket close can occur without it.
 // Actual transport closure is sufficient for cleanup, AFTER the caller drains processing.
 import type {EventEmitter} from 'node:events';
-export function connectionCloser(connection:Pick<EventEmitter,'once'|'removeListener'>&{close:()=>Promise<void>}){
+export function connectionCloser(connection:Pick<EventEmitter,'once'|'removeListener'>&{close:()=>Promise<void>},{joinLocalResources=false}:{joinLocalResources?:boolean}={}){
+ // A durable transport owns a SQLite actor as well as an AMQP socket. Socket
+ // close is not resource completion: join its explicit close even after EOF.
+ if(joinLocalResources){let closing:Promise<void>|undefined;return()=>closing??=Promise.resolve().then(()=>connection.close());}
  let transportEnded=false;let closing:Promise<void>|undefined;
  connection.once('close',()=>{transportEnded=true;});
  return ()=>closing??=Promise.resolve().then(()=>{

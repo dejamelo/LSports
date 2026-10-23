@@ -117,3 +117,10 @@ let raw='';for await(const part of process.stdin)raw+=part;if(!raw.startsWith('P
   assert.equal(JSON.parse(await readFile(join(output[0].reportDirectory,'checkpoint-write-probe.json'),'utf8')).exitCode,0);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('applied update ending full_recovery_pending reports its terminal reason instead of an empty failure',()=>{
+ const rows=[{operation:'cutover.resumable',stage:'full_recovery_validation',reason:'AUTOMATIC_SESSION_RECOVERY_PENDING'},
+ {operation:'cutover.resumable',stage:'full_recovery_pending',status:'pending',reason:'DISTRIBUTION_ACTIVE_NOT_VERIFIED'},
+ {operation:'cutover.resumable',stage:'recovery_summary',applied:true,reason:'DISTRIBUTION_ACTIVE_NOT_VERIFIED'},
+ {stage:'post_update_retirement',deploymentExitCode:2},{stage:'executor_complete',deploymentExitCode:2,observationExitCode:0}];
+ const r=deploymentFailure(rows);assert.equal(r.terminalFailure.stage,'full_recovery_pending');assert.equal(r.terminalFailure.reason,'DISTRIBUTION_ACTIVE_NOT_VERIFIED');assert.equal(r.stageVerified,true);
+});

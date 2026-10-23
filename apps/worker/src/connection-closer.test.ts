@@ -19,3 +19,9 @@ test('transport already closed never calls SDK close again',async()=>{
 test('no early completion before transport event or normal SDK completion',async()=>{
  let complete!:()=>void;let resolved=false;const connection=Object.assign(new EventEmitter(),{close:()=>new Promise<void>(r=>{complete=r;})});const close=connectionCloser(connection);const pending=close().then(()=>{resolved=true;});await new Promise(r=>setImmediate(r));assert.equal(resolved,false);complete();await pending;assert.equal(resolved,true);
 });
+
+test('durable resources are explicitly joined once even after the transport close event',async()=>{
+ let calls=0,release!:()=>void;const connection=Object.assign(new EventEmitter(),{close(){calls++;return new Promise<void>(r=>release=r);}});
+ const close=connectionCloser(connection,{joinLocalResources:true});connection.emit('close');let done=false;const first=close();assert.equal(close(),first);void first.then(()=>done=true);
+ await new Promise(r=>setImmediate(r));assert.equal(calls,1);assert.equal(done,false);release();await first;assert.equal(done,true);
+});

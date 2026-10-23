@@ -240,13 +240,13 @@ export async function session(
   dependencies: {connect:typeof amqp.connect;clientFactory:typeof clients;durableConnect?:typeof connectDurableMq} = { connect: amqp.connect, clientFactory: clients },
   ingressPath?: string,
 ) {
-  const lane = pkg.lane;
+  const lane = pkg.lane,sessionId=randomUUID();
   let acknowledgedMessages=0,lastReceived=Date.now(),processedSourceFloor:number|undefined,lastIngressLog=0;
   const durable=!!ingressPath;
   state.set(lane, {
     consumerProgress:{acknowledgedMessages:0},fullSnapshot:undefined,
     phase: "recovering",
-    session:{id:randomUUID(),startedAt:new Date().toISOString()},
+    session:{id:sessionId,startedAt:new Date().toISOString()},
     recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady:false},
     diagnostic: undefined,
     message: "Conectando y recuperando snapshot…",
@@ -267,7 +267,7 @@ export async function session(
     acknowledgedMessages=metrics.acknowledged;
     lastReceived=Math.max(lastReceived,Date.parse(metrics.lastReceiveAt||"")||0);
     state.set(lane,{ingressProgress:metrics,consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages,lastAckAt:metrics.lastAckAt||undefined}});
-    if(Date.now()-lastIngressLog>=10000){lastIngressLog=Date.now();const {received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC}=metrics;console.info(JSON.stringify({operation:'inbox.processing_progress',lane,ingress:{received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC}}));}
+    if(Date.now()-lastIngressLog>=10000){lastIngressLog=Date.now();const {received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC,ingressActorId}=metrics;console.info(JSON.stringify({operation:'inbox.processing_progress',lane,sessionId,ingressActorId,ingress:{received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC}}));}
   }) : await connectMq(pkg, dependencies.connect);}catch(error){
     // Distribution must not remain ON without our consumer after failed connect.
     try{await api.stopDistribution?.();}catch(stopError){console.error(JSON.stringify({lane,status:'failed',...describeFailure(stopError,'distribution.stop','http')}));}
@@ -276,7 +276,7 @@ export async function session(
   const transportAbort=new AbortController();
   let failure: unknown;
   let closed = false;
-  const closeConnection = connectionCloser(connection);
+  const closeConnection = connectionCloser(connection,{joinLocalResources:durable});
   const fail = (error: unknown) => {
     if (closed) return;
     failure = error;
@@ -293,7 +293,8 @@ export async function session(
     });
     // This same promise is awaited by finally; close is never started twice.
     // Unacknowledged deliveries remain on the supplier's existing queue.
-    void closeConnection();
+    if(!durable)void closeConnection();
+    else (connection as typeof connection & {quiesce?:()=>void}).quiesce?.();
   };
   connection.on("error", (error:unknown)=>{
     if(error instanceof Error&&error.message==='INBOX_CAPACITY_EXCEEDED'){
@@ -314,6 +315,7 @@ export async function session(
   let processing = Promise.resolve();let backgroundCommit:Promise<void>|undefined;let checkpointPending=0;
   let buffered: ConsumeMessage[] = [];
   let bufferingForSnapshot = false;let snapshotApplicationActive=false;
+  let retireAfterFinalSave:(()=>void)|undefined;
   let drainTimer:ReturnType<typeof setTimeout>|undefined;
   const seen = new Set<string>();
   const reportedShapes = new Set<string>();
@@ -332,6 +334,7 @@ export async function session(
     await operation("amqp.prefetch", "amqp", () => channel.prefetch(100));
     const ackDelivery=(msg:ConsumeMessage)=>{channel.ack(msg);if(durable)return;state.set(lane,{consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages:++acknowledgedMessages,lastAckAt:new Date().toISOString()}});};
     const pendingAcks:ConsumeMessage[]=[];const pendingMetadata=new Map<ConsumeMessage,FeedMessageMetadata>();
+    retireAfterFinalSave=()=>{if(!durable)return;for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();};
     const processMessage = async (msg: ConsumeMessage,commit=true) => {
       if (closed) return;
       let messageMetadata: FeedMessageMetadata | undefined;
@@ -412,7 +415,7 @@ export async function session(
       if(backgroundCommit||closed||!pendingAcks.length)return;
       const prefix=pendingAcks.splice(0);checkpointPending=prefix.length;const metadata=pendingMetadata.get(prefix[0]);
       const requestedAt=Date.now();console.info(JSON.stringify({operation:'inbox.checkpoint',lane,status:'waiting_persistence',rows:prefix.length,atUTC:new Date().toISOString()}));
-      backgroundCommit=save().then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
+      backgroundCommit=save().then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(durable||!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
     };
     let drainScheduled=false;
     const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;
@@ -698,6 +701,7 @@ export async function session(
       await processing;
       await backgroundCommit;
       await save();
+      retireAfterFinalSave?.();
     } finally {
       await closeConnection();
     }

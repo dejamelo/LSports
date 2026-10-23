@@ -67,3 +67,19 @@ test('restored pre-activation errors and ACKs never become current failure or re
  const result=fullRecoveryResult(s);assert.equal(result.reason,'SNAPSHOT_RECOVERY_PENDING');assert.equal(result.snapshotsVerified,false);assert.equal(result.consumerRegistrationObserved,false);assert.equal(result.marketUpdatesVerified,false);assert.equal(result.distributionActiveVerified,false);assert.deepEqual(result.ackObserved,{prematch:false,inplay:false});
  s.lanes.prematch.session.startedAt=s.validationSinceUTC;assert.equal(fullRecoveryResult(s).reason,'CURRENT_LANE_ERROR_SEE_DIAGNOSTIC');
 });
+test('transport cleanup validation stops after five minutes without retirement proof; processed/ACK increases do not reset it',async()=>{
+ let clock=0,calls=0;const original=console.log;console.log=()=>{};const ledger={steps:{}};const previous=process.exitCode;
+ try{
+  await validateFullRecovery(async()=>{const s=status();calls++;s.status='recovering';s.selectableSelections=0;s.lanes.prematch.recoveryProgress.regularSnapshotReady=false;s.lanes.prematch.ingressProgress={backlog:779793,processed:calls*4096,checkpointed:0,ingressActorId:'one',metricWindowEndUTC:new Date(Date.parse(end)+clock).toISOString()};return s;},{},ledger,async()=>{},'/private/progress',{durationMs:2700000,retirementDeadlineMs:300000,now:()=>clock,wait:async()=>{clock+=60000;}});
+  assert.equal(calls,6);assert.equal(ledger.fullRecoveryValidation.reason,'DURABLE_PREMATCH_RETIREMENT_NOT_VERIFIED_WITHIN_DEADLINE');assert.equal(ledger.steps.full_validation.status,'pending');
+ }finally{console.log=original;process.exitCode=previous;}
+});
+test('verified retirement permits continued recovery observation instead of a blind fixed wait',async()=>{
+ let clock=0,calls=0;const original=console.log;console.log=()=>{};const ledger={steps:{}};const previous=process.exitCode;
+ try{
+  await validateFullRecovery(async()=>{const s=status();calls++;if(calls<8){s.status='recovering';s.lanes.prematch.recoveryProgress.regularSnapshotReady=false;}
+   s.lanes.prematch.ingressProgress={backlog:779793-calls*4096,processed:calls*4096,checkpointed:calls*4096,ingressActorId:'one',metricWindowEndUTC:new Date(Date.parse(end)+clock).toISOString()};return s;
+  },{},ledger,async()=>{},'/private/progress',{durationMs:2700000,retirementDeadlineMs:300000,now:()=>clock,wait:async()=>{clock+=60000;}});
+  assert.equal(calls,8);assert.equal(ledger.steps.full_validation.status,'ok');
+ }finally{console.log=original;process.exitCode=previous;}
+});

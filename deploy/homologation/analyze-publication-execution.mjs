@@ -35,7 +35,7 @@ export function deploymentFailure(rows){
  const boundary=rows.findIndex(r=>r.stage==='post_update_retirement');
  const deployment=boundary<0?rows:rows.slice(0,boundary);
  const failures=deployment.filter(r=>['blocked','failed'].includes(r.status)&&r.stage!=='api_healthy_gate');
- const terminal=deployment.findLast(r=>r.operation==='cutover.resumable'&&['blocked','failed'].includes(r.status))||failures.at(-1);
+ const terminal=deployment.findLast(r=>r.operation==='cutover.resumable'&&(['blocked','failed'].includes(r.status)||r.stage==='full_recovery_pending'&&r.status==='pending'))||failures.at(-1);
  const final=rows.findLast(r=>r.stage==='executor_complete');
  return {deploymentExitCode:final?.deploymentExitCode??rows[boundary]?.deploymentExitCode??null,observationExitCode:final?.observationExitCode??null,terminalFailure:terminal?safeFailure(terminal):null,precedingFailureEvidence:failures.slice(-5).map(safeFailure),stageVerified:!!terminal};
 }
