@@ -31,6 +31,17 @@ for(const persistFails of [false,true])test(`transport closes during captured ch
   const before=openInbox(inbox);assert.equal(before.stats().backlog,100,'broker ACKed raw rows cannot retire before business persistence');before.close();
   release();await assert.rejects(task);const db=openInbox(inbox);assert.equal(db.stats().backlog,persistFails?100:0);db.close();
   assert.ok(saves>0);if(!persistFails){assert.equal(latest.checkpointed,100);const recovered=new TradeState();await restore(recovered,path);assert.equal(recovered.rows.prematch.get(1)?.markets.get('1')?.bets?.[0].price,'2.80');}
+  if(persistFails){
+   const replayState=new TradeState();await restore(replayState,path);const replayAbort=new AbortController();let replayActor:any,replayMetrics:any;
+   const replaySave=coalescedPersistence(()=>publicationCaptureTurn(replayState,async stable=>{const {regular,...saved}=streamCheckpoint(stable);await persistRegularCheckpoint(path,stable);await publish(stable.projection(Date.now(),false),{...saved,regularExternal:true});}));
+   const replayTask=session(pkg,{packages:[pkg],staleMs:3600000,recoveryMs:300000} as any,replayState,replaySave,replayAbort.signal,{connect:null as any,clientFactory:()=>api as any,durableConnect:async(p,db,onMetrics)=>replayActor=await connectDurableMq(p,db,m=>{replayMetrics=m;onMetrics?.(m);},{offline:true})},inbox);void replayTask.catch(()=>{});
+   try{
+    await until(()=>replayMetrics?.checkpointed===100);const beforeFresh=openInbox(inbox);assert.equal(beforeFresh.stats().backlog,0);beforeFresh.close();
+    replayActor.offline([{content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'new-session-update',ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'1',Price:'3.10',Status:1,IsChanged:1}]}]}]}})),properties:{headers:{MessageType:3}},fields:{}}]);
+    await until(()=>replayMetrics?.checkpointed===101);assert.notEqual(replayMetrics.ingressActorId,latest.ingressActorId);assert.ok(Date.now()-Date.parse(replayMetrics.metricWindowEndUTC)<2000);
+    const checked=new TradeState();await restore(checked,path);assert.equal(checked.rows.prematch.get(1)?.markets.get('1')?.bets?.[0].price,'3.10');
+   }finally{replayAbort.abort();await replayTask.catch(()=>{});await replayActor?.close();}
+  }
   // Reopen is possible immediately after session cleanup, never alongside an orphan.
   const reopened=await connectDurableMq(pkg,inbox,()=>{},{offline:true});await reopened.close();
  }finally{release();abort.abort();await task?.catch(()=>{});await actor?.close();await rm(dir,{recursive:true,force:true});}

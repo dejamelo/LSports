@@ -113,3 +113,35 @@ retirement, pending-row decrease, and complete feed validation. InPlay types
 31/32 alone never count as real market recovery. Five additional identity,
 capacity and source-hash tests passed, plus the four storage regressions.
 Neither tests nor preparation imply that AWS recovery has already completed.
+
+## Exact startup exception boundary (23 October)
+
+The supplied retirement-publication trace verifies socket closure at
+13:40:48 UTC and worker.start failures at 13:46:47 and 13:52:54 UTC. Shared
+file.persist succeeds at 13:53:50 while InPlay remains active. The last PreMatch
+actor sample is 831.6 seconds old; it does not establish a live blocked actor.
+The installed transport sends only INGRESS_FAILED for most exceptions. Its
+original type/code/stack are discarded before describeFailure returns
+unknown_exception. No historical exception has been recovered from that report.
+
+The patch records explicit startup stages (ownership/spawn, inbox open, AMQP
+connect/channel/prefetch/consume), actor closing/exit, UUID session/actor identity,
+allowlisted type and code, SQLite numeric errcode and bounded repository stack
+coordinates. It never prints the original error message, endpoint, credentials,
+queue, payload or absolute path. Checkpoint logs now carry session/actor IDs.
+The reader preserves these structured fields rather than returning the same
+generic error. It changes diagnostics, not message disposition or recovery rules.
+
+Tests reproduce real inbox-open failure and local AMQP refusal with distinct
+sanitized diagnoses; failed actor initialization releases ownership. The session
+regression preserves 100 rows on failed persistence, then opens a new session,
+replays/retires all 100, processes a fresh update, verifies current metrics and
+restores the persisted final price. Existing consumer regressions pass. These
+are local proofs; they neither identify the historical AWS exception nor prove
+that PreMatch has recovered there.
+
+apply-startup-diagnostic-repair.mjs performs one guarded worker diagnostic update
+through existing source-scope, backup and offline recovery gates, then includes
+the exact current startup error and durable retirement result in its final JSONL.
+No interface, API, POSNET, memory limit or commercial configuration is changed.
+An additional restart is not an automatic response to a failed diagnostic run.

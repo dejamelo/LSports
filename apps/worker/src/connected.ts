@@ -241,7 +241,7 @@ export async function session(
   ingressPath?: string,
 ) {
   const lane = pkg.lane,sessionId=randomUUID();
-  let acknowledgedMessages=0,lastReceived=Date.now(),processedSourceFloor:number|undefined,lastIngressLog=0;
+  let acknowledgedMessages=0,lastReceived=Date.now(),processedSourceFloor:number|undefined,lastIngressLog=0,ingressActorId:string|undefined;
   const durable=!!ingressPath;
   state.set(lane, {
     consumerProgress:{acknowledgedMessages:0},fullSnapshot:undefined,
@@ -264,11 +264,11 @@ export async function session(
   if(signal.aborted){await api.stopDistribution?.();state.set(lane,{phase:"stopped"});await save();return;}
   let connection:Awaited<ReturnType<typeof connectMq>>;
   try{connection=ingressPath ? await (dependencies.durableConnect ?? connectDurableMq)(pkg,ingressPath,metrics=>{
-    acknowledgedMessages=metrics.acknowledged;
+    ingressActorId=metrics.ingressActorId;acknowledgedMessages=metrics.acknowledged;
     lastReceived=Math.max(lastReceived,Date.parse(metrics.lastReceiveAt||"")||0);
     state.set(lane,{ingressProgress:metrics,consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages,lastAckAt:metrics.lastAckAt||undefined}});
     if(Date.now()-lastIngressLog>=10000){lastIngressLog=Date.now();const {received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC,ingressActorId}=metrics;console.info(JSON.stringify({operation:'inbox.processing_progress',lane,sessionId,ingressActorId,ingress:{received,acknowledged,processed,checkpointed,backlog,processingBacklog,oldestProcessingAgeMs,metricWindowStartUTC,metricWindowEndUTC}}));}
-  }) : await connectMq(pkg, dependencies.connect);}catch(error){
+  },{sessionId}) : await connectMq(pkg, dependencies.connect);}catch(error){
     // Distribution must not remain ON without our consumer after failed connect.
     try{await api.stopDistribution?.();}catch(stopError){console.error(JSON.stringify({lane,status:'failed',...describeFailure(stopError,'distribution.stop','http')}));}
     throw error;
@@ -414,8 +414,8 @@ export async function session(
     const commitPending=()=>{
       if(backgroundCommit||closed||!pendingAcks.length)return;
       const prefix=pendingAcks.splice(0);checkpointPending=prefix.length;const metadata=pendingMetadata.get(prefix[0]);
-      const requestedAt=Date.now();console.info(JSON.stringify({operation:'inbox.checkpoint',lane,status:'waiting_persistence',rows:prefix.length,atUTC:new Date().toISOString()}));
-      backgroundCommit=save().then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(durable||!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
+      const requestedAt=Date.now();console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,status:'waiting_persistence',rows:prefix.length,atUTC:new Date().toISOString()}));
+      backgroundCommit=save().then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(durable||!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
     };
     let drainScheduled=false;
     const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;
