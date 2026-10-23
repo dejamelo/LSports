@@ -40,3 +40,29 @@ test('nested checkpoint arrays remain incremental with bounded native leaf encod
   assert.equal(parsed.workerCheckpoint.outright.length,10000);
   assert.deepEqual(parsed.workerCheckpoint.outright[9999],{fixtureId:9999,markets:[{id:160,bets:[{id:'1',price:'2.1'}]}]});
 });
+
+test('API read rejects an oversized complete projection without allocating its contents',async()=>{
+  const {open}=await import('node:fs/promises');
+  const {API_FEED_READ_LIMIT_BYTES,apiFeedReadBudget}=await import('./index.js');
+  const dir=await mkdtemp(join(tmpdir(),'api-feed-budget-')),path=join(dir,'feed.json');
+  try{
+    const f=await open(path,'w');await f.truncate(API_FEED_READ_LIMIT_BYTES+1);await f.close();
+    const result=await readConnectedFeed(path);
+    assert.equal(result.health,'unavailable');assert.deepEqual(result.events,[]);
+    assert.match(result.notice!,/capacidad segura/);
+    assert.equal(apiFeedReadBudget(128*1024*1024,1),0);
+    assert.ok(apiFeedReadBudget(512*1024*1024,80*1024*1024)<=8*1024*1024);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('concurrent API reads share one complete parse and retain no checkpoint or stale cache',async()=>{
+  const {writeFile}=await import('node:fs/promises');
+  const dir=await mkdtemp(join(tmpdir(),'api-feed-single-')),path=join(dir,'feed.json');
+  try{
+    await writeFile(path,JSON.stringify({...unavailable('first'),updatedAt:new Date().toISOString(),workerCheckpoint:{private:true}}));
+    const results=await Promise.all(Array.from({length:20},()=>readConnectedFeed(path)));
+    assert.ok(results.every(x=>x===results[0]));assert.equal('workerCheckpoint' in results[0],false);
+    await writeFile(path,JSON.stringify({...unavailable('second'),updatedAt:new Date().toISOString()}));
+    assert.equal((await readConnectedFeed(path)).notice,'second');
+    assert.equal((await readConnectedFeed(path,Date.now()+21000)).events.length,0);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});

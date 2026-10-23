@@ -2,6 +2,11 @@ import copy, importlib.util, sqlite3, tempfile, unittest, io, tarfile
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('update',Path(__file__).with_name('update-adl-api.py'));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class UpdateTests(unittest.TestCase):
+    def test_native_allocation_hints_do_not_echo_raw_frames_or_secrets(self):
+        raw=b'2026-10-23T01:12:31Z v8::internal::JsonParser<char>::ParseJson() private-token=secret'
+        self.assertEqual(m.api_allocation_hints(raw),['json_parse'])
+        self.assertEqual(m.api_allocation_hints(b'FATAL ERROR: heap limit Allocation failed'),[])
+        self.assertEqual(m.api_allocation_hints(b'v8::internal::JsonStringifier::SerializeJSObject()'),['json_stringify'])
     def test_only_api_image_may_change(self):
         old={'services':{'api':{'image':'old','volumes':['same'],'environment':{'DATA_MODE':'connected'}},'worker':{'image':'worker','mem_limit':4294967296}},'networks':{'same':{}}}
         new=copy.deepcopy(old);new['services']['api']['image']='new';m.compare_models(old,new,'new')

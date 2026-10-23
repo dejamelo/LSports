@@ -1,5 +1,6 @@
 import {createHash} from "node:crypto";
-import { readFile, mkdir, rename, writeFile, open } from "node:fs/promises";
+import {getHeapStatistics} from "node:v8";
+import { mkdir, rename, writeFile, open } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EventFeed } from "@lsports/contracts";
@@ -25,30 +26,65 @@ export const unavailable = (message: string): EventFeed => ({
     message: "Hípica: disponibilidad del paquete sin verificar.",
   },
 });
-export async function readConnectedFeed(
-  path = statePath(),
-  now = Date.now(),
-): Promise<EventFeed> {
+// This source returns a complete EventFeed. Never truncate it: reconciliation and
+// settlement callers must not mistake a partial view for the complete projection.
+// 48x covers input chunks, UTF-16 text, parsed graph and a response encoding;
+// reserve 128 MiB for routes/auth/SQLite. Large projections need an indexed source,
+// not an unbounded JSON.parse or a blind heap increase.
+export const API_FEED_READ_LIMIT_BYTES = 8 * 1024 * 1024;
+export function apiFeedReadBudget(heapLimit=getHeapStatistics().heap_size_limit, used=process.memoryUsage().heapUsed) {
+  return Math.max(0, Math.min(API_FEED_READ_LIMIT_BYTES, Math.floor((heapLimit-used-128*1024*1024)/48)));
+}
+const feedReads=new Map<string,Promise<EventFeed>>();
+const rejectedVersions=new Map<string,string>();
+async function readCompleteFeed(path:string):Promise<EventFeed> {
+  const file=await open(path, 'r');
   try {
-    const feed = JSON.parse(await readFile(path, "utf8")) as EventFeed;
-    const age = now - Date.parse(feed.updatedAt || "");
-    if (
-      feed.mode !== "connected" ||
-      !Array.isArray(feed.events) ||
-      !Number.isFinite(age) ||
-      age < -5000 ||
-      age > 20000
-    )
-      return unavailable(
-        "Worker sin señal reciente. No se muestran cuotas almacenadas.",
-      );
-    const { workerCheckpoint: _checkpoint, ...publicFeed } = feed as EventFeed & { workerCheckpoint?: unknown };
-    return publicFeed;
-  } catch {
-    return unavailable(
-      "Sin datos del worker. Verificá la configuración y el proceso de integración.",
-    );
-  }
+    const before=await file.stat(),budget=apiFeedReadBudget();
+    const reject=()=>{
+      const version=`${before.ino}:${before.size}:${Math.floor(before.mtimeMs/60000)}`;
+      if(rejectedVersions.get(path)!==version){
+        // Bounded diagnostics: no file paths, payloads or credentials.
+        if(rejectedVersions.size>=32)rejectedVersions.clear();
+        rejectedVersions.set(path,version);
+        console.warn(JSON.stringify({operation:'api.feed.read',status:'blocked',reason:'complete_projection_exceeds_read_budget',fileBytes:before.size,readBudgetBytes:budget,heapLimitBytes:getHeapStatistics().heap_size_limit,heapUsedBytes:process.memoryUsage().heapUsed,partialFeedReturned:false}));
+      }
+      return unavailable('Proyección completa supera la capacidad segura de lectura de la API. Cuotas bloqueadas; recuperación no verificada.');
+    };
+    if(!before.isFile() || before.size>budget)return reject();
+    // Read the inspected inode, not a second pathname lookup; also cap growth.
+    const chunks:Buffer[]=[];let bytes=0;
+    for(;;){
+      const buffer=Buffer.allocUnsafe(Math.min(64*1024,budget-bytes+1));
+      const {bytesRead}=await file.read(buffer,0,buffer.length,null);
+      if(!bytesRead)break;
+      bytes+=bytesRead;if(bytes>budget)return reject();
+      chunks.push(buffer.subarray(0,bytesRead));
+    }
+    const after=await file.stat();
+    if(after.size!==before.size||after.mtimeMs!==before.mtimeMs)throw Error('FEED_CHANGED_DURING_READ');
+    const feed=JSON.parse(Buffer.concat(chunks,bytes).toString('utf8')) as EventFeed & {workerCheckpoint?:unknown};
+    // Checkpoints remain private, including legacy files. They are subject to the
+    // same allocation bound; removing them after an unbounded parse is unsafe.
+    delete feed.workerCheckpoint;
+    return feed;
+  } finally {await file.close();}
+}
+export async function readConnectedFeed(path=statePath(), now=Date.now()):Promise<EventFeed> {
+  try {
+    let reading=feedReads.get(path);
+    if(!reading){
+      reading=readCompleteFeed(path);feedReads.set(path,reading);
+      // No retained full-graph cache; only concurrent reads share an allocation.
+      void reading.finally(()=>{if(feedReads.get(path)===reading)feedReads.delete(path);}).catch(()=>{});
+    }
+    const feed=await reading;
+    if(feed.health==='unavailable'&&!feed.updatedAt)return feed;
+    const age=now-Date.parse(feed.updatedAt||'');
+    if(feed.mode!=='connected'||!Array.isArray(feed.events)||!Number.isFinite(age)||age < -5000||age>20000)
+      return unavailable('Worker sin señal reciente. No se muestran cuotas almacenadas.');
+    return feed;
+  } catch {return unavailable('Sin datos del worker. Verificá la configuración y el proceso de integración.');}
 }
 export type AvailabilityBlocks=Partial<Record<'prematch'|'inplay',('feed_disconnected'|'processing_backlog')[]>>;
 export function maskEventAvailability(event:EventFeed['events'][number],reasons:NonNullable<AvailabilityBlocks['prematch']>=[]) {

@@ -77,6 +77,10 @@ def receive_source(stream,context):
             require(not re.search(r'(^|/)(\.env[^/]*|\.runtime|node_modules|backups|\.local-synthetic-demo)(/|$)|\.(sqlite|pem|key|log)(\.|$)|synthetic|\.test\.',item.name,re.I),'PRIVATE_OR_TEST_SOURCE_REJECTED')
             archive.extract(item,context,filter='data')
 
+def api_allocation_hints(raw):
+    patterns=[('json_parse',rb'JsonParser|JSON::Parse|Builtins_JsonParse'),('json_stringify',rb'JsonStringifier|JSON::Stringify|Builtins_JsonStringify'),('string_decode',rb'String::NewFromUtf8|StringDecoder|DecodeWrite'),('sqlite',rb'sqlite3_step|Statement::')]
+    return [name for name,pattern in patterns if re.search(pattern,raw)]
+
 def main():
     stage='preflight';emit(stage=stage,status='running');backup=None;mutated=False;oldmeta=None;base=None;protected=None
     try:
@@ -105,6 +109,14 @@ def main():
         require(available>=1536*1024**2 and shutil.disk_usage('/var/backups').free>3*1024**3,'BUILD_CAPACITY_INSUFFICIENT')
         sha=sys.argv[1];require(re.fullmatch('[a-f0-9]{40}',sha),'COMMIT_INVALID')
         backup=Path(tempfile.mkdtemp(prefix='adl-api-update-',dir=BACKUPS));log=backup/'update.private.log'
+        # Preserve the old container's fatal window before Compose can remove it.
+        # Existing collector omitted native V8 frames, so absence of JS frames is
+        # not evidence that no allocation operation was present in the raw log.
+        fatal=subprocess.run(['docker','logs','--timestamps','--since','2026-10-23T01:12:20Z','--until','2026-10-23T01:12:33Z','--tail','500',api['Id']],capture_output=True,timeout=20)
+        require(fatal.returncode==0,'API_FATAL_LOG_PRESERVATION_FAILED')
+        fatal_raw=fatal.stdout+fatal.stderr;private(backup/'api-heap-20261023T011231.private.log',fatal_raw)
+        hints=api_allocation_hints(fatal_raw)
+        emit(stage='api_historical_heap',status='preserved',windowSinceUTC='2026-10-23T01:12:20Z',windowUntilUTC='2026-10-23T01:12:33Z',logBytes=len(fatal_raw),nativeAllocationHints=hints,allRestartCausesProven=False,privateLog='api-heap-20261023T011231.private.log')
         private(backup/'Caddyfile.before.private',caddy_before)
         private(backup/'deployment.before.private.json',oldmeta);private(backup/'model.before.private.json',json.dumps(before).encode())
         # Compose reparses interpolation on manual rollback: escape literal dollars.
@@ -126,6 +138,16 @@ def main():
         private(context/'Dockerfile',dockerfile.encode());stage='build_api_image';emit(stage=stage,status='running')
         env=dict(os.environ,DOCKER_BUILDKIT='0')
         run(['docker','build','--network','none','--pull=false','--memory','1g','--memory-swap','1g','--cpu-quota','100000','-t',image,str(context)],timeout=900,log=log,env=env)
+        # Exercise the exact API source against the live projection read-only in
+        # a disposable, network-isolated process with the installed API limits.
+        stage='offline_api_feed_budget';emit(stage=stage,status='running')
+        feed_mount=next(m for m in api['Mounts'] if m['Destination']=='/app/.runtime/feed')
+        api_env=dict(v.split('=',1) for v in api['Config'].get('Env',[]) if '=' in v)
+        probe="import {readConnectedFeed,statePath} from '@lsports/feed-store';import {stat} from 'node:fs/promises';const start=performance.now();const rows=await Promise.all(Array.from({length:40},()=>readConnectedFeed()));if(rows.some(r=>!Array.isArray(r.events)))throw Error('INVALID_FEED');console.log(JSON.stringify({fileBytes:(await stat(statePath())).size,concurrentRequests:40,feedAvailable:rows[0].health!=='unavailable',events:rows[0].events.length,elapsedMs:performance.now()-start,rssBytes:process.memoryUsage().rss,maxRssBytes:process.resourceUsage().maxRSS*1024,heapUsedBytes:process.memoryUsage().heapUsed,integrationVerified:false}));"
+        limit=api['HostConfig']['Memory'];require(limit>0,'API_MEMORY_LIMIT_REQUIRED')
+        result=run(['docker','run','--rm','--network','none','--read-only','--memory',str(limit),'--memory-swap',str(limit),'--cpus','0.5','--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/tmp:size=16m','-e','NODE_OPTIONS='+api_env.get('NODE_OPTIONS',''),'-e','LSPORTS_STATE_FILE='+api_env.get('LSPORTS_STATE_FILE','.runtime/trade-feed.json'),'-v',feed_mount['Source']+':/app/.runtime/feed:ro','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',probe],timeout=90,log=log)
+        metrics=json.loads(result.decode().splitlines()[-1]);private(backup/'api-feed-budget.json',json.dumps(metrics).encode())
+        emit(stage=stage,status='ok',apiLimitBytes=limit,**metrics)
         stage='online_database_backup';emit(stage=stage,status='running');data=backup/'platform';data.mkdir()
         files=sorted(platform.rglob('*.sqlite'))
         require(any(p.name=='control.sqlite' for p in files),'CONTROL_DATABASE_REQUIRED')
@@ -192,7 +214,7 @@ def main():
         meta['composeOverrides']=list(dict.fromkeys(meta.get('composeOverrides',[])+[str(overlay)]));meta['apiUiCommit']=sha;meta['apiUiBackup']=str(backup)
         atomic(SECURE/'deployment.json',json.dumps(meta).encode())
         private(backup/'success.json',json.dumps({'commit':sha,'adminPresent':bool(admins),'image':image,'installedImageId':installed['Image'],'installedSourceVerified':True}).encode())
-        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,httpsVerified=True,applicationVerified=True,panelRoutesVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,caddyConfigurationPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
+        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,httpsVerified=True,applicationVerified=True,panelRoutesVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,apiFeedReadSafeVerified=True,integrationVerified=False,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,caddyConfigurationPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
         return 0
     except Exception as e:
         code=str(e) if isinstance(e,RuntimeError) and re.fullmatch('[A-Z_]+',str(e)) else 'PRIVATE_ERROR_SEE_STAGE'
