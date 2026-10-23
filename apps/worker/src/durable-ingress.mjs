@@ -56,10 +56,24 @@ export function isClosedIngressChannel(error){return error?.name==='IllegalOpera
 export function ingressFailureDetails(error,stage){
  const stages=new Set(['actor.ownership','actor.spawn','actor.ready','actor.thread','actor.exit','actor.shutdown','inbox.open','inbox.pump','inbox.append','inbox.complete','inbox.metrics','amqp.connect','amqp.channel','amqp.prefetch','amqp.consume','amqp.ack','transport.close']);
  const types=new Set(['Error','TypeError','RangeError','SyntaxError','AggregateError','SystemError','IllegalOperationError']);
- const codes=new Set(['EACCES','EPERM','ENOENT','ENOTDIR','EISDIR','EEXIST','ENOSPC','EMFILE','ENFILE','EIO','ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','ERR_SQLITE_ERROR','SQLITE_BUSY','SQLITE_LOCKED','SQLITE_CORRUPT','SQLITE_FULL','SQLITE_IOERR','SQLITE_CANTOPEN','SQLITE_READONLY','SQLITE_NOTADB','ERR_WORKER_OUT_OF_MEMORY']);
+ const codes=new Set(['EACCES','EPERM','ENOENT','ENOTDIR','EISDIR','EEXIST','ENOSPC','EMFILE','ENFILE','EIO','ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','ERR_SQLITE_ERROR','SQLITE_BUSY','SQLITE_LOCKED','SQLITE_CORRUPT','SQLITE_FULL','SQLITE_IOERR','SQLITE_CANTOPEN','SQLITE_READONLY','SQLITE_NOTADB','ERR_WORKER_OUT_OF_MEMORY','CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','UNABLE_TO_VERIFY_LEAF_SIGNATURE','ERR_TLS_CERT_ALTNAME_INVALID','ERR_SSL_WRONG_VERSION_NUMBER']);
  const signals=['INBOX_ACTOR_ALREADY_OWNED','INBOX_CAPACITY_EXCEEDED','INBOX_STAGE_IDENTITY','INBOX_COMPLETION_IDENTITY','CONSUMER_CANCELLED'].filter(v=>error?.message===v);
+ let handshakeCode;
+ if(stage==='amqp.connect'){
+  const text=typeof error?.message==='string'?error.message.slice(0,4096):'';
+  const server=/^Handshake terminated by server:\s*(\d{3})\b/.exec(text);
+  if(server){handshakeCode=Number(server[1]);signals.push('HANDSHAKE_SERVER_CLOSED');const names={320:'CONNECTION_FORCED',403:'ACCESS_REFUSED',405:'RESOURCE_LOCKED',530:'NOT_ALLOWED'};if(names[handshakeCode])signals.push(names[handshakeCode]);}
+  if(text==='Socket closed abruptly during opening handshake')signals.push('HANDSHAKE_SOCKET_CLOSED');
+  if(/^SASL mechanism .* is not provided by the server$/.test(text))signals.push('SASL_MECHANISM_UNAVAILABLE');
+  if(/^Expected ConnectionOpenOk; got <ConnectionClose channel:0>$/.test(text))signals.push('HANDSHAKE_SERVER_CLOSE_BEFORE_OPEN_OK');
+  else if(/^Expected ConnectionStart; got <ConnectionClose channel:0>$/.test(text))signals.push('HANDSHAKE_SERVER_CLOSE_BEFORE_START');
+  else if(/^Expected (?:Connection\w+|.* during handshake); got /.test(text)||/^Frame on channel != 0 during handshake:/.test(text))signals.push('UNEXPECTED_HANDSHAKE_FRAME');
+  if(text==="Wasn't expecting to have to go through secure")signals.push('HANDSHAKE_SECURE_NOT_SUPPORTED');
+  if(text==='connect ETIMEDOUT')signals.push('CONNECT_TIMEOUT');
+ }
+
  const frames=[];for(const line of String(error?.stack||'').split('\n').slice(1,12)){const m=/(durable-ingress\.mjs|connected\.ts|node:sqlite):(\d+)(?::(\d+))?/.exec(line);if(m)frames.push({file:m[1],line:Number(m[2]),column:m[3]?Number(m[3]):null});}
- const numericCode=Number.isInteger(error?.replyCode)?error.replyCode:error?.code;
+ const numericCode=Number.isInteger(error?.replyCode)?error.replyCode:handshakeCode??error?.code;
  const code=typeof numericCode==='number'&&Number.isInteger(numericCode)&&numericCode>=0&&numericCode<=65535?numericCode:codes.has(error?.code)?error.code:null;
  return {ingressStage:stages.has(stage)?stage:'actor.thread',errorType:types.has(error?.name)?error.name:'OtherError',errorCode:code,sqliteErrcode:Number.isInteger(error?.errcode)&&error.errcode>=0&&error.errcode<=65535?error.errcode:null,signals:[...signals,...(isClosedIngressChannel(error)?['CHANNEL_NOT_OPEN']:[])],stackFrames:frames.slice(0,6)};
 }

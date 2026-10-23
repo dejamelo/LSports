@@ -185,3 +185,44 @@ apply-ack-boundary-repair.mjs activates this worker-only correction through the
 existing source identity, disk, backup, one-stop and real-copy recovery gates.
 Its final report separates activation, deferred broker ACKs, current actor metrics,
 old-cohort durable retirement, net pending decrease and complete feed validation.
+
+## Current amqp.connect failure and publication-before-connect delay
+
+The next supplied ack-repair result.log belongs to container f7129c17...,
+image adl-worker-partitioned:7a5eb3ff1a4b5649fd0aaf87, activated 16:09:09 UTC.
+Session 93d52970... / actor 5cdb4538... opened the inbox, failed at amqp.connect
+at 16:14:36 UTC, and exited. It never registered its PreMatch consumer. The
+751,966 pending rows did not retire in the 90-second observation; InPlay retired
+32 while receiving 24. This does not disprove or prove the separate ACK repair.
+
+The error is Error with no retained code/signature/stack. amqplib creates some
+handshake rejections as Error(message) without a code property; the prior safe
+classifier discarded that text. Therefore this historical rejection cannot be
+classified as authentication, vhost refusal, TLS or abrupt socket closure from
+the supplied log. No original broker code or reason has been recovered.
+
+A separate local sequencing defect is directly visible: distribution was verified
+ON at 16:12:19 UTC; actor creation was logged at 16:14:16 and amqp.connect at
+16:14:36. session() awaited a complete shared publication after distribution
+activation, before creating the receiver. Parent-side log timestamps do not
+measure isolated socket/SQLite operation durations. This local wait is proven;
+its role in the broker rejection is not proven.
+
+The patch keeps the required Start/SDK propagation/verification order and opens
+the consumer next, without waiting for successful-activation observation metadata
+to publish. Normal/registration/final persistence retains that metadata. Failed
+activation still persists its observations and never connects. Business-message
+checkpoint-before-retirement is unchanged.
+
+The safe classifier now extracts only fixed handshake categories and broker
+numeric codes from known amqplib message formats, including close-before-open,
+abrupt socket closure, SASL mismatch and known TLS codes. It never prints the
+message, broker reply text, credentials, vhost or payload. A rejected open with
+no reply code remains explicitly code-unknown.
+
+46 regressions passed, including a deliberately blocked metadata publication that
+must not delay consumer creation, preservation of failed-activation observations,
+handshake-message redaction and the prior ACK/replay tests. No claim is made that
+the historical 16:14:36 rejection has been explained or that AWS has recovered.
+The new guarded command applies an actual sequencing change; it does not reapply
+the ACK patch merely to regenerate a report.

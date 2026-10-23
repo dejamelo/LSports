@@ -257,9 +257,12 @@ export async function session(
   // LSports #217525: OFF distribution rejects AMQP authentication (403).
   // provider.startDistribution owns the ONE 2000ms SDK-contract propagation wait
   // and verifies Body.IsDistributionOn before we open any AMQP connection.
-  try{await api.startDistribution();}finally{
+  let distributionReady=false;
+  try{await api.startDistribution();distributionReady=true;}finally{
     const observations=api.distributionObservations?.();
-    if(observations){state.set(lane,{distributionObservations:observations});await save();}
+    // Observation metadata is persisted by the next normal/final save. Do not
+    // leave distribution filling its broker queue while a full publication runs.
+    if(observations){state.set(lane,{distributionObservations:observations});if(!distributionReady)await save();}
   }
   if(signal.aborted){await api.stopDistribution?.();state.set(lane,{phase:"stopped"});await save();return;}
   let connection:Awaited<ReturnType<typeof connectMq>>;

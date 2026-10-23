@@ -46,3 +46,12 @@ for(const persistFails of [false,true])test(`transport closes during captured ch
   const reopened=await connectDurableMq(pkg,inbox,()=>{},{offline:true});await reopened.close();
  }finally{release();abort.abort();await task?.catch(()=>{});await actor?.close();await rm(dir,{recursive:true,force:true});}
 });
+test('distribution propagation is followed by AMQP connection before any slow publication of observations',{timeout:10000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-connect-order-')),path=join(dir,'inbox.sqlite');const state=new TradeState(),abort=new AbortController();let actor:any,started=false,calls=0,blocked=false,release!:()=>void;
+ const gate=new Promise<void>(r=>release=r);
+ const save=async()=>{if(++calls===2){blocked=true;await gate;}};
+ const api={async startDistribution(){started=true;},async stopDistribution(){},distributionObservations(){return [{stage:'after_propagation',bodyIsDistributionOn:true}];},async snapshot(){return []},async catalog(){return []}};
+ const task=session(pkg,{packages:[pkg],staleMs:3600000,recoveryMs:300000} as any,state,save,abort.signal,{connect:null as any,clientFactory:()=>api as any,durableConnect:async(p,db,onMetrics)=>{assert.equal(started,true);return actor=await connectDurableMq(p,db,onMetrics,{offline:true});}},path);void task.catch(()=>{});
+ try{await until(()=>blocked);assert.ok(actor,'a slow observation publication cannot delay opening the consumer');assert.ok(state.connections.prematch.consumerProgress?.registeredAt);}
+ finally{release();abort.abort();await task.catch(()=>{});await actor?.close();await rm(dir,{recursive:true,force:true});}
+});

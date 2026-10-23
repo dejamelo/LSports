@@ -16,3 +16,12 @@ test('real AMQP connection refusal reports connect stage and permits offline inb
  const dir=await mkdtemp(join(tmpdir(),'adl-connect-failure-')),path=join(dir,'inbox.sqlite');const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=(server.address()).port;await new Promise(r=>server.close(()=>r()));
  try{const events=await capture(async()=>{await assert.rejects(connectDurableMq({...pkg,port},path));});assert.ok(events.some(e=>e.ingressStage==='amqp.connect'&&e.errorCode==='ECONNREFUSED'));const recovered=await connectDurableMq(pkg,path,()=>{},{offline:true});await recovered.close();}finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('amqplib handshake rejection without a code property retains safe broker code and category',()=>{
+ const e=new Error('Handshake terminated by server: 403 (ACCESS-REFUSED) with message "private-user private-password"');
+ assert.equal(e.code,undefined);const safe=ingressFailureDetails(e,'amqp.connect');assert.equal(safe.errorCode,403);assert.ok(safe.signals.includes('ACCESS_REFUSED'));assert.ok(safe.signals.includes('HANDSHAKE_SERVER_CLOSED'));assert.doesNotMatch(JSON.stringify(safe),/private-user|private-password/);
+ const abrupt=ingressFailureDetails(Error('Socket closed abruptly during opening handshake'),'amqp.connect');assert.ok(abrupt.signals.includes('HANDSHAKE_SOCKET_CLOSED'));assert.equal(abrupt.errorCode,null);
+ const beforeOpen=ingressFailureDetails(Error('Expected ConnectionOpenOk; got <ConnectionClose channel:0>'),'amqp.connect');assert.ok(beforeOpen.signals.includes('HANDSHAKE_SERVER_CLOSE_BEFORE_OPEN_OK'));assert.equal(beforeOpen.errorCode,null);
+ const tls=ingressFailureDetails(Object.assign(Error('private certificate subject'),{code:'CERT_HAS_EXPIRED'}),'amqp.connect');assert.equal(tls.errorCode,'CERT_HAS_EXPIRED');assert.doesNotMatch(JSON.stringify(tls),/private certificate/);
+ const unrelated=ingressFailureDetails(Error('Handshake terminated by server: 403'),'inbox.append');assert.equal(unrelated.errorCode,null);
+});
