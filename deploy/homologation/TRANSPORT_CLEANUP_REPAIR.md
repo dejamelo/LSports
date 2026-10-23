@@ -145,3 +145,43 @@ through existing source-scope, backup and offline recovery gates, then includes
 the exact current startup error and durable retirement result in its final JSONL.
 No interface, API, POSNET, memory limit or commercial configuration is changed.
 An additional restart is not an automatic response to a failed diagnostic run.
+
+## Confirmed post-capacity-retry broker ACK failure
+
+The supplied existing-startup-evidence-1792769419742.json separates three
+PreMatch sessions. Sessions 03a54939... and caee1106... failed at amqp.connect
+at 14:56:07 and 15:02:03 UTC; their original connection cause remains unproven.
+Session 6be04748... / actor c52306c6... reached ready at 15:08:04 UTC, drained
+and checkpointed old rows. It advanced 69,632 ->98,304 at 15:24:44-49 UTC, then
+failed with stack positions durable-ingress.mjs:66:255 and :89:79. The first
+position is channel.ack(m.original), called by flush after inbox.complete frees
+capacity. actor.ready was an old startup-stage label, not the failing operation.
+
+A regression executes the exact installed f18c123 flush fixture against a real
+SQLite inbox and amqplib Channel. Fill capacity, retain a pending broker delivery,
+close that channel, retire the old SQLite prefix, and retry flush. It reproduces
+IllegalOperationError: Channel closed at the exact :66:255 position. The raw
+retry is ALREADY committed when the broker ACK throws. The installed diagnostic
+allowlist had mapped IllegalOperationError to OtherError. This reproduction
+establishes the local ACK defect; it does not establish why the original channel
+closed or explain the earlier amqp.connect failures.
+
+The correction separates raw FULL-commit from broker acknowledgement. Once a
+batch is committed, ACK failure cannot put it back into the append retry buffer
+or invalidate that receipt. A known closed channel is never ACKed or reused for
+consumer cancellation/resumption. A recognized closed-channel ACK race signals
+transport recovery, retaining every raw row. Other ACK failures remain explicit
+failures at amqp.ack. Business checkpoint/retirement rules are unchanged and no
+row is deleted to make capacity available. Readiness, inbox-completion and ACK
+errors now carry their actual operation rather than a stale actor.ready label.
+
+44 consumer/diagnostic/ACK regressions passed, including the exact installed-code
+reproduction, corrected capacity retry, zero ACK before failed SQLite commit,
+restart replay and final persisted-state readback. Worker build and reader/source
+scope checks passed. The small installed-flush fixture is source code only; it
+contains no private messages. No AWS deployment or production recovery is claimed.
+
+apply-ack-boundary-repair.mjs activates this worker-only correction through the
+existing source identity, disk, backup, one-stop and real-copy recovery gates.
+Its final report separates activation, deferred broker ACKs, current actor metrics,
+old-cohort durable retirement, net pending decrease and complete feed validation.

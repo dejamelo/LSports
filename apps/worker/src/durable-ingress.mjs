@@ -38,16 +38,30 @@ export function openInbox(path, maxBytes=2*1024**3){
  };
 }
 
+// SQLite receipt and AMQP acknowledgement are different commit boundaries.
+// A closed channel cannot invalidate a successful journal write or make it retry.
+export function persistIngressBatch(inbox,batch,acknowledge,{canAcknowledge=()=>true,onCommitted=()=>{},onAcknowledged=()=>{},onAckFailure=error=>{throw error;}}={}){
+ const started=performance.now();inbox.append(batch);onCommitted(performance.now()-started);
+ let acknowledged=0;
+ for(const message of batch){
+  if(!canAcknowledge())break;
+  try{acknowledge(message);}catch(error){onAckFailure(error);break;}
+  acknowledged++;onAcknowledged();
+ }
+ return {committedRows:batch.length,acknowledged};
+}
+export function isClosedIngressChannel(error){return error?.name==='IllegalOperationError'&&/^(?:Channel|Connection) clos(?:ed|ing)$/.test(error?.message||'');}
+
 // Explicit allowlists: never log error messages, credentials, payloads or absolute paths.
 export function ingressFailureDetails(error,stage){
- const stages=new Set(['actor.ownership','actor.spawn','actor.ready','actor.thread','actor.exit','actor.shutdown','inbox.open','inbox.pump','inbox.append','inbox.complete','inbox.metrics','amqp.connect','amqp.channel','amqp.prefetch','amqp.consume','transport.close']);
- const types=new Set(['Error','TypeError','RangeError','SyntaxError','AggregateError','SystemError']);
+ const stages=new Set(['actor.ownership','actor.spawn','actor.ready','actor.thread','actor.exit','actor.shutdown','inbox.open','inbox.pump','inbox.append','inbox.complete','inbox.metrics','amqp.connect','amqp.channel','amqp.prefetch','amqp.consume','amqp.ack','transport.close']);
+ const types=new Set(['Error','TypeError','RangeError','SyntaxError','AggregateError','SystemError','IllegalOperationError']);
  const codes=new Set(['EACCES','EPERM','ENOENT','ENOTDIR','EISDIR','EEXIST','ENOSPC','EMFILE','ENFILE','EIO','ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','ERR_SQLITE_ERROR','SQLITE_BUSY','SQLITE_LOCKED','SQLITE_CORRUPT','SQLITE_FULL','SQLITE_IOERR','SQLITE_CANTOPEN','SQLITE_READONLY','SQLITE_NOTADB','ERR_WORKER_OUT_OF_MEMORY']);
  const signals=['INBOX_ACTOR_ALREADY_OWNED','INBOX_CAPACITY_EXCEEDED','INBOX_STAGE_IDENTITY','INBOX_COMPLETION_IDENTITY','CONSUMER_CANCELLED'].filter(v=>error?.message===v);
  const frames=[];for(const line of String(error?.stack||'').split('\n').slice(1,12)){const m=/(durable-ingress\.mjs|connected\.ts|node:sqlite):(\d+)(?::(\d+))?/.exec(line);if(m)frames.push({file:m[1],line:Number(m[2]),column:m[3]?Number(m[3]):null});}
  const numericCode=Number.isInteger(error?.replyCode)?error.replyCode:error?.code;
  const code=typeof numericCode==='number'&&Number.isInteger(numericCode)&&numericCode>=0&&numericCode<=65535?numericCode:codes.has(error?.code)?error.code:null;
- return {ingressStage:stages.has(stage)?stage:'actor.thread',errorType:types.has(error?.name)?error.name:'OtherError',errorCode:code,sqliteErrcode:Number.isInteger(error?.errcode)&&error.errcode>=0&&error.errcode<=65535?error.errcode:null,signals,stackFrames:frames.slice(0,6)};
+ return {ingressStage:stages.has(stage)?stage:'actor.thread',errorType:types.has(error?.name)?error.name:'OtherError',errorCode:code,sqliteErrcode:Number.isInteger(error?.errcode)&&error.errcode>=0&&error.errcode<=65535?error.errcode:null,signals:[...signals,...(isClosedIngressChannel(error)?['CHANNEL_NOT_OPEN']:[])],stackFrames:frames.slice(0,6)};
 }
 const inboxOwners=new Map();
 
@@ -56,20 +70,39 @@ if(!isMainThread){
  const metrics={received:0,acknowledged:0,processed:0,checkpointed:0,receivedBytes:0,lastReceiveAt:null,lastAckAt:null,headersByType:{},durableCommitMs:0};
  const loop=monitorEventLoopDelay({resolution:20});loop.enable();let windowStart=Date.now();let intakePaused=false,consumerTag,consumerControl=Promise.resolve();
  const maximum=workerData.maxBytes??2*1024**3;const resumeBytes=Math.max(0,maximum-Math.min(8*1024**2,Math.floor(maximum/4)));
- const controlConsumer=()=>{consumerControl=consumerControl.then(async()=>{if(!channel)return;if(closed||quiesced||intakePaused){if(consumerTag){const tag=consumerTag;consumerTag=undefined;await channel.cancel(tag);}}else if(!consumerTag){consumerTag=(await channel.consume(workerData.pkg.queue,receive,{noAck:false,exclusive:true})).consumerTag;}}).catch(e=>fail(e,'amqp.consume'));return consumerControl;};
+ const controlConsumer=()=>{consumerControl=consumerControl.then(async()=>{if(!channel||channelEnded||transportEnded)return;if(closed||quiesced||intakePaused){if(consumerTag){const tag=consumerTag;consumerTag=undefined;await channel.cancel(tag);}}else if(!consumerTag){consumerTag=(await channel.consume(workerData.pkg.queue,receive,{noAck:false,exclusive:true})).consumerTag;}}).catch(e=>fail(e,'amqp.consume'));return consumerControl;};
  const pauseIntake=()=>{if(!intakePaused){intakePaused=true;send({event:"capacity",paused:true,bytes:inbox.stats().bytes});void controlConsumer();}};
  const resumeIntake=()=>{if(intakePaused&&!pending.length&&inbox.stats().bytes<=resumeBytes&&!closed){intakePaused=false;send({event:"capacity",paused:false,bytes:inbox.stats().bytes});void controlConsumer();}};
  const report=()=>{const now=Date.now();send({event:'metrics',metrics:{...metrics,intakePaused,...inbox.stats(),...inbox.processingStats(stagedThrough),rssBytes:process.memoryUsage().rss,ingressMaxEventLoopDelayMs:Math.ceil(loop.max/1e6),metricWindowStartUTC:new Date(windowStart).toISOString(),metricWindowEndUTC:new Date(now).toISOString()}});loop.reset();windowStart=now;};
  let failureStage='inbox.open';const setStage=stage=>{failureStage=stage;send({event:'startup_stage',stage});};
  const fail=(e,stage=failureStage)=>{send({event:'failure',details:ingressFailureDetails(e,stage),code:typeof e?.code==='number'||['ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN'].includes(e?.code)?e.code:null,reason:e?.message==='INBOX_CAPACITY_EXCEEDED'?'INBOX_CAPACITY_EXCEEDED':/CONNECTION_FORCED/i.test(e?.message||'')?'CONNECTION_FORCED':'INGRESS_FAILED'});};
  const pump=()=>{if(closed||quiesced||inflight.size||!callback)return;const rows=inbox.peek(4096,deliveredThrough);if(rows.length){deliveredThrough=rows.at(-1).id;inflight=new Set(rows.map(r=>r.id));send({event:'deliveries',rows});}};
- const flush=()=>{clearTimeout(flushTimer);flushTimer=undefined;if(!pending.length)return;const batch=pending;pending=[];try{const start=performance.now();inbox.append(batch);metrics.durableCommitMs=performance.now()-start;for(const m of batch){channel?.ack(m.original);metrics.acknowledged++;metrics.lastAckAt=new Date().toISOString();}pump();}catch(e){if(e?.message==='INBOX_CAPACITY_EXCEEDED'){pending=batch;pauseIntake();pump();}else{fail(e);void connection?.close().catch(()=>{});}}};
+ const flush=()=>{clearTimeout(flushTimer);flushTimer=undefined;if(!pending.length)return;const batch=pending;pending=[];
+  try{
+   persistIngressBatch(inbox,batch,m=>channel?.ack(m.original),{
+    canAcknowledge:()=>!closed&&!quiesced&&(workerData.offline||!transportEnded&&!channelEnded),
+    onCommitted:ms=>{metrics.durableCommitMs=ms;},
+    onAcknowledged:()=>{metrics.acknowledged++;metrics.lastAckAt=new Date().toISOString();},
+    onAckFailure:error=>{
+     // The complete batch is already in SQLite. Never put it back in pending.
+     if(isClosedIngressChannel(error)){
+      channelEnded=true;send({event:'ack_deferred',details:ingressFailureDetails(error,'amqp.ack'),committedRows:batch.length});
+      if(!closed&&!quiesced)send({event:'transport_closed'});
+     }else{fail(error,'amqp.ack');void closeTransport();}
+    },
+   });
+   pump();
+  }catch(error){
+   if(error?.message==='INBOX_CAPACITY_EXCEEDED'){pending=batch;pauseIntake();pump();}
+   else{fail(error,'inbox.append');void closeTransport();}
+  }
+ };
  const receive=m=>{if(!m){fail(Error('CONSUMER_CANCELLED'));return;}if(closed)return;if(quiesced){try{channel?.nack(m,false,true);}catch{}return;}if(intakePaused){if(channel)channel.nack(m,false,true);else fail(Error('OFFLINE_CAPACITY_PAUSE_REQUIRES_REDELIVERY'));return;}metrics.received++;metrics.receivedBytes+=m.content.byteLength;metrics.lastReceiveAt=new Date().toISOString();const type=m.properties?.headers?.MessageType??m.properties?.headers?.messageType??'unknown';if(Object.keys(metrics.headersByType).length<128||metrics.headersByType[type])metrics.headersByType[type]=(metrics.headersByType[type]||0)+1;
   if(m.content.byteLength>16*1024**2){fail(Error('INBOX_MESSAGE_TOO_LARGE'));void connection?.close().catch(()=>{});return;}
   if(pending.reduce((n,r)=>n+r.content.byteLength,0)+m.content.byteLength>8*1024**2){flush();if(intakePaused){if(channel)channel.nack(m,false,true);else fail(Error('OFFLINE_CAPACITY_PAUSE_REQUIRES_REDELIVERY'));return;}}
   pending.push({...m,received:Date.now(),original:m});if(pending.length>=100)flush();else if(!flushTimer)flushTimer=setTimeout(flush,5);
  };
- let transportEnded=false,transportClosing;
+ let transportEnded=false,channelEnded=false,transportClosing;
  const closeTransport=()=>transportClosing??=Promise.resolve().then(()=>{
   if(!connection||transportEnded)return;
   return new Promise(resolve=>{let done=false;const finish=()=>{if(done)return;done=true;connection.removeListener('close',finish);resolve();};connection.once('close',finish);Promise.resolve().then(()=>connection.close()).then(finish,finish);});
@@ -100,12 +133,12 @@ if(!isMainThread){
    }
    if(m.action==='offline'&&workerData.offline){for(const row of m.messages)receive({...row,content:Buffer.from(row.content)});flush();report();}
    if(m.action==='close'){closed=true;clearInterval(timer);clearInterval(loadTimer);clearTimeout(pumpTimer);flush();await closeTransport();loop.disable();inbox.close();send({event:'closed'});parentPort.close();}
-  }catch(e){fail(e);}});
+  }catch(e){fail(e,m.action==='complete'?'inbox.complete':m.action==='close'?'actor.shutdown':m.action==='quiesce'?'transport.close':failureStage);}});
   if(!workerData.offline){
    setStage('amqp.connect');const amqp=await import('amqplib');const p=workerData.pkg;
    connection=await amqp.connect({protocol:p.tls?'amqps':'amqp',hostname:p.hostname,port:p.port,username:p.mqUsername??p.username,password:p.mqPassword??p.password,vhost:p.vhost,heartbeat:30},{timeout:15000,...(p.tls?{servername:p.hostname}:{})});
    connection.on('error',fail);connection.on('close',()=>{transportEnded=true;if(!closed&&!quiesced)send({event:'transport_closed'});});
-   setStage('amqp.channel');channel=await connection.createChannel();channel.on('error',fail);channel.on('close',()=>{if(!closed)send({event:'transport_closed'});});setStage('amqp.prefetch');await channel.prefetch(100);
+   setStage('amqp.channel');channel=await connection.createChannel();channel.on('error',fail);channel.on('close',()=>{channelEnded=true;if(!closed&&!quiesced)send({event:'transport_closed'});});setStage('amqp.prefetch');await channel.prefetch(100);
    setStage('amqp.consume');await controlConsumer();
   }
   setStage('actor.ready');send({event:'ready'});timer=setInterval(report,1000);
@@ -134,6 +167,7 @@ export async function connectDurableMq(pkg,path,onMetrics=()=>{},options={}){
   if(m.event==='ready')readyResolve();
   if(m.event==='metrics')onMetrics({...m.metrics,ingressActorId:actorId});
   if(m.event==='deliveries'){for(const row of m.rows){const msg={content:Buffer.from(row.content),properties:row.properties,fields:{...row.fields,inboxId:row.id,inboxReceived:row.received}};if(callback)callback(msg);else waiting.push(msg);}}
+  if(m.event==='ack_deferred')console.warn(JSON.stringify({operation:'inbox.transport_ack',lane:pkg?.lane,sessionId,ingressActorId:actorId,status:'deferred',committedRows:m.committedRows,...m.details}));
   if(m.event==='failure'){console.error(JSON.stringify({operation:'inbox.actor_failure',lane:pkg?.lane,sessionId,ingressActorId:actorId,...m.details}));const e=Object.assign(new Error(m.reason),{code:m.code});readyReject(e);if(connection.listenerCount('error'))connection.emit('error',e);}
   if(m.event==='transport_closed'&&!closed)connection.emit('close');
   if(m.event==='closed')resolveClose?.();
