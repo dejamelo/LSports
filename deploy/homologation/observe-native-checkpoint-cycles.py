@@ -53,7 +53,7 @@ def logs(cid,since):
   except (ValueError,TypeError):continue
   if not isinstance(r,dict) or not re.fullmatch(r'\d{4}-\d\d-\d\dT[0-9:.]+Z',at):continue
   op=r.get('operation')
-  if op not in ('file.persist','state.publication_wait','snapshot.apply_wait','snapshot.events','inbox.checkpoint','inbox.processing_progress','inbox.actor_failure','inbox.transport_ack','feed.coverage'):continue
+  if op not in ('file.persist','state.publication_wait','snapshot.apply_wait','snapshot.events','inbox.checkpoint','inbox.processing_progress','inbox.actor_failure','inbox.transport_ack','feed.coverage','inbox.intake_capacity','inbox.capacity_drain','amqp.connection'):continue
   out={'atUTC':at,'operation':op}
   for k in ('lane','stage','status','publicationStage','sessionId','ingressActorId','ingressStage','reason','errorType','batchId'):
    if isinstance(r.get(k),str) and re.fullmatch('[A-Za-z0-9_.-]{1,120}',r[k]):out[k]=r[k]
@@ -139,7 +139,7 @@ def main():
    key=json.dumps(row,sort_keys=True)
    if key in seen:continue
    seen.add(key);recent.append(row)
-   if row['operation'] in ('inbox.actor_failure','inbox.actor_lifecycle','worker.start','inbox.transport_ack'):
+   if row['operation'] in ('inbox.actor_failure','inbox.actor_lifecycle','worker.start','inbox.transport_ack','inbox.intake_capacity','amqp.connection'):
     critical.append(row);critical=critical[-64:];emit(**{**row,'stage':'current_lane_lifecycle'})
    if row['operation']=='file.persist' and row.get('status')=='ok':publications.append(row);emit(**{**row,'stage':'publication_cycle_completed'})
    if row['operation']=='inbox.checkpoint' and row.get('status')=='persisted':emit(**{**row,'stage':'business_checkpoint_completed'})
@@ -156,7 +156,9 @@ def main():
    coverage=next((r for r in reversed(recent) if r['operation']=='feed.coverage'),{})
    latest={l:{**safe_connection(v,((coverage.get('coverage') or {}).get(l) or {}).get('activity')),'coverageLoggedAtUTC':coverage.get('atUTC')} for l,v in metadata(host).items() if l in paths}
   except Exception as e:emit(stage='publication_metadata_unavailable',errorType=type(e).__name__)
-  emit(stage='cycle_wait_context',elapsedSeconds=round(elapsed,1),containerResources=container_resources(current['State']['Pid']),latestWaits=[r for r in recent if r['operation'] in ('state.publication_wait','snapshot.apply_wait')][-4:],lanes=latest,readOnly=True)
+  emit(stage='cycle_wait_context',elapsedSeconds=round(elapsed,1),containerResources=container_resources(current['State']['Pid']),latestWaits=[r for r in recent if r['operation'] in ('state.publication_wait','snapshot.apply_wait','file.persist')][-6:],lanes=latest,readOnly=True)
+  if latest.get('prematch',{}).get('phase') in ('error','stopped'):
+   reason='PREMATCH_SESSION_NOT_ACTIVE_NO_SUSTAINED_RATE_CLAIM';break
   if points['prematch'][-1]['pendingRows']==0:reason='PREMATCH_INBOX_DRAINED';break
   if len(advances['prematch'])>=4:reason='THREE_COMPLETE_DURABLE_CHECKPOINT_INTERVALS_MEASURED';break
   if retirement_gap(elapsed,last_progress,len(publications),last_progress_publications):reason='NO_PREMATCH_DURABLE_ADVANCE_ACROSS_COMPLETED_PUBLICATIONS';break
