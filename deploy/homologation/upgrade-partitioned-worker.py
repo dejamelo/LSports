@@ -1180,6 +1180,7 @@ def upgrade_partitioned_unlocked(request):
                 require(old_container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'OOM_RESTART_POLICY_UNSAFE');progress['oomContainerId']=worker_states[0]['id'];save(progress)
             require(old_container['Image']==progress['baseImageId'] and snapshot_memory_bytes(old_container['HostConfig']['Memory'])==partition_memory(progress),'OLD_WORKER_IDENTITY_CHANGED_BEFORE_STOP')
             if worker_states[0]['running'] and request.get('snapshotMemoryRepair'):
+                stage='partitioned_upgrade.pre_stop_disk'
                 storage_before_stop(backup,old_container)
             if request.get('fullRecovery') and not progress.get('supplierStoppedBeforeConsumer'):
                 stage='partitioned_upgrade.distribution_stop'
