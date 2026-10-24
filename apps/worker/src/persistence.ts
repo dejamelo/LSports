@@ -4,7 +4,7 @@ import { copyFile, open, rename, mkdir, lstat } from 'node:fs/promises';
 import {getHeapStatistics} from 'node:v8';
 import {dirname} from 'node:path';
 import {walkSnapshot} from './full-snapshot.js';
-import {jsonItems,writeJsonObject,writeJsonRecord} from '@lsports/feed-store';
+import {jsonItems,writeJsonObject} from '@lsports/feed-store';
 import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
 import { TradeState, type Row } from './state.js';
@@ -60,6 +60,26 @@ export function checkpointWriteBuffer(file:Pick<Awaited<ReturnType<typeof open>>
  }};
 }
 
+// Native encode one field/map entry at a time, never a full fixture or state.
+// Lazy map arrays keep their order and JSON schema. The private writer needs
+// neither the public event hash nor recursive primitive-token inspection.
+export async function writePrivateCheckpointRecord(file:Pick<Awaited<ReturnType<typeof open>>,'writeFile'>,record:Record<string,unknown>){
+ let size=0,parts:string[]=[],pending=0;
+ const flush=async()=>{if(!pending)return;const text=parts.join('');parts=[];pending=0;await file.writeFile(text);};
+ const add=async(text:string)=>{const bytes=Buffer.byteLength(text);size+=bytes;if(size>32*1024**2)throw Error('checkpoint_record_limit');if(pending+bytes>65536)await flush();if(bytes>65536){await file.writeFile(text);return;}parts.push(text);pending+=bytes;};
+ await add('{');let first=true;
+ for(const [key,value] of Object.entries(record)){
+  if(value===undefined)continue;
+  if(!first)await add(',');first=false;await add(JSON.stringify(key)+':');
+  if(value&&typeof value==='object'&&Object.getPrototypeOf(value)===Object.prototype&&Symbol.iterator in value){
+   await add('[');let entryFirst=true;
+   for(const entry of value as Iterable<unknown>){if(!entryFirst)await add(',');entryFirst=false;await add(JSON.stringify(entry)??'null');}
+   await add(']');
+  }else await add(JSON.stringify(value)??'null');
+ }
+ await add('}');await flush();
+}
+
 // Stable private sidecar may be ahead of the public feed after a crash; replay remains
 // idempotent and restored prices remain blocked. ACK is sent only after BOTH writes.
 export async function persistRegularCheckpoint(path:string,regular:ReturnType<typeof checkpoint>['regular']|TradeState,observe?:(phase:string)=>void){
@@ -74,7 +94,7 @@ export async function persistRegularCheckpoint(path:string,regular:ReturnType<ty
       const captured=(['prematch','inplay'] as const).flatMap(lane=>[...regular.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({lane,key,row})));
       for(const {lane,key,row} of captured){
         if(!first)await writer.writeFile(',');first=false;
-        await writeJsonRecord(writer,streamedRow(lane,key,row));
+        await writePrivateCheckpointRecord(writer,streamedRow(lane,key,row));
       }
       await writer.writeFile(']}');
     }else await writeJsonObject(writer,{version:1,regular});

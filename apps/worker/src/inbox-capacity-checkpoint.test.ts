@@ -16,3 +16,17 @@ test('capacity stays paused before durable checkpoint and explicitly resumes onl
   assert(states.includes(true));assert.equal(states.at(-1),false);assert.equal(latest.backlog,2,'one old row remains and the queued new receipt is durable');
  }finally{await actor?.close();await rm(dir,{recursive:true,force:true});}
 });
+test('three durable checkpoint cycles retire old rows despite new durable receipts',{timeout:20000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-three-cycles-')),path=join(dir,'feed.json'),inbox=path+'.prematch.inbox.sqlite';let actor:any,latest:any;
+ const message=(id:number)=>({received:Date.now(),content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'cycle-'+id,ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:id,Markets:[{Id:1,Status:1,Bets:[{Id:'1',Price:'2.8',Status:1}]}]}]}})),properties:{headers:{MessageType:3}},fields:{}});
+ const seed=openInbox(inbox);seed.append(Array.from({length:12},(_,i)=>message(i+1)));seed.close();
+ try{actor=await connectDurableMq(pkg,inbox,m=>latest=m,{offline:true});const channel:any=await actor.createChannel(),rows:any[]=[];await channel.consume('unused',(m:any)=>rows.push(m),{});await until(()=>rows.length===12);const s=new TradeState();
+ for(let cycle=0;cycle<3;cycle++){
+  const group=rows.slice(cycle*4,cycle*4+4);for(const row of group){const d=decodeMessage(row.content,row.properties.headers);s.apply('prematch',d.events,d.at);channel.stage(row);}
+  actor.offline([message(100+cycle)]);await until(()=>latest?.acknowledged===cycle+1);
+  const before=openInbox(inbox);assert.equal(before.stats().backlog,13-cycle*3);before.close();
+  await persistRegularCheckpoint(path,s);const {regular,...saved}=streamCheckpoint(s);await createPublisher(path)(s.projection(Date.now(),false),{...saved,regularExternal:true});const restored=new TradeState();await restore(restored,path);assert.equal(restored.rows.prematch.size,(cycle+1)*4);
+  for(const row of group)channel.ack(row);await until(()=>latest?.checkpointed===(cycle+1)*4);assert.equal(latest.backlog,9-cycle*3);
+ }
+ }finally{await actor?.close();await rm(dir,{recursive:true,force:true});}
+});

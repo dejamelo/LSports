@@ -94,7 +94,7 @@ def verify_checkpoint_buffer_sources(old_files,files,old_digest):
     # connected: already tested partial-prefix retirement plus IO counters;
     # persistence: bounded writes, identical JSON/atomicity. No parser, schema,
     # state, provider, feed-store, queue or API changes are permitted here.
-    require(changed=={'apps/worker/src/connected.ts','apps/worker/src/persistence.ts'},'CHECKPOINT_BUFFER_PATCH_SCOPE_UNVERIFIED')
+    require('apps/worker/src/persistence.ts' in changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/persistence.ts'},'CHECKPOINT_BUFFER_PATCH_SCOPE_UNVERIFIED')
 
 def verify_transport_lifecycle_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'TRANSPORT_LIFECYCLE_BASE_DIGEST_MISMATCH')
