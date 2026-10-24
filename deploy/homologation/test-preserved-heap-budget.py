@@ -40,12 +40,13 @@ class HeapBudget(unittest.TestCase):
   plan={'evidenceVerified':True,'oldSpaceMiB':3584,'previousOldSpaceMiB':2560,'containerLimitUnchanged':True,'containerLimitBytes':6442450944}
   NS['existing_pipeline_heap_plan']=lambda worker:dict(plan)
   try:
-   p={'backup':'/var/backups/adl-partitioned-upgrade-test','phase':'stop_requested','memoryLimitBytes':6442450944,'snapshotMemoryRepair':True,'snapshotPressureRepair':True,'livePersistenceRepair':True}
+   p={'backup':'/var/backups/adl-partitioned-upgrade-test','phase':'stopped','oomRestoreVerified':True,'memoryLimitBytes':6442450944,'snapshotMemoryRepair':True,'snapshotPressureRepair':True,'livePersistenceRepair':True}
    req={'resumeBackup':p['backup'],'snapshotMemoryRepair':True,'snapshotPressureRepair':True,'livePersistenceRepair':True,'preservedHeapBudgetRepair':True}
    result=NS['inherit_pressure_heap_plan'](p,req,{'image':'verified-deployed-image'})
    self.assertIs(result,p);self.assertEqual(NS['partition_heap_mib'](result),3584)
    for change in ({'pipelineRepair':True},{'snapshotPressureRepair':False},{'livePersistenceRepair':False},{'resumeBackup':'/var/backups/other'}):
     with self.assertRaises(RuntimeError):NS['inherit_pressure_heap_plan'](dict(p),{**req,**change},{})
+   with self.assertRaises(RuntimeError):NS['inherit_pressure_heap_plan']({**p,'oomRestoreVerified':False},req,{})
   finally:NS['existing_pipeline_heap_plan']=old
  def test_all_new_rehearsals_and_runtime_use_same_budget(self):
   src=Path(__file__).with_name('upgrade-partitioned-worker.py').read_text()

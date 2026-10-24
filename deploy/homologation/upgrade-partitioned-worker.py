@@ -51,7 +51,7 @@ def inherit_pressure_heap_plan(progress,request,worker):
     # Reuse only the exact heap budget already proven by the currently deployed
     # image. This repairs a smaller rehearsal heap; it does not raise cgroup RAM.
     require(request.get('preservedHeapBudgetRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True and request.get('pipelineRepair') is not True and request.get('resumeBackup')==progress.get('backup'),'PRESERVED_PRESSURE_HEAP_SCOPE_UNVERIFIED')
-    require(partition_memory(progress)==6442450944 and progress.get('phase') in ('stop_requested','stopped') and not progress.get('oomRestoreVerified'),'PRESERVED_PRESSURE_HEAP_REQUIRES_PINNED_UNVERIFIED_REHEARSAL')
+    require(partition_memory(progress)==6442450944 and progress.get('phase') in ('stop_requested','stopped') and progress.get('oomRestoreVerified') is True,'PRESERVED_PRESSURE_HEAP_REQUIRES_VERIFIED_REHEARSAL')
     plan=existing_pipeline_heap_plan(worker)
     require(plan is not None and plan.get('oldSpaceMiB')==3584 and plan.get('containerLimitUnchanged') is True,'PRESERVED_PRESSURE_HEAP_SOURCE_UNVERIFIED')
     if progress.get('heapBudgetPlan') is not None:require(progress['heapBudgetPlan']==plan,'PRESERVED_PRESSURE_HEAP_PLAN_CHANGED')
