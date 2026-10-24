@@ -8,6 +8,10 @@ class Scope(unittest.TestCase):
  def test_six_gib_requires_explicit_protected_scope(self):
   with self.assertRaises(RuntimeError):ns['partition_memory']({'memoryLimitBytes':6442450944})
   p={'memoryLimitBytes':6442450944,'pipelineRepair':True};self.assertEqual(ns['partition_memory'](p),6442450944)
+  pressure={'memoryLimitBytes':6442450944,'snapshotMemoryRepair':True,'snapshotPressureRepair':True,'livePersistenceRepair':True}
+  self.assertEqual(ns['partition_memory'](pressure),6442450944)
+  for missing in ({'livePersistenceRepair':False},{'snapshotPressureRepair':False},{'snapshotMemoryRepair':False}):
+   with self.assertRaises(RuntimeError):ns['partition_memory']({**pressure,**missing})
   args=ns['partition_rehearsal_args'](['docker','run','--rm','--memory','4g','--entrypoint','node','image'],p)
   self.assertEqual(args[args.index('--memory')+1],'6g');self.assertEqual(args[args.index('--memory-swap')+1],'6g');self.assertIn('eu.adl.recovery.cache-policy=six-gib-verified',args)
  def test_unrelated_source_changes_and_wrong_digest_are_rejected(self):

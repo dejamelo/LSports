@@ -24,7 +24,8 @@ def verify_live_snapshot_pressure_sources(old_files,files,old_digest):
 
 def partition_memory(progress):
     value=progress.get('memoryLimitBytes',4294967296)
-    require(value==4294967296 or value==6442450944 and progress.get('pipelineRepair') is True,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
+    verified_six_gib=value==6442450944 and (progress.get('pipelineRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('snapshotPressureRepair') is True and progress.get('livePersistenceRepair') is True)
+    require(value==4294967296 or verified_six_gib,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
     return value
 
 def partition_heap_mib(progress):
@@ -899,7 +900,7 @@ def upgrade_partitioned_unlocked(request):
             receipt_path,saved,files=resolve_prepared_upgrade(request,files);digest=saved['digest']
         meta=json.loads((SECURE/'deployment.json').read_bytes());base=partition_base(meta);before=model(base)
         require(control_status()==200,'API_NOT_HEALTHY')
-        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
+        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
         inherited_heap_plan=None
         if request.get('pipelineRepair'):
             require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and memory_limit==6442450944,'PIPELINE_REQUIRES_SIX_GIB_VERIFIED_IDENTITY')
@@ -1020,7 +1021,7 @@ def upgrade_partitioned_unlocked(request):
             check="""import{decodeMessage}from'/app/apps/worker/src/messages.ts';import{partitionedSnapshot,subscriptionInventory}from'/app/apps/worker/src/partitioned-snapshot.ts';await import('/app/apps/worker/src/connected.ts');const sdk=await import('trade360-nodejs-sdk');if(sdk.knownEntityKeys.get(38)!=='OutrightLeagueFixtureUpdate')throw Error();const body={Competition:{Id:1,Competitions:[{Id:2,Events:[{FixtureId:3,OutrightLeague:{FixtureName:'ISOLATED OFFLINE',Status:1,LastUpdate:'2026-10-19T06:00:00Z'}}]}]}};const decoded=decodeMessage(Buffer.from(JSON.stringify({Header:{Type:38,MsgGuid:'offline-38',ServerTimestamp:1792389601000},Body:body})),{});if(decoded.events[0]?.outright?.fixture?.fixtureName!=='ISOLATED OFFLINE')throw Error();if(subscriptionInventory({fixtures:[2,1]},{Body:{Fixtures:[2,1]}}).join(',')!=='1,2')throw Error();let rejected=false;try{subscriptionInventory({fixtures:['PRIVATE_OFFLINE']},{Body:{Fixtures:['PRIVATE_OFFLINE']}})}catch(e){rejected=e.diagnostic?.snapshotValidation?.code==='inventory_invalid_ids'}if(!rejected)throw Error();let applied=0;const p=await partitionedSnapshot({async inventory(){return[11,12]},async events(ids){return ids.map(fixtureId=>({fixtureId,fixture:{status:1}}))}},{assertOpen(){},async begin(){},async batch(rows){applied+=rows.length},async progress(){}},{batchSize:1});if(p.stage!=='complete'||applied!==2)throw Error();console.log('partitioned-offline-ok');"""
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',check],timeout=30)
             require(b'partitioned-offline-ok' in output,'UPGRADE_OFFLINE_TEST_FAILED')
-            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
+            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
         if request.get('preservedHeapBudgetRepair'):
             require(request.get('resumeBackup') and request.get('pipelineRepair') and request.get('snapshotMemoryRepair'),'HEAP_REPAIR_RESUME_SCOPE_UNVERIFIED')
             plan=progress['heapBudgetPlan'] if progress.get('heapBudgetPlan') and progress.get('oomRestoreVerified') else preserved_heap_budget_plan(progress,backup,states('worker'))

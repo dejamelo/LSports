@@ -6,6 +6,12 @@ export function persistenceExpectedImage(ledger,env=process.env){
  if(!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(image||'')||env.ADL_LIVE_OOM_REPAIR==='1')throw Error('EXPECTED_CURRENT_PERSISTENCE_IMAGE_REQUIRED');
  return image;
 }
+export function acceptedWorkerMemoryLimits({mode,snapshotMemoryRepair,pipelineRepair,livePersistenceRepair}){
+ if(mode==='--repair-snapshot')return ['2147483648','4294967296'];
+ if(pipelineRepair)return ['6442450944'];
+ if(snapshotMemoryRepair&&livePersistenceRepair)return ['4294967296','6442450944'];
+ return ['4294967296'];
+}
 // Authorized protected recovery + resumable migration. No credentials are copied or printed.
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -143,7 +149,8 @@ export async function run(args){
   }
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
   stage='remote_consumer_gate';const pre=await remote('preflight');
-  if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!(args[4]==='--repair-snapshot'?['2147483648','4294967296']:(process.env.ADL_PIPELINE_REPAIR==='1'?['6442450944']:['4294967296'])).includes(String(pre.workerModel?.memoryLimitBytes))||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
+  const acceptedMemory=acceptedWorkerMemoryLimits({mode:args[4],snapshotMemoryRepair,pipelineRepair:process.env.ADL_PIPELINE_REPAIR==='1',livePersistenceRepair:process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'});
+  if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!acceptedMemory.includes(String(pre.workerModel?.memoryLimitBytes))||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
   if(['--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
    stage='validation_resume_gate';
