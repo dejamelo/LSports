@@ -1036,8 +1036,12 @@ def upgrade_partitioned_unlocked(request):
             require(b'partitioned-offline-ok' in output,'UPGRADE_OFFLINE_TEST_FAILED')
             progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
         if request.get('preservedHeapBudgetRepair'):
-            require(request.get('resumeBackup') and request.get('pipelineRepair') and request.get('snapshotMemoryRepair'),'HEAP_REPAIR_RESUME_SCOPE_UNVERIFIED')
-            plan=progress['heapBudgetPlan'] if progress.get('heapBudgetPlan') and progress.get('oomRestoreVerified') else preserved_heap_budget_plan(progress,backup,states('worker'))
+            if request.get('pipelineRepair'):
+                require(request.get('resumeBackup') and request.get('snapshotMemoryRepair'),'HEAP_REPAIR_RESUME_SCOPE_UNVERIFIED')
+                plan=progress['heapBudgetPlan'] if progress.get('heapBudgetPlan') and progress.get('oomRestoreVerified') else preserved_heap_budget_plan(progress,backup,states('worker'))
+            else:
+                require(request.get('resumeBackup') and request.get('snapshotMemoryRepair') and request.get('snapshotPressureRepair') and request.get('livePersistenceRepair') and progress.get('heapBudgetPlan'),'PRESERVED_PRESSURE_HEAP_RESUME_SCOPE_UNVERIFIED')
+                plan=progress['heapBudgetPlan']
             partition_heap_mib({**progress,'heapBudgetPlan':plan})
             if progress.get('heapBudgetPlan') is None:
                 private(backup/('heap-budget-plan-'+os.urandom(8).hex()+'.json'),json.dumps(plan).encode());progress['heapBudgetPlan']=plan;save(progress)

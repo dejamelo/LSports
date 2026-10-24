@@ -54,6 +54,7 @@ class HeapBudget(unittest.TestCase):
   self.assertIn("expected['services']['worker']['environment']['NODE_OPTIONS']='--max-old-space-size='+str(partition_heap_mib(progress))",src)
   self.assertIn("env.get('NODE_OPTIONS')=='--max-old-space-size='+str(partition_heap_mib(progress))",src)
   self.assertIn("progress=inherit_pressure_heap_plan(progress,request,before['services']['worker']);save(progress)",src)
+  self.assertIn("request.get('snapshotPressureRepair') and request.get('livePersistenceRepair') and progress.get('heapBudgetPlan')",src)
   js=Path(__file__).with_name('resumable-adl-cutover.mjs').read_text()
   self.assertIn('!repairOptions.snapshotPressureRepair||!repairOptions.livePersistenceRepair||repairOptions.pipelineRepair',js)
 if __name__=='__main__':unittest.main()
