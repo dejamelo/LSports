@@ -351,8 +351,11 @@ export async function session(
     channel.on("close", () => queueMicrotask(() => fail(transportEnd("channel_closed"))));
     await operation("amqp.prefetch", "amqp", () => channel.prefetch(100));
     const ackDelivery=(msg:ConsumeMessage)=>{channel.ack(msg);if(durable)return;state.set(lane,{consumerProgress:{...state.connections[lane].consumerProgress!,acknowledgedMessages:++acknowledgedMessages,lastAckAt:new Date().toISOString()}});};
+    // A failed prefix keeps all not-yet-confirmed rows for the next replay,
+    // even if a cleanup publication later succeeds. Earlier commits stand.
+    let checkpointFailed=false;
     const pendingAcks:ConsumeMessage[]=[];const pendingMetadata=new Map<ConsumeMessage,FeedMessageMetadata>();
-    retireAfterFinalSave=()=>{if(!durable)return;for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();};
+    retireAfterFinalSave=()=>{if(!durable||checkpointFailed)return;for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();};
     const processMessage = async (msg: ConsumeMessage,commit=true) => {
       if (closed) return;
       let messageMetadata: FeedMessageMetadata | undefined;
@@ -438,7 +441,7 @@ export async function session(
       let persisted:Promise<void>;
       if(durable&&save.beforeCapture)persisted=save.beforeCapture(reserve);
       else{reserve();persisted=save();}
-      backgroundCommit=persisted.then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,batchId,publicationId,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(durable||!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
+      backgroundCommit=persisted.then(()=>{console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,batchId,publicationId,status:'persisted',rows:prefix.length,waitedMs:Date.now()-requestedAt,atUTC:new Date().toISOString()}));if(durable||!closed)for(const msg of prefix)ackDelivery(msg);for(const msg of prefix)pendingMetadata.delete(msg);}).catch(error=>{checkpointFailed=true;fail(new OperationError({...describeFailure(error,'feed.apply','local'),...(metadata?{messageMetadata:metadata}:{}),deliveryDisposition:'retained_in_durable_inbox'}));}).finally(()=>{backgroundCommit=undefined;checkpointPending=0;commitPending();});
     };
     let drainScheduled=false;
     const scheduleDrain=()=>{if(drainScheduled||closed)return;drainScheduled=true;
@@ -449,7 +452,17 @@ export async function session(
         while(!closed&&durable&&stageDelivery&&pendingAcks.length+checkpointPending>=32768)await backgroundCommit;
         if(closed)return;
         const messages=buffered.splice(0,durable&&stageDelivery?Math.min(4096,Math.max(1,32768-pendingAcks.length-checkpointPending)):durable?4096:100);
-        for(const msg of messages){await processMessage(msg,false);if(closed)break;if(durable&&stageDelivery)stageDelivery.call(channel,msg);}
+        for(const msg of messages){
+          await processMessage(msg,false);if(closed)break;
+          if(durable&&stageDelivery){
+            stageDelivery.call(channel,msg);
+            // The next decode may wait on the publication heap reserve. Make
+            // the already-applied prefix eligible NOW, not after all 4096 rows.
+            // Coalescing still reserves the bounded prefix before capture; this
+            // never acknowledges a raw row before its business state is durable.
+            commitPending();
+          }
+        }
         if(!closed&&durable&&stageDelivery)commitPending();
         else if(!closed&&pendingAcks.length){await save();if(!closed){for(const msg of pendingAcks)ackDelivery(msg);pendingAcks.length=0;pendingMetadata.clear();}}
         if(buffered.length&&!closed)scheduleDrain();
