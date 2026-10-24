@@ -1,5 +1,7 @@
 """Prepare a verified derived worker image, then activate once; preserve migration and POSNET."""
 PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts'}
+PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'b7824adda09f91c2fc95a519916fcfd9688c3e89ef61ee994706b44f4f2e7489'}
+PIPELINE_BASE_FILES=PARTITION_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
 def verify_live_oom_identity(worker,request):
     require(request.get('snapshotMemoryRepair') and worker.get('oomKilled') is True and worker.get('exitCode')==137 and not worker.get('running') and worker.get('name')=='/adl-homologation-worker-1' and re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))) and str(worker.get('id','')).startswith(request['expectedOomPrefix']),'CURRENT_OOM_IDENTITY_UNVERIFIED')
 
@@ -86,9 +88,11 @@ def partition_rehearsal_args(args,progress):
         args[2:2]=['--label','eu.adl.recovery.cache-policy=six-gib-verified']
     return args
 
-def verify_pipeline_sources(old_files,files,old_digest):
-    require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
-    changed={n for n in files if files[n]!=old_files[n]}
+def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
+    require(set(files)==PARTITION_FILES and set(old_files)==PIPELINE_BASE_FILES and set(added_old_files)==set(PIPELINE_ADDED_DEPENDENCY_SHA256),'PIPELINE_SOURCE_MANIFEST_MISMATCH')
+    require({name:hashlib.sha256(added_old_files[name].encode()).hexdigest() for name in added_old_files}==PIPELINE_ADDED_DEPENDENCY_SHA256,'PIPELINE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
+    require(hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
+    verified_base={**old_files,**added_old_files};changed={n for n in files if files[n]!=verified_base[n]}
     require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
 
 def verify_publication_reserve_sources(old_files,files,old_digest):
@@ -1010,7 +1014,10 @@ def upgrade_partitioned_unlocked(request):
                 elif request.get('publicationReserveRepair'):
                     require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True,'PUBLICATION_RESERVE_REQUIRES_LIVE_PIPELINE_IDENTITY')
                     verify_publication_reserve_sources(old_files,files,old_digest)
-                elif request.get('pipelineRepair'):verify_pipeline_sources(old_files,files,old_digest)
+                elif request.get('pipelineRepair'):
+                    legacy_files={name:old_files[name] for name in PIPELINE_BASE_FILES if name in old_files}
+                    added_files={name:old_files[name] for name in PIPELINE_ADDED_DEPENDENCY_SHA256 if name in old_files}
+                    verify_pipeline_sources(legacy_files,files,old_digest,added_files)
                 elif request.get('snapshotPressureRepair'):
                     require(request.get('livePersistenceRepair') is True and request.get('liveOomRepair') is not True,'PRESSURE_REPAIR_REQUIRES_VERIFIED_LIVE_WORKER')
                     verify_live_snapshot_pressure_sources(old_files,files,old_digest)

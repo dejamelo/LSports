@@ -1,4 +1,4 @@
-import unittest,hashlib,json,runpy,tempfile,fcntl,re,ast
+import unittest,hashlib,json,runpy,tempfile,fcntl,re,ast,subprocess
 from pathlib import Path
 test_dir=Path(__file__).parent
 ns=runpy.run_path(str(test_dir/'test-upgrade-partitioned-worker.py'))['NS']
@@ -13,6 +13,10 @@ class Scope(unittest.TestCase):
   self.assertEqual(rollout,ns['PARTITION_FILES'])
   self.assertEqual(source.count('partitionWorkerSourceNames.map('),2)
   self.assertEqual(source.count('names.push(...partitionPackageSourceNames)'),2)
+ def test_added_dependency_pin_matches_reviewed_installed_source_commit(self):
+  name='apps/worker/src/snapshot-capacity.ts'
+  source=subprocess.check_output(['git','show','0cb0e6b:'+name],cwd=test_dir.parents[1])
+  self.assertEqual(hashlib.sha256(source).hexdigest(),ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][name])
  def test_existing_four_gib_scope_is_unchanged(self):
   self.assertEqual(ns['partition_memory']({}),4294967296)
   command=['docker','run','--rm','--memory','4g','image'];self.assertEqual(ns['partition_rehearsal_args'](command[:],{}),command)
@@ -26,11 +30,14 @@ class Scope(unittest.TestCase):
   args=ns['partition_rehearsal_args'](['docker','run','--rm','--memory','4g','--entrypoint','node','image'],p)
   self.assertEqual(args[args.index('--memory')+1],'6g');self.assertEqual(args[args.index('--memory-swap')+1],'6g');self.assertIn('eu.adl.recovery.cache-policy=six-gib-verified',args)
  def test_unrelated_source_changes_and_wrong_digest_are_rejected(self):
-  old={p:'old' for p in ns['PARTITION_FILES']};digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-  candidate={**old,'apps/worker/src/connected.ts':'batch-fairness','apps/worker/src/durable-ingress.mjs':'covering-index','apps/worker/src/full-snapshot.ts':'bounded-batch','apps/worker/src/provider.ts':'batch-plumbing','apps/worker/src/diagnostics.ts':'heap-and-container-admission','apps/worker/src/snapshot-capacity.ts':'two-source-memory-budget'}
-  ns['verify_pipeline_sources'](old,candidate,digest)
-  for changed,sha in ((old,digest),({**candidate,'apps/worker/src/persistence.ts':'unrelated'},digest),({**candidate,'apps/worker/src/messages.ts':'unrelated'},digest),(candidate,'f'*64)):
-   with self.assertRaises(RuntimeError):ns['verify_pipeline_sources'](old,changed,sha)
+  old={p:'old' for p in ns['PIPELINE_BASE_FILES']};digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  dep='apps/worker/src/snapshot-capacity.ts';added={dep:'installed-dependency'};base_hash=hashlib.sha256(added[dep].encode()).hexdigest();pinned=ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep];ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep]=base_hash
+  try:
+   candidate={**old,**added,'apps/worker/src/connected.ts':'batch-fairness','apps/worker/src/durable-ingress.mjs':'covering-index','apps/worker/src/full-snapshot.ts':'bounded-batch','apps/worker/src/provider.ts':'batch-plumbing','apps/worker/src/diagnostics.ts':'heap-and-container-admission',dep:'two-source-memory-budget'}
+   self.assertEqual(set(candidate),ns['PARTITION_FILES']);ns['verify_pipeline_sources'](old,candidate,digest,added)
+   for changed,sha,source in ((old,digest,added),({**candidate,'apps/worker/src/persistence.ts':'unrelated'},digest,added),({**candidate,'apps/worker/src/messages.ts':'unrelated'},digest,added),(candidate,'f'*64,added),(candidate,digest,{dep:'unverified-dependency'})):
+    with self.assertRaises(RuntimeError):ns['verify_pipeline_sources'](old,changed,sha,source)
+  finally:ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep]=pinned
 class RetentionOrigin(unittest.TestCase):
  def test_only_completed_six_gib_preparation_can_be_derived(self):
   old={'phase':'stopped','pipelineRepair':True,'memoryLimitBytes':6442450944,'oldContainer':'a'*64,'verifiedExitContainerId':'a'*64,'preExitProof':{'verified':True}}
