@@ -166,7 +166,9 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         let attempt = 0;
         while (!signal.aborted) {
           try {
-            await (dependencies.session ?? session)(pkg, config, state, save, signal, undefined, `${path}.${pkg.lane}.inbox.sqlite`);
+            const runSession=dependencies.session ?? session;
+            const sessionDependencies=dependencies.session?undefined:{connect:amqp.connect,clientFactory:clients,durableConnect:connectDurableMq,checkpointBatchThreshold:pkg.lane==='prematch'?32768:32,checkpointBatchFlushMs:120000};
+            await runSession(pkg, config, state, save, signal, sessionDependencies, `${path}.${pkg.lane}.inbox.sqlite`);
             attempt = 0;
           } catch (error) {
             if (!signal.aborted) {
@@ -249,7 +251,7 @@ export async function session(
   state: TradeState,
   save: PersistenceSave,
   signal: AbortSignal,
-  dependencies: {connect:typeof amqp.connect;clientFactory:typeof clients;durableConnect?:typeof connectDurableMq} = { connect: amqp.connect, clientFactory: clients },
+  dependencies: {connect:typeof amqp.connect;clientFactory:typeof clients;durableConnect?:typeof connectDurableMq;checkpointBatchThreshold?:number;checkpointBatchFlushMs?:number} = { connect: amqp.connect, clientFactory: clients },
   ingressPath?: string,
 ) {
   const lane = pkg.lane,sessionId=randomUUID();
@@ -331,10 +333,12 @@ export async function session(
   })();void plannedStop.catch(error=>console.error(JSON.stringify({lane,status:'failed',...describeFailure(error,'distribution.stop','http')})));};
   signal.addEventListener("abort", abort, { once: true });
   let processing = Promise.resolve();let backgroundCommit:Promise<void>|undefined;let checkpointPending=0;
+  const checkpointBatchThreshold=dependencies.checkpointBatchThreshold??1,checkpointBatchFlushMs=dependencies.checkpointBatchFlushMs??120000;
+  if(!Number.isSafeInteger(checkpointBatchThreshold)||checkpointBatchThreshold<1||checkpointBatchThreshold>32768||!Number.isSafeInteger(checkpointBatchFlushMs)||checkpointBatchFlushMs<1||checkpointBatchFlushMs>120000)throw Error('INVALID_CHECKPOINT_BATCH_POLICY');
   let buffered: ConsumeMessage[] = [];
   let bufferingForSnapshot = false;let snapshotApplicationActive=false;
   let retireAfterFinalSave:(()=>void)|undefined;
-  let drainTimer:ReturnType<typeof setTimeout>|undefined;
+  let drainTimer:ReturnType<typeof setTimeout>|undefined,checkpointFlushTimer:ReturnType<typeof setTimeout>|undefined;
   const seen = new Set<string>();
   const reportedShapes = new Set<string>();
   try {
@@ -432,8 +436,13 @@ export async function session(
       }
     };
     const stageDelivery=(channel as typeof channel & {stage?:(msg:ConsumeMessage)=>void}).stage;
-    const commitPending=()=>{
+    const commitPending=(force=false)=>{
       if(backgroundCommit||closed||!pendingAcks.length)return;
+      if(!force&&pendingAcks.length<checkpointBatchThreshold){
+        if(!checkpointFlushTimer){checkpointFlushTimer=setTimeout(()=>{checkpointFlushTimer=undefined;commitPending(true);},checkpointBatchFlushMs);checkpointFlushTimer.unref();}
+        return;
+      }
+      if(checkpointFlushTimer){clearTimeout(checkpointFlushTimer);checkpointFlushTimer=undefined;}
       let prefix:ConsumeMessage[]=[],publicationId:number|undefined;const batchId=randomUUID();const metadata=pendingMetadata.get(pendingAcks[0]);
       const requestedAt=Date.now();console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,batchId,status:'waiting_persistence',rows:pendingAcks.length,atUTC:new Date().toISOString()}));
       const reserve=(id?:number)=>{publicationId=id;prefix=pendingAcks.splice(0);checkpointPending=prefix.length;console.info(JSON.stringify({operation:'inbox.checkpoint',lane,sessionId,ingressActorId,batchId,publicationId,status:'reserved_before_capture',rows:prefix.length,atUTC:new Date().toISOString()}));};
@@ -752,7 +761,7 @@ export async function session(
     if (!signal.aborted) fail(error);
     throw error;
   } finally {
-    clearTimeout(drainTimer);
+    clearTimeout(drainTimer);clearTimeout(checkpointFlushTimer);
     signal.removeEventListener("abort", abort);
     state.set(lane, {
       consumerProgress:{...state.connections[lane].consumerProgress!,active:false},

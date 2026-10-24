@@ -13,7 +13,7 @@ for(const fail of [false,true])test(`queued checkpoint reserves the complete app
   const {regular,...saved}=streamCheckpoint(stable);await persistRegularCheckpoint(path,stable);await publish(stable.projection(Date.now(),false),{...saved,regularExternal:true});
  },id));
  const api={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true}},async snapshot(){return []},async catalog(){return []}};
- const task=session(pkg,{staleMs:3600000,recoveryMs:300000} as any,state,save,abort.signal,{connect:null as any,clientFactory:()=>api as any,durableConnect:async(p,db,onMetrics)=>actor=await connectDurableMq(p,db,m=>{metrics=m;onMetrics?.(m)},{offline:true,deferTransport:true})},dbPath);void task.catch(()=>{});
+ const task=session(pkg,{staleMs:3600000,recoveryMs:300000} as any,state,save,abort.signal,{connect:null as any,clientFactory:()=>api as any,durableConnect:async(p,db,onMetrics)=>actor=await connectDurableMq(p,db,m=>{metrics=m;onMetrics?.(m)},{offline:true,deferTransport:true}),checkpointBatchThreshold:8192,checkpointBatchFlushMs:1000},dbPath);void task.catch(()=>{});
  try{
   await until(()=>state.connections.prematch.phase==='connected');await sleep(50);
   block=true;const preceding=save();await until(()=>busy);
