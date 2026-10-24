@@ -1,7 +1,18 @@
-import unittest,hashlib,json,runpy,tempfile,fcntl
+import unittest,hashlib,json,runpy,tempfile,fcntl,re,ast
 from pathlib import Path
-ns=runpy.run_path(str(Path(__file__).with_name('test-upgrade-partitioned-worker.py')))['NS']
+test_dir=Path(__file__).parent
+ns=runpy.run_path(str(test_dir/'test-upgrade-partitioned-worker.py'))['NS']
 class Scope(unittest.TestCase):
+ def test_rollout_manifest_matches_verified_image_dependencies(self):
+  source=(test_dir/'resumable-adl-cutover.mjs').read_text()
+  worker=re.search(r"partitionWorkerSourceNames=Object\.freeze\((\[[^\]]+\])\)",source)
+  packages=re.search(r"partitionPackageSourceNames=Object\.freeze\((\[[^\]]+\])\)",source)
+  self.assertIsNotNone(worker);self.assertIsNotNone(packages)
+  worker_names=ast.literal_eval(worker.group(1));package_names=ast.literal_eval(packages.group(1))
+  rollout={f'apps/worker/src/{name}' for name in worker_names}|set(package_names)
+  self.assertEqual(rollout,ns['PARTITION_FILES'])
+  self.assertEqual(source.count('partitionWorkerSourceNames.map('),2)
+  self.assertEqual(source.count('names.push(...partitionPackageSourceNames)'),2)
  def test_existing_four_gib_scope_is_unchanged(self):
   self.assertEqual(ns['partition_memory']({}),4294967296)
   command=['docker','run','--rm','--memory','4g','image'];self.assertEqual(ns['partition_rehearsal_args'](command[:],{}),command)

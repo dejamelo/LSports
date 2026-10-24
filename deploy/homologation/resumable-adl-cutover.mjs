@@ -24,6 +24,8 @@ import {validateDistribution} from './distribution-validation.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(process.env.ADL_REPO_ROOT||path.resolve(here,'../..')),runtimeRef=process.env.ADL_RUNTIME_REF||'HEAD';
 const auditEntrypoint=path.resolve(here,'../../scripts/audit-aws-cutover.ts');
+const partitionWorkerSourceNames=Object.freeze(['connected.ts','connection-closer.ts','diagnostics.ts','snapshot-capacity.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','durable-ingress.mjs','durable-ingress.d.mts']);
+const partitionPackageSourceNames=Object.freeze(['packages/contracts/src/index.ts','packages/feed-store/src/index.ts']);
 const emit=value=>console.log(JSON.stringify({operation:'cutover.resumable',...value}));
 export async function step(ledger,name,save,action){
  if(ledger.steps[name]?.status==='ok'){emit({stage:name,status:'reused'});return ledger.steps[name].result;}
@@ -93,7 +95,7 @@ export async function run(args){
     const macRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);const mac=macRows.find(r=>r.operation==='cutover.audit');
     if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
-    const names=['connected.ts','connection-closer.ts','diagnostics.ts','snapshot-capacity.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','durable-ingress.mjs','durable-ingress.d.mts'].map(n=>'apps/worker/src/'+n);names.push('packages/contracts/src/index.ts','packages/feed-store/src/index.ts');
+    const names=partitionWorkerSourceNames.map(n=>'apps/worker/src/'+n);names.push(...partitionPackageSourceNames);
     const {createHash}=await import('node:crypto');const sourceSets={};
     for(const ref of ['6f6b8928aee8dadab7b9be1f9dd2755f7c8fa46f',runtimeRef]){const full=(await command('git',['rev-parse',ref],undefined,10000,true)).trim();sourceSets[full]={};for(const name of names)sourceSets[full][name]=createHash('sha256').update(await command('git',['show',full+':'+name],undefined,10000,true)).digest('hex');}
     const {writeProtectedReport}=await import('./distribution-validation.mjs');const {observeRecovery}=await import('./recovery-progress.mjs');
@@ -224,7 +226,7 @@ export async function run(args){
      const evidence={capturedAt:new Date().toISOString(),previous,current,readOnly:true,providerRequests:0};ledger.inventoryRepairEvidence??=evidence;ledger.inventoryRepairLatestEvidence=evidence;await save();
      emit({stage:'inventory_evidence',status:'saved',providerRequests:0,progressFile:progress,workerRestarted:false});
     }
-    const names=['connected.ts','connection-closer.ts','diagnostics.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','durable-ingress.mjs','durable-ingress.d.mts'].map(name=>'apps/worker/src/'+name);names.push('packages/contracts/src/index.ts','packages/feed-store/src/index.ts');
+    const names=partitionWorkerSourceNames.map(name=>'apps/worker/src/'+name);names.push(...partitionPackageSourceNames);
     const {createHash}=await import('node:crypto'),files={},baseHashes={};
     const baseRef=snapshotMemoryRepair?'7248e39':durableMode?'789707f':args[4]==='--snapshot-throughput-repair'?'043af2e':['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?'dcd644b':throughputMode?'b63e735':nullableMode?'db4c193':supplierMode?'3425f72':fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
     for(const name of names){files[name]=await command('git',['show',runtimeRef+':'+name],undefined,10000,true);baseHashes[name]=existing.includes(name)?createHash('sha256').update(await command('git',['show',baseRef+':'+name],undefined,10000,true)).digest('hex'):null;}
