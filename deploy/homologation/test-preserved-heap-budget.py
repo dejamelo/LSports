@@ -35,10 +35,25 @@ class HeapBudget(unittest.TestCase):
   with self.assertRaises(RuntimeError):self.exercise(workerChange={'running':True})
  def test_no_unverified_saved_heap_plan(self):
   with self.assertRaises(RuntimeError):NS['partition_heap_mib']({'memoryLimitBytes':6442450944,'pipelineRepair':True,'heapBudgetPlan':{'oldSpaceMiB':3584}})
+ def test_pressure_rehearsal_inherits_only_the_deployed_verified_plan(self):
+  old=NS['existing_pipeline_heap_plan']
+  plan={'evidenceVerified':True,'oldSpaceMiB':3584,'previousOldSpaceMiB':2560,'containerLimitUnchanged':True,'containerLimitBytes':6442450944}
+  NS['existing_pipeline_heap_plan']=lambda worker:dict(plan)
+  try:
+   p={'backup':'/var/backups/adl-partitioned-upgrade-test','phase':'stop_requested','memoryLimitBytes':6442450944,'snapshotMemoryRepair':True,'snapshotPressureRepair':True,'livePersistenceRepair':True}
+   req={'resumeBackup':p['backup'],'snapshotMemoryRepair':True,'snapshotPressureRepair':True,'livePersistenceRepair':True,'preservedHeapBudgetRepair':True}
+   result=NS['inherit_pressure_heap_plan'](p,req,{'image':'verified-deployed-image'})
+   self.assertIs(result,p);self.assertEqual(NS['partition_heap_mib'](result),3584)
+   for change in ({'pipelineRepair':True},{'snapshotPressureRepair':False},{'livePersistenceRepair':False},{'resumeBackup':'/var/backups/other'}):
+    with self.assertRaises(RuntimeError):NS['inherit_pressure_heap_plan'](dict(p),{**req,**change},{})
+  finally:NS['existing_pipeline_heap_plan']=old
  def test_all_new_rehearsals_and_runtime_use_same_budget(self):
   src=Path(__file__).with_name('upgrade-partitioned-worker.py').read_text()
   self.assertIn("rehearsal_command+['--max-old-space-size='+str(partition_heap_mib(progress))",src)
   self.assertIn("readback_command+['--max-old-space-size='+str(partition_heap_mib(progress))",src)
   self.assertIn("expected['services']['worker']['environment']['NODE_OPTIONS']='--max-old-space-size='+str(partition_heap_mib(progress))",src)
   self.assertIn("env.get('NODE_OPTIONS')=='--max-old-space-size='+str(partition_heap_mib(progress))",src)
+  self.assertIn("progress=inherit_pressure_heap_plan(progress,request,before['services']['worker']);save(progress)",src)
+  js=Path(__file__).with_name('resumable-adl-cutover.mjs').read_text()
+  self.assertIn('!repairOptions.snapshotPressureRepair||!repairOptions.livePersistenceRepair||repairOptions.pipelineRepair',js)
 if __name__=='__main__':unittest.main()

@@ -47,6 +47,17 @@ def existing_pipeline_heap_plan(worker):
     require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
     return copy.deepcopy(old['heapBudgetPlan'])
 
+def inherit_pressure_heap_plan(progress,request,worker):
+    # Reuse only the exact heap budget already proven by the currently deployed
+    # image. This repairs a smaller rehearsal heap; it does not raise cgroup RAM.
+    require(request.get('preservedHeapBudgetRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True and request.get('pipelineRepair') is not True and request.get('resumeBackup')==progress.get('backup'),'PRESERVED_PRESSURE_HEAP_SCOPE_UNVERIFIED')
+    require(partition_memory(progress)==6442450944 and progress.get('phase') in ('stop_requested','stopped') and not progress.get('oomRestoreVerified'),'PRESERVED_PRESSURE_HEAP_REQUIRES_PINNED_UNVERIFIED_REHEARSAL')
+    plan=existing_pipeline_heap_plan(worker)
+    require(plan is not None and plan.get('oldSpaceMiB')==3584 and plan.get('containerLimitUnchanged') is True,'PRESERVED_PRESSURE_HEAP_SOURCE_UNVERIFIED')
+    if progress.get('heapBudgetPlan') is not None:require(progress['heapBudgetPlan']==plan,'PRESERVED_PRESSURE_HEAP_PLAN_CHANGED')
+    else:progress['heapBudgetPlan']=plan
+    return progress
+
 def preserved_heap_budget_plan(progress,backup,workers):
     # This bounded adjustment is tied to the exact failed preparation, not a
     # general heap override. The six-GiB cgroup remains unchanged.
@@ -971,6 +982,8 @@ def upgrade_partitioned_unlocked(request):
             save(progress)
         if receipt_path.exists():
             require(receipt_path.is_file() and not receipt_path.is_symlink(),'UPGRADE_RECEIPT_UNVERIFIED');progress=json.loads(receipt_path.read_bytes());require(progress['digest']==digest,'UPGRADE_DIGEST_MISMATCH');backup=Path(progress['backup'])
+            if request.get('preservedHeapBudgetRepair'):
+                progress=inherit_pressure_heap_plan(progress,request,before['services']['worker']);save(progress)
             image_info=json.loads(run(['docker','image','inspect',progress['image']]))[0]
             require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==digest,'UPGRADE_IMAGE_LABEL_MISMATCH')
         else:
