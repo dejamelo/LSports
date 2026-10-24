@@ -30,6 +30,19 @@ test('lazy projection preserves complete public schema, duplicate precedence, se
   assert.ok(reread.events.every((e:any)=>e.markets.every((m:any)=>m.selections.every((s:any)=>!s.available))));
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('recovery projection fast path preserves feed semantics while global gates block every quote',async()=>{
+ const s=new TradeState(),now=1700000000000;
+ s.apply('prematch',[{fixtureId:10,fixture:{status:1,sport:{name:'Football'}},markets:[{id:1,status:1,bets:[{id:'1',price:'2.1',status:1,isChanged:1},{id:'2',price:'3.1',status:1,isChanged:1,settlement:2}]},{id:2,status:3,bets:[{id:'3',price:'4.1',status:1,isChanged:1}]}]}],now);
+ s.apply('inplay',[{fixtureId:20,fixture:{status:2,sport:{name:'Football'}},markets:[{id:1,status:1,bets:[{id:'1',price:'2.3',status:1,isChanged:1}]}]}],now);
+ s.set('prematch',{phase:'recovering',ingressProgress:{processingBacklog:900,oldestProcessingAgeMs:6000} as any});
+ s.set('inplay',{phase:'connected',ingressProgress:{processingBacklog:900,oldestProcessingAgeMs:6000} as any});
+ const expected=JSON.parse(JSON.stringify(s.feed(now)));
+ assert.equal(expected.coverage.prematch.eventsWithSelectableOdds,0);
+ assert.equal(expected.coverage.inplay.eventsWithSelectableOdds,0);
+ const dir=await mkdtemp(join(tmpdir(),'projection-recovery-fast-path-')),path=join(dir,'feed.json');
+ try{await createPublisher(path)(s.projection(now,false));assert.deepEqual(JSON.parse(await readFile(path,'utf8')),expected);}
+ finally{await rm(dir,{recursive:true,force:true});}
+});
 test('captured projection stays consistent while updates and recovery mutate live rows',async()=>{
  const s=new TradeState(),now=1700000000000;
  s.apply('prematch',[{fixtureId:1,fixture:{status:1},markets:[{id:1,status:1,bets:[{id:'1',price:'2.1',isChanged:1,status:1}]}]}],now);

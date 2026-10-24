@@ -66,6 +66,16 @@ function selectionReasons(row:Row,m:Market,b:NonNullable<Market['bets']>[number]
               ...(row.timestampRecovery?.get(`${m.id}:${b.id}`)?.status === "awaiting_fresh_amqp" ? ["awaiting_timestamp_recovery"] : []),
               ...(row.restored && !quoteConfirmed(row,`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
             ];}
+function hasSelectableSelection(row:Row,m:Market,b:NonNullable<Market['bets']>[number],status:number|undefined,connection:ConnectionState){
+ if(connection.phase!=="connected")return false;
+ const ingress=connection.ingressProgress;
+ if(ingress&&(ingress.processingBacklog??ingress.backlog)>0&&(ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000)return false;
+ if(![1,2,9].includes(status??0)||m.status!==1||(b.betStatusId??b.status)!==1)return false;
+ if(b.settlement!==undefined&&b.settlement!==0)return false;
+ const price=Number(b.price);if(!(price>1&&Number.isFinite(price)))return false;
+ const key=`${m.id}:${b.id}`;
+ return !row.deferredTimestampBets?.has(key)&&row.timestampRecovery?.get(key)?.status!=="awaiting_fresh_amqp"&&(!row.restored||quoteConfirmed(row,key));
+}
 const startTimeFormatter=new Intl.DateTimeFormat('es-AR',{
  timeZone:'America/Argentina/Buenos_Aires',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'
 });
@@ -434,7 +444,7 @@ export class TradeState {
         if(onlyOutright&&!row.outright)continue;
         const view=Object.create(captured) as TradeState;
         view.rows={prematch:new Map(),inplay:new Map()};view.rows[lane].set(id,row);
-        const part=view.feed(now,false,false);
+        const part=view.feed(now,false,false,true);
         if(lane==='prematch'&&live.has(String(id)))part.events=[];
         yield {lane,part};
       }
@@ -444,6 +454,7 @@ export class TradeState {
     for(const lane of ['prematch','inplay'] as const)Object.assign(base.coverage![lane],{
       rowsStored:0,rowsWithoutFixture:0,rowsPublished:0,rowsHiddenAsDuplicate:0,
       outrightMarketRowsWithoutFixture:0,eventsWithMarkets:0,eventsWithSelections:0,eventsWithSelectableOdds:0});
+    const availabilityBlocks=captured.availabilityBlocks();
     for(const lane of ['prematch','inplay'] as const)for(const [id,row] of captured.rows[lane]){
       const target=base.coverage![lane];target.rowsStored++;
       if(!row.fixture){target.rowsWithoutFixture++;if(row.outright&&row.marketReceipt)target.outrightMarketRowsWithoutFixture=(target.outrightMarketRowsWithoutFixture??0)+1;continue;}
@@ -453,8 +464,9 @@ export class TradeState {
       if([...row.markets.values()].some(m=>m.bets?.length))target.eventsWithSelections++;
       const status=(row.livescore&&row.livescore.at>=(row.fixture?.at||0)?row.livescore.value.scoreboard?.status:undefined)??row.fixture.value.status;
       let selectable=false;
-      for(const market of row.markets.values()){
-        if((market.bets||[]).some(b=>selectionReasons(row,market,b,status,captured.connections[lane]).length===0)){selectable=true;break;}
+      if(!availabilityBlocks[lane]?.length)for(const market of row.markets.values()){
+        for(const bet of market.bets||[])if(hasSelectableSelection(row,market,bet,status,captured.connections[lane])){selectable=true;break;}
+        if(selectable)break;
       }
       if(selectable)target.eventsWithSelectableOdds++;
     }
@@ -474,11 +486,11 @@ export class TradeState {
     });
     return base;
   }
-  feed(now = Date.now(),useCache=false,deferAvailability=false): EventFeed {
+  feed(now = Date.now(),useCache=false,deferAvailability=false,projectionPart=false): EventFeed {
     const blocks=this.availabilityBlocks();
     const ticketVersionRecoveries: NonNullable<EventFeed["ticketVersionRecoveries"]> = [];
     const ticketOutcomes: NonNullable<EventFeed["ticketOutcomes"]> = [];
-    for (const lane of ["prematch", "inplay"] as const) {
+    if(!projectionPart)for (const lane of ["prematch", "inplay"] as const) {
       for (const [key,row] of this.rows[lane]) for(const [betKey,recovery] of row.timestampRecovery || []) {
         const marketId=betKey.slice(0,betKey.indexOf(':'));
         ticketVersionRecoveries.push({auditId:recovery.auditId,eventId:`${lane}:${key}`,marketId:`${lane}:${key}:${marketId}`,selectionId:`${lane}:${key}:${betKey}`,previousVersion:recovery.previousVersion,baselineVersion:recovery.baselineVersion});
@@ -658,6 +670,7 @@ export class TradeState {
         if(useCache&&!row.outright){const base=events[events.length-1];this.projectionCache.set(row,{context,event:base});if(!deferAvailability)events[events.length-1]=maskEventAvailability(base,blocks[lane]);}
       }
     }
+    if(projectionPart)return {mode:"connected",events,outrightDiagnostics} as EventFeed;
     // Prefer InPlay when a fixture exists in both packages; never merge their prices.
     const inplayIds = new Set(
       events
