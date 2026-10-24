@@ -55,9 +55,9 @@ def logs(cid,since):
   op=r.get('operation')
   if op not in ('file.persist','state.publication_wait','snapshot.apply_wait','snapshot.events','inbox.checkpoint','inbox.processing_progress','inbox.actor_failure','inbox.transport_ack','feed.coverage'):continue
   out={'atUTC':at,'operation':op}
-  for k in ('lane','stage','status','publicationStage','sessionId','ingressActorId','ingressStage','reason','errorType'):
+  for k in ('lane','stage','status','publicationStage','sessionId','ingressActorId','ingressStage','reason','errorType','batchId'):
    if isinstance(r.get(k),str) and re.fullmatch('[A-Za-z0-9_.-]{1,120}',r[k]):out[k]=r[k]
-  for k in ('rows','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','elapsedMs','publicationElapsedMs','waitedMs','appliedRows','validatedRows','rssBytes','heapUsedBytes','errorCode'):
+  for k in ('publicationId','rows','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','elapsedMs','publicationElapsedMs','waitedMs','appliedRows','validatedRows','rssBytes','heapUsedBytes','errorCode'):
    if type(r.get(k)) in (int,float):out[k]=r[k]
   if isinstance(r.get('errorCode'),str) and re.fullmatch('[A-Z_0-9]{1,64}',r['errorCode']):out['errorCode']=r['errorCode']
   if isinstance(r.get('signals'),list):out['signals']=[v for v in r['signals'][:8] if isinstance(v,str) and re.fullmatch('[A-Z_0-9]{1,80}',v)]
@@ -72,6 +72,17 @@ def drain_summary(points,elapsed,checkpoint_advances):
  intervals=[(a['pendingRows']-b['pendingRows'])/(b['elapsedSeconds']-a['elapsedSeconds']) for a,b in zip(checkpoint_advances,checkpoint_advances[1:]) if b['elapsedSeconds']>a['elapsedSeconds']]
  sustained=len(intervals)>=3 and all(v>0 for v in intervals[-3:]);net_rate=(checkpoint_advances[-4]['pendingRows']-checkpoint_advances[-1]['pendingRows'])/(checkpoint_advances[-1]['elapsedSeconds']-checkpoint_advances[-4]['elapsedSeconds']) if sustained else None
  return dict(oldCohortDurablyRetiredRows=old,insertIdAdvance=insert,totalDurablyRetiredRows=retired,pendingRowsStart=first['pendingRows'],pendingRowsEnd=last['pendingRows'],netPendingDecrease=net,windowSeconds=elapsed,receivedPerSecond=insert/elapsed if elapsed else None,durablyRetiredPerSecond=retired/elapsed if elapsed else None,netDrainPerSecond=net_rate,sustainedNetDrainVerified=sustained,measuredCompleteCheckpointIntervals=len(intervals),etaSeconds=last['pendingRows']/net_rate if sustained else None,etaCondition='Conditional on the measured last three checkpoint intervals; excludes future snapshot work and arrival changes.' if sustained else 'Withheld until at least three complete checkpoint intervals have positive net drain.')
+
+def qualify_current_drain(summary,connection,points):
+ # SQLite retirement remains valid even after disconnect/final-flush. It does
+ # not establish sustainable service of a live session with new arrivals.
+ result=dict(summary);result['positiveHistoricalCheckpointIntervals']=result['sustainedNetDrainVerified']
+ active=connection.get('phase') in ('connected','recovering') and connection.get('consumerActive') is True
+ arrival_current=len(points)>=2 and points[-1]['insertId']>points[-2]['insertId']
+ result['currentConsumerAndArrivalsVerified']=active and arrival_current
+ if not active or not arrival_current:
+  result.update(sustainedNetDrainVerified=False,etaSeconds=None,netDrainPerSecond=None,etaCondition='Withheld: consumer inactive/disconnected or no new durable receipts in the latest interval. Historical retirement remains counted.')
+ return result
 
 def retirement_gap(elapsed,last_progress,publications,last_progress_publications):
  return elapsed-last_progress>=GAP_SECONDS and publications-last_progress_publications>=3
@@ -152,7 +163,7 @@ def main():
   if elapsed>=MAX_SECONDS:reason='BOUNDED_OBSERVATION_FINISHED_NOT_PROOF_OF_STALL';break
   time.sleep(INTERVAL)
  elapsed=time.monotonic()-begin
- summary={lane:drain_summary(p,elapsed,advances[lane]) for lane,p in points.items()}
+ summary={lane:qualify_current_drain(drain_summary(p,elapsed,advances[lane]),latest.get(lane,{}),p) for lane,p in points.items()}
  totals={k:sum(r.get(k,0) for r in publications) for k in ('captureDurationMs','regularDurationMs','publishDurationMs','lastDurationMs')}
  emit(stage='durable_cycles_result',reason=reason,containerId=cid,lanes=summary,feedEvidence=latest,api=api_evidence(),publicationCompletedCycles=len(publications),publicationDurationTotalsMs=totals,publicationMetricMeaning='Only completed file.persist metrics are summed. publicationElapsedMs is cumulative and cannot identify a single write duration. checkpointIo contains private write/fsync and remaining wall time; remaining wall time includes encoding and scheduling, not pure CPU.',recentEvents=recent[-100:],recentCriticalEvents=critical,readOnly=True,providerRequests=0,workerRestarted=False,posnetChanged=False,integrationVerified=False)
 if __name__=='__main__':

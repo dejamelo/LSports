@@ -8,6 +8,15 @@ class Cycles(unittest.TestCase):
  def test_three_complete_positive_checkpoint_intervals_allow_conditional_eta(self):
   points=[dict(pendingOldRows=10000-i*1000,pendingRows=10000-i*800,insertId=100+i*200,elapsedSeconds=i*100) for i in range(5)]
   r=ns['drain_summary'](points,400,points[1:]);self.assertTrue(r['sustainedNetDrainVerified']);self.assertEqual(r['netDrainPerSecond'],8);self.assertEqual(r['etaSeconds'],850)
+ def test_disconnect_final_retirement_is_counted_but_cannot_produce_eta(self):
+  points=[dict(pendingOldRows=10000-i*1000,pendingRows=10000-i*800,insertId=100+i*200,elapsedSeconds=i*100) for i in range(5)]
+  raw=ns['drain_summary'](points,400,points[1:])
+  result=ns['qualify_current_drain'](raw,{'phase':'error','consumerActive':False},points)
+  self.assertEqual(result['totalDurablyRetiredRows'],4000);self.assertFalse(result['sustainedNetDrainVerified']);self.assertIsNone(result['etaSeconds'])
+ def test_no_current_arrivals_withholds_eta_even_if_metadata_says_active(self):
+  points=[dict(pendingOldRows=10000-i*1000,pendingRows=10000-i*1000,insertId=100,elapsedSeconds=i*100) for i in range(5)]
+  result=ns['qualify_current_drain'](ns['drain_summary'](points,400,points[1:]),{'phase':'connected','consumerActive':True},points)
+  self.assertEqual(result['oldCohortDurablyRetiredRows'],4000);self.assertIsNone(result['etaSeconds'])
  def test_growth_in_one_checkpoint_interval_withholds_eta(self):
   points=[dict(pendingOldRows=10000-i*1000,pendingRows=v,insertId=100+i*200,elapsedSeconds=i*100) for i,v in enumerate([10000,9200,9400,8000])]
   r=ns['drain_summary'](points,300,points);self.assertFalse(r['sustainedNetDrainVerified']);self.assertIsNone(r['etaSeconds'])
