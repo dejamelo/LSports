@@ -10,7 +10,7 @@ try{
  let ready=false,stderrPresent=false,errorCode;ssh.stdin.on('error',()=>{});ssh.stdin.end(readFileSync(join(here,'grow-checkpoint-storage.py')));
  ssh.stderr.on('data',()=>{stderrPresent=true;});createInterface({input:ssh.stdout}).on('line',line=>{try{const row=JSON.parse(line);emit(row);ready ||= row.stage==='storage_capacity_gate'&&row.status==='verified';}catch{}});
  const pulse=setInterval(()=>emit({stage:'storage_precondition',status:'running',report}),20000);
- const limit=setTimeout(()=>{errorCode='BOUNDED_STORAGE_COMMAND_DEADLINE';ssh.kill('SIGTERM');},180000);
+ const limit=setTimeout(()=>{errorCode='BOUNDED_STORAGE_COMMAND_DEADLINE';ssh.kill('SIGTERM');},600000);
  const status=await new Promise(resolve=>{ssh.once('error',e=>{errorCode=e.code;resolve(2);});ssh.once('close',code=>resolve(code??2));});clearInterval(pulse);clearTimeout(limit);
  if(status!==0||!ready)emit({stage:'storage_precondition',status:'blocked',reason:'STORAGE_NOT_VERIFIED_NO_WORKER_UPDATE',exitCode:status,errorCode,stderrPresent});
  else{

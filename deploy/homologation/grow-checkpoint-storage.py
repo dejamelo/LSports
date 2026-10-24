@@ -1,7 +1,20 @@
 """Expand only the already-grown, pinned EBS root partition/filesystem; no service mutation."""
 import json,re,shutil,subprocess,sys
 from pathlib import Path
-MIN_DEVICE_BYTES=288*1024**3
+GIB=1024**3
+
+def allocated(path):
+ return int(run(['du','-sx','-B1',str(path)],timeout=120).split()[0]) if Path(path).exists() else 0
+
+def disk_budget(directory,input_bytes,free,total):
+ # Disjoint accounting: feed volume is inside Docker; subtract it from Docker.
+ active=allocated(directory);backups=allocated('/var/backups');docker=allocated('/var/lib/docker')
+ temporary=allocated('/tmp')+allocated('/var/tmp')
+ used=total-free
+ categories={'activeFeedAllocatedBytes':active,'backupsAllocatedBytes':backups,'dockerOtherAllocatedBytes':max(0,docker-active),'systemTemporaryAllocatedBytes':temporary}
+ categories['otherAndFilesystemReservedBytes']=used-sum(categories.values())
+ required=input_bytes*10+4*GIB
+ return {**categories,'filesystemTotalBytes':total,'usedIncludingReservedBytes':used,'freeBytes':free,'nextDeploymentAdditionalPeakBytes':required,'planningMarginBytes':8*GIB,'requiredWithMarginBytes':required+8*GIB,'fitsWithMargin':free>=required+8*GIB,'GiB':{k:round(v/GIB,3) for k,v in {**categories,'free':free,'nextDeploymentAdditionalPeak':required,'planningMargin':8*GIB}.items()},'peakIsConservativeNotMeasuredMaximum':True,'accounting':'Allocated blocks, not logical sizes. Active feed subtracted from Docker total; backups exclude Docker and tmp. Other includes filesystem reserved space. Peak is additional, not added again to current used. Active temporary spools are included in active feed; backup rehearsal outputs in backups.','retention':'No automatic deletion. Preserve all recovery backups until validated replacement and rollback acceptance. Review expired attempt outputs by receipt and original hashes before any future removal.','growth':'8 GiB additional planning margin; raw inbox remains capped at 2 GiB logically. Backup accumulation is unbounded until an explicit retention review; this is not a permanent capacity guarantee.'}
 
 def run(args,timeout=20):
  r=subprocess.run(args,capture_output=True,text=True,timeout=timeout)
@@ -27,8 +40,6 @@ def main():
   value=tag.read_text().strip()
   if re.fullmatch('i-[0-9a-f]{8,17}',value) and value!=identity['expectedInstanceId']:raise RuntimeError('INSTANCE_ID_DIFFERS_NO_ACTION')
  print(json.dumps({'stage':'root_storage_identity',**identity,'workerMutationRequested':False}),flush=True)
- if size<MIN_DEVICE_BYTES:
-  print(json.dumps({'stage':'storage_capacity_gate','status':'blocked','reason':'EBS_EXPANSION_REQUIRED_NO_WORKER_CHANGE','currentGiB':size//1024**3,'requiredDeviceGiB':288,'console':'EC2 > us-east-2 > Volumes > vol-03fa30ff2fc37a28e; confirm attachment to i-04690a17692088df9, then Modify volume size to 288 GiB; preserve type, IOPS and throughput. Re-run after device expansion is visible.','signalsSent':0}),flush=True);return 2
  # Dry-run can only lead to the one verified root partition. Never retry signals.
  dry=subprocess.run(['growpart','-N','/dev/nvme0n1','1'],capture_output=True,text=True,timeout=20)
  if dry.returncode==0 and 'CHANGE:' in dry.stdout:
@@ -45,8 +56,12 @@ def main():
  mounts=[m for m in c['Mounts'] if m.get('Destination')=='/app/.runtime/feed' and m.get('Type')=='volume']
  if len(mounts)!=1:raise RuntimeError('FEED_MOUNT_UNVERIFIED')
  directory=Path(mounts[0]['Source']);files=[p for p in directory.rglob('*') if p.is_file() and not p.is_symlink() and(p.name.startswith('trade-feed.json') or p.name=='response.private.json')]
- needed=sum(p.stat().st_size for p in files)*10+4*1024**3;free=shutil.disk_usage('/var/backups').free
- print(json.dumps({'stage':'storage_capacity_gate','status':'verified' if free>=needed else 'blocked','freeDiskBytes':free,'requiredFreeBytes':needed,'missingBytes':max(0,needed-free),'formulaUnchanged':True,'workerRestarted':False,'signalsSent':0}),flush=True)
+ input_bytes=sum(p.stat().st_size for p in files);usage=shutil.disk_usage('/var/backups');free=usage.free
+ budget=disk_budget(directory,input_bytes,free,usage.total);needed=budget['requiredWithMarginBytes']
+ print(json.dumps({'stage':'disk_budget',**budget}),flush=True)
+ final_fs=json.loads(run(['findmnt','--json','--bytes','--target','/','--output','SOURCE,TARGET,FSTYPE,SIZE,AVAIL']))
+ print(json.dumps({'stage':'effective_filesystem','deviceBytes':size,'partitionBytes':part,'filesystem':final_fs['filesystems'][0]}),flush=True)
+ print(json.dumps({'stage':'storage_capacity_gate','status':'verified' if free>=needed else 'blocked','freeDiskBytes':free,'requiredFreeBytes':needed,'missingBytes':max(0,needed-free),'formula':'inputLogicalBytes * 10 + 4 GiB reserve + 8 GiB margin','workerRestarted':False,'signalsSent':0}),flush=True)
  return 0 if free>=needed else 2
 if __name__=='__main__':
  try:sys.exit(main())

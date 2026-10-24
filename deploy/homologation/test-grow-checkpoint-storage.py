@@ -13,10 +13,12 @@ class Growth(unittest.TestCase):
   with self.assertRaises(RuntimeError):m.target(fs,devices)
   fs,devices=self.sample();fs['filesystems'][0]['fstype']='xfs'
   with self.assertRaises(RuntimeError):m.target(fs,devices)
- def test_no_growth_before_ebs_expansion(self):
-  fs,devices=self.sample();calls=[]
-  def run(args,**kw):calls.append(args);return json.dumps(fs if args[0]=='findmnt' else devices)
-  def path(x):return SimpleNamespace(is_file=lambda:False) if str(x)=='/sys/devices/virtual/dmi/id/board_asset_tag' else Path(x)
-  with patch.object(m,'run',side_effect=run),patch.object(m,'Path',side_effect=path),contextlib.redirect_stdout(io.StringIO()):self.assertEqual(m.main(),2)
-  self.assertEqual([v[0] for v in calls],['findmnt','lsblk'])
+ def test_400_is_not_exact_size_blocked(self):
+  fs,devices=self.sample(400);self.assertEqual(m.target(fs,devices)[0],400*1024**3)
+ def test_budget_no_double_count(self):
+  with patch.object(m,'allocated',side_effect=[10,20,50,3,2]):
+   b=m.disk_budget('/feed',1,100*m.GIB,200*m.GIB)
+  self.assertEqual(b['dockerOtherAllocatedBytes'],40)
+  self.assertEqual(sum(b[k] for k in ['activeFeedAllocatedBytes','backupsAllocatedBytes','dockerOtherAllocatedBytes','systemTemporaryAllocatedBytes','otherAndFilesystemReservedBytes']),100*m.GIB)
+  self.assertEqual(b['requiredWithMarginBytes'],12*m.GIB+10)
 if __name__=='__main__':unittest.main()
