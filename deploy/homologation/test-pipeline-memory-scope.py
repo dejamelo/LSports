@@ -15,7 +15,7 @@ class Scope(unittest.TestCase):
   self.assertEqual(source.count('names.push(...partitionPackageSourceNames)'),2)
  def test_added_dependency_pin_matches_reviewed_installed_source_commit(self):
   name='apps/worker/src/snapshot-capacity.ts'
-  source=subprocess.check_output(['git','show','0cb0e6b:'+name],cwd=test_dir.parents[1])
+  source=subprocess.check_output(['git','show','e83f16b:'+name],cwd=test_dir.parents[1])
   self.assertEqual(hashlib.sha256(source).hexdigest(),ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][name])
  def test_existing_four_gib_scope_is_unchanged(self):
   self.assertEqual(ns['partition_memory']({}),4294967296)
