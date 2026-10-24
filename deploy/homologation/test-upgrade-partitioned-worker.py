@@ -142,7 +142,7 @@ class Upgrade(unittest.TestCase):
      term=next(i for i,c in enumerate(calls) if c[:2]==['docker','kill']);self.assertLess(stop,term)
     self.assertEqual(len([c for c in calls if c[:2]==['docker','kill']]),0 if resume_stopped or oom else 1);self.assertEqual(len([c for c in calls if 'up' in c]),1)
     after=json.loads((secure/'deployment.json').read_bytes());self.assertEqual(after['composeOverrides'][0],str(original));self.assertEqual(len(after['composeOverrides']),2)
-    self.assertEqual(model(NS['partition_base'](after))['services']['worker']['environment']['LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'],'128');self.assertEqual(json.loads(migration.read_bytes())['journals'],['preserved'])
+    activated_model=model(NS['partition_base'](after));self.assertEqual(activated_model['services']['worker']['environment']['LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'],'128');self.assertEqual(activated_model['services']['worker']['environment']['LSPORTS_INPLAY_STREAMED_SNAPSHOT'],'true');self.assertEqual(activated_model['services']['worker']['environment']['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT'],'true');self.assertEqual(json.loads(migration.read_bytes())['journals'],['preserved'])
     code,result=invoke('prepare');self.assertEqual(code,0,result);code,result=invoke('activate');self.assertEqual(code,0,result);self.assertTrue(result['reused']);
     if oom:
      rehearsal_calls=[c for c in calls if c[:2]==['docker','run'] and any('projection-serialize-ok' in str(v) for v in c)]
