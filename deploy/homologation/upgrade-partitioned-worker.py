@@ -89,7 +89,7 @@ def partition_rehearsal_args(args,progress):
 def verify_pipeline_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
     changed={n for n in files if files[n]!=old_files[n]}
-    require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
+    require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
 
 def verify_publication_reserve_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PUBLICATION_RESERVE_BASE_DIGEST_MISMATCH')

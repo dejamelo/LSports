@@ -16,9 +16,9 @@ class Scope(unittest.TestCase):
   self.assertEqual(args[args.index('--memory')+1],'6g');self.assertEqual(args[args.index('--memory-swap')+1],'6g');self.assertIn('eu.adl.recovery.cache-policy=six-gib-verified',args)
  def test_unrelated_source_changes_and_wrong_digest_are_rejected(self):
   old={p:'old' for p in ns['PARTITION_FILES']};digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-  candidate={**old,'apps/worker/src/connected.ts':'batch-fairness','apps/worker/src/durable-ingress.mjs':'covering-index','apps/worker/src/full-snapshot.ts':'bounded-batch','apps/worker/src/provider.ts':'batch-plumbing'}
+  candidate={**old,'apps/worker/src/connected.ts':'batch-fairness','apps/worker/src/durable-ingress.mjs':'covering-index','apps/worker/src/full-snapshot.ts':'bounded-batch','apps/worker/src/provider.ts':'batch-plumbing','apps/worker/src/diagnostics.ts':'heap-and-container-admission'}
   ns['verify_pipeline_sources'](old,candidate,digest)
-  for changed,sha in ((old,digest),({**candidate,'apps/worker/src/messages.ts':'unrelated'},digest),(candidate,'f'*64)):
+  for changed,sha in ((old,digest),({**candidate,'apps/worker/src/persistence.ts':'unrelated'},digest),({**candidate,'apps/worker/src/messages.ts':'unrelated'},digest),(candidate,'f'*64)):
    with self.assertRaises(RuntimeError):ns['verify_pipeline_sources'](old,changed,sha)
 class RetentionOrigin(unittest.TestCase):
  def test_only_completed_six_gib_preparation_can_be_derived(self):
