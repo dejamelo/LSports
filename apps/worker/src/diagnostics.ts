@@ -1,4 +1,4 @@
-import {snapshotCapacity} from "./snapshot-capacity.js";
+import {snapshotCapacity,waitForSnapshotCapacity} from "./snapshot-capacity.js";
 import {IdSafeJsonParser} from "trade360-nodejs-sdk";
 import { normalizeSdkTimestamps,hasInvalidProviderTimestamp } from './timestamp-contract.js';
 import { marketRequestBody } from "./http-compat.js";
@@ -128,12 +128,23 @@ axios.defaults.adapter = async (config) => {
   const observation = observations.getStore();
   if(observation?.operation==="snapshot.events"||observation?.responseLimitMiB!==undefined){
     let capacity:ReturnType<typeof snapshotCapacity>;
-    try{const normal=snapshotCapacity(process.env,undefined,observation.lane);const requested=observation.responseLimitMiB;
+    let capacityEnv:NodeJS.ProcessEnv=process.env;
+    const lane=observation.lane??'prematch';
+    try{const normal=snapshotCapacity(process.env,undefined,lane);const requested=observation.responseLimitMiB;
       if(requested!==undefined&&(!Number.isSafeInteger(requested)||requested<1||requested>normal.limitBytes/1048576))throw Error('INVALID_BOUNDED_LIMIT');
-      capacity=requested===undefined?normal:snapshotCapacity({...process.env,[observation.lane==='inplay'?'LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB']:String(requested)},undefined,observation.lane);
-    }catch{throw configError("configuration",[observation.lane==="inplay"?"LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB":"LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB"],"Límite snapshot inválido: debe ser un entero entre 1 y 256 MiB.");}
+      if(requested!==undefined)capacityEnv={...process.env,[lane==='inplay'?'LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB']:String(requested)};
+      capacity=snapshotCapacity(capacityEnv,undefined,lane);
+    }catch{throw configError("configuration",[lane==="inplay"?"LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB":"LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB"],"Límite snapshot inválido: debe ser un entero entre 1 y 256 MiB.");}
     observation.responseLimitBytes=capacity.limitBytes;
-    if(!capacity.allowed)throw new OperationError({operation:observation.operation||"snapshot.events",protocol:"local",category:"response_limit",reason:"memory_budget_exceeded",stage:"request",responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,snapshotMemory:capacity.memory,deferred:true,message:"Snapshot aplazado sin HTTP: espacio insuficiente en heap para el presupuesto de conversión. Revisá capacidad del proceso; no se modifica la proyección."});
+    if(!capacity.allowed){
+      let lastLogMs= -1000;
+      const result=await waitForSnapshotCapacity(capacityEnv,lane,{signal:config.signal as AbortSignal|undefined,onSample:sample=>{
+        if(sample.waitedMs===0||sample.waitedMs-lastLogMs>=1000){lastLogMs=sample.waitedMs;console.info(JSON.stringify({operation:observation.operation||"snapshot.events",lane,status:'memory_wait',stage:'pre_http',waitedMs:sample.waitedMs,responseLimitBytes:sample.capacity.limitBytes,memoryBudgetBytes:sample.capacity.budgetBytes,memoryHeadroomBytes:sample.capacity.headroomBytes,snapshotMemory:sample.capacity.memory}));}
+      }});
+      capacity=result.capacity;
+      if(result.waitedMs>0)console.info(JSON.stringify({operation:observation.operation||"snapshot.events",lane,status:result.timedOut?'memory_deferred':'memory_ready',stage:'pre_http',waitedMs:result.waitedMs,responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,snapshotMemory:capacity.memory}));
+    }
+    if(!capacity.allowed)throw new OperationError({operation:observation.operation||"snapshot.events",protocol:"local",category:"response_limit",reason:"memory_budget_exceeded",stage:"request",responseLimitBytes:capacity.limitBytes,memoryBudgetBytes:capacity.budgetBytes,memoryHeadroomBytes:capacity.headroomBytes,snapshotMemory:capacity.memory,deferred:true,message:"Snapshot aplazado sin HTTP: margen conjunto de heap y memoria disponible del proceso/contenedor insuficiente. Se conserva el presupuesto y no se modifica la proyección."});
     config.maxContentLength=capacity.limitBytes;
   }
   if (observation) {

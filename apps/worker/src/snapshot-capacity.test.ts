@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { snapshotCapacity, MiB } from "./snapshot-capacity.js";
+import { snapshotCapacity, waitForSnapshotCapacity, MiB } from "./snapshot-capacity.js";
 import { clients } from "./provider.js";
 import { OperationError } from "./diagnostics.js";
 
@@ -179,29 +179,44 @@ test('per-lane caps isolate InPlay from legacy global 256 and expose heap vs phy
  assert.equal(snapshotCapacity(env,{...sample,heapLimitBytes:4096*MiB},'prematch').allowed,true);
 });
 
-test('actual HTTP adapter refuses zero available memory without issuing HTTP or inventing a status',async()=>{
- let calls=0;const original=process.availableMemory;
- const server=createServer((_req,res)=>{calls++;res.end('{}');});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+test('snapshot memory wait requires both full V8 reserve and container availability without changing cap',async()=>{
+ const env={LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB:'128'};let now=0,index=0;
+ const samples=[
+  {heapLimitBytes:4200*MiB,heapUsedBytes:3000*MiB,availableMemoryBytes:1000*MiB},
+  {heapLimitBytes:4200*MiB,heapUsedBytes:4200*MiB-1087*MiB,availableMemoryBytes:1400*MiB},
+  {heapLimitBytes:4200*MiB,heapUsedBytes:3000*MiB,availableMemoryBytes:1400*MiB},
+ ];
+ const result=await waitForSnapshotCapacity(env,'inplay',{maxWaitMs:1000,intervalMs:250,now:()=>now,measure:()=>samples[Math.min(index++,samples.length-1)],sleep:async ms=>{now+=ms;}});
+ assert.equal(index,3);assert.equal(result.waitedMs,500);assert.equal(result.timedOut,false);assert.equal(result.capacity.allowed,true);assert.equal(result.capacity.limitBytes,128*MiB);assert.equal(result.capacity.budgetBytes,1088*MiB);
+});
+
+test('snapshot memory wait times out without reducing the protected reserve',async()=>{
+ const budget=1088*MiB;let now=0,samples=0;
+ const result=await waitForSnapshotCapacity({LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB:'128'},'inplay',{maxWaitMs:500,intervalMs:250,now:()=>now,measure:()=>{samples++;return{heapLimitBytes:budget-1,heapUsedBytes:0,availableMemoryBytes:budget*2};},sleep:async ms=>{now+=ms;}});
+ assert.equal(result.timedOut,true);assert.equal(result.waitedMs,500);assert.equal(samples,3);assert.equal(result.capacity.allowed,false);assert.equal(result.capacity.budgetBytes,budget);assert.equal(result.capacity.headroomBytes,budget-1);
+});
+
+test('actual HTTP adapter waits for available container memory and issues no early snapshot request',async()=>{
+ let calls=0,memoryCalls=0;const original=process.availableMemory;
+ const server=createServer((_req,res)=>{calls++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}));});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
  try{
   const address=server.address();assert(address&&typeof address!=='string');const url=`http://127.0.0.1:${address.port}`;
-  const api=clients({lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',queue:'_4511_',port:5672,tls:false},{snapshotUrl:url,customersUrl:url},{run:async(_name,action)=>action()});
-  process.availableMemory=()=>0;
-  await assert.rejects(()=>api.snapshot(),e=>{
-   assert(e instanceof OperationError);assert.equal(e.diagnostic.reason,'memory_budget_exceeded');assert.equal(e.diagnostic.protocol,'local');assert.equal(e.diagnostic.httpStatus,undefined);assert.equal(e.diagnostic.snapshotMemory?.availableMemoryBytes,0);assert.equal(e.diagnostic.snapshotMemory?.limitingFactor,'available_memory');return true;
-  });assert.equal(calls,0);
+  const api=clients({lane:'inplay',packageId:4510,username:'isolated',password:'',hostname:'unused',vhost:'StmInPlay',queue:'_4510_',port:5672,tls:false},{snapshotUrl:url,customersUrl:url},{run:async(_name,action)=>action()});
+  process.availableMemory=()=>++memoryCalls<=3?0:1800*MiB;
+  assert.deepEqual(await api.snapshot(),[]);assert.equal(calls,1);assert(memoryCalls>=4);assert.equal(api.snapshotAudit?.()?.transport?.responseLimitBytes,128*MiB);
  }finally{process.availableMemory=original;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
 });
 
-test('official clients use lane context: global 256 is refused at 1800 MiB while InPlay completes under independent 128',async()=>{
+test('official clients use lane context and wait under explicit per-lane caps',async()=>{
  const keys=['LSPORTS_SNAPSHOT_MAX_RESPONSE_MB','LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB','LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'];
  const saved=keys.map(k=>process.env[k]);const original=process.availableMemory;let calls=0;
  const server=createServer(async(req,res)=>{for await(const _ of req){}calls++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}));});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
  try{
-  process.env.LSPORTS_SNAPSHOT_MAX_RESPONSE_MB='256';delete process.env.LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB;delete process.env.LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB;process.availableMemory=()=>1800*MiB;
+  process.env.LSPORTS_SNAPSHOT_MAX_RESPONSE_MB='256';process.env.LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB='255';delete process.env.LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB;let memoryCalls=0;process.availableMemory=()=>++memoryCalls<=5?1800*MiB:2400*MiB;
   const address=server.address();assert(address&&typeof address!=='string');const url=`http://127.0.0.1:${address.port}`;
   const make=(lane:'prematch'|'inplay')=>clients({lane,packageId:lane==='prematch'?4511:4510,username:'isolated',password:'',hostname:'unused',vhost:'unused',queue:'unused',port:5672,tls:false},{snapshotUrl:url,customersUrl:url},{run:async(_name,action)=>action()});
   const inplay=make('inplay');assert.deepEqual(await inplay.snapshot(),[]);assert.equal(inplay.snapshotAudit?.()?.transport?.responseLimitBytes,128*MiB);
-  await assert.rejects(()=>make('prematch').snapshot(),e=>e instanceof OperationError&&e.diagnostic.reason==='memory_budget_exceeded'&&e.diagnostic.responseLimitBytes===256*MiB);
-  assert.equal(calls,1);
+  const prematch=make('prematch');assert.deepEqual(await prematch.snapshot(),[]);assert.equal(prematch.snapshotAudit?.()?.transport?.responseLimitBytes,255*MiB);
+  assert.equal(calls,2);assert(memoryCalls>=6);
  }finally{process.availableMemory=original;keys.forEach((k,i)=>{if(saved[i]===undefined)delete process.env[k];else process.env[k]=saved[i];});server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
 });
