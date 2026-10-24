@@ -129,12 +129,12 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
         const {regular,...saved}=streamCheckpoint(stable);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
-        memoryStage('regular_checkpoint');await persistRegularCheckpoint(path,stable,phase=>state.setPublicationPhase(phase));
+        memoryStage('regular_checkpoint');const checkpointIo=await persistRegularCheckpoint(path,stable,phase=>state.setPublicationPhase(phase));
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
         const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
         memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
         lastCompletedPublication=Date.now();
-        const metric={publicationId,writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
+        const metric={publicationId,checkpointIo,writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
     }),publicationId));

@@ -44,12 +44,29 @@ export function streamCheckpoint(state:TradeState){
  return {version:1,regular:[],outright:jsonItems(function*(){for(const lane of ['prematch','inplay'] as const)for(const[key,row]of rows[lane])if(row.outright)yield streamedRow(lane,key,row,true);})};
 }
 
+// One bounded buffer spans fixture boundaries. Previously every comma and
+// each small record forced a separate asynchronous filesystem write.
+export function checkpointWriteBuffer(file:Pick<Awaited<ReturnType<typeof open>>,'writeFile'>,observe?:(phase:string)=>void,limit=1024*1024){
+ if(!Number.isSafeInteger(limit)||limit<65536||limit>1024*1024)throw Error('INVALID_CHECKPOINT_WRITE_BUFFER');
+ let chunks:string[]=[],bytes=0;const stats={writeCalls:0,writeBytes:0,maxBufferedBytes:0,writeAwaitMs:0};
+ const write=async(text:string)=>{observe?.('regular_checkpoint.write');const at=performance.now();try{await file.writeFile(text);stats.writeCalls++;stats.writeBytes+=Buffer.byteLength(text);}finally{stats.writeAwaitMs+=performance.now()-at;observe?.('regular_checkpoint.encode');}};
+ const flush=async()=>{if(!bytes)return;const text=chunks.join('');chunks=[];bytes=0;await write(text);};
+ return {stats,flush,async writeFile(text:string){
+  const size=Buffer.byteLength(text);
+  if(size>limit){await flush();await write(text);return;}
+  if(bytes+size>limit||chunks.length>=4096)await flush();
+  chunks.push(text);bytes+=size;stats.maxBufferedBytes=Math.max(stats.maxBufferedBytes,bytes);
+  if(bytes===limit)await flush();
+ }};
+}
+
 // Stable private sidecar may be ahead of the public feed after a crash; replay remains
 // idempotent and restored prices remain blocked. ACK is sent only after BOTH writes.
 export async function persistRegularCheckpoint(path:string,regular:ReturnType<typeof checkpoint>['regular']|TradeState,observe?:(phase:string)=>void){
+  const began=performance.now();let fsyncAwaitMs=0,closeAwaitMs=0,renameAwaitMs=0,directorySyncAwaitMs=0;
   await mkdir(dirname(path),{recursive:true});const target=path+'.regular-checkpoint.json',temp=target+'.'+process.pid+'.tmp';
   observe?.('regular_checkpoint.open');const file=await open(temp,'w',0o600);
-  const writer={writeFile:async(text:string)=>{observe?.('regular_checkpoint.write');await file.writeFile(text);observe?.('regular_checkpoint.encode');}} as typeof file;try{
+  const output=checkpointWriteBuffer(file,observe);const writer=output as unknown as typeof file;try{
     if(regular instanceof TradeState){
       await writer.writeFile('{"version":1,"regular":[');let first=true;
       // Freeze only row identities/references, not their market/bet maps. A live
@@ -61,8 +78,12 @@ export async function persistRegularCheckpoint(path:string,regular:ReturnType<ty
       }
       await writer.writeFile(']}');
     }else await writeJsonObject(writer,{version:1,regular});
-    observe?.('regular_checkpoint.fsync');await file.sync();}finally{await file.close();}
-  observe?.('regular_checkpoint.rename');await rename(temp,target);const directory=await open(dirname(path),'r');try{observe?.('regular_checkpoint.directory_fsync');await directory.sync();}finally{await directory.close();}
+    await output.flush();observe?.('regular_checkpoint.fsync');let at=performance.now();await file.sync();fsyncAwaitMs=performance.now()-at;
+  }finally{const at=performance.now();await file.close();closeAwaitMs=performance.now()-at;}
+  observe?.('regular_checkpoint.rename');let at=performance.now();await rename(temp,target);renameAwaitMs=performance.now()-at;
+  const directory=await open(dirname(path),'r');try{observe?.('regular_checkpoint.directory_fsync');at=performance.now();await directory.sync();directorySyncAwaitMs=performance.now()-at;}finally{await directory.close();}
+  const totalWallMs=performance.now()-began;
+  return {...output.stats,fsyncAwaitMs,closeAwaitMs,renameAwaitMs,directorySyncAwaitMs,totalWallMs,otherWallMs:Math.max(0,totalWallMs-output.stats.writeAwaitMs-fsyncAwaitMs-closeAwaitMs-renameAwaitMs-directorySyncAwaitMs)};
 }
 
 // Read directly: API freshness protection must not prevent recovery after downtime.

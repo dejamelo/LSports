@@ -88,6 +88,14 @@ def verify_publication_reserve_sources(old_files,files,old_digest):
     # deploying/replacing the API. No format, provider or transport changes.
     require(changed and changed<={'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts'},'PUBLICATION_RESERVE_PATCH_SCOPE_UNVERIFIED')
 
+def verify_checkpoint_buffer_sources(old_files,files,old_digest):
+    require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CHECKPOINT_BUFFER_BASE_DIGEST_MISMATCH')
+    changed={name for name in files if files[name]!=old_files[name]}
+    # connected: already tested partial-prefix retirement plus IO counters;
+    # persistence: bounded writes, identical JSON/atomicity. No parser, schema,
+    # state, provider, feed-store, queue or API changes are permitted here.
+    require(changed=={'apps/worker/src/connected.ts','apps/worker/src/persistence.ts'},'CHECKPOINT_BUFFER_PATCH_SCOPE_UNVERIFIED')
+
 def verify_transport_lifecycle_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'TRANSPORT_LIFECYCLE_BASE_DIGEST_MISMATCH')
     changed={n for n in files if files[n]!=old_files[n]}
@@ -979,7 +987,10 @@ def upgrade_partitioned_unlocked(request):
                 old=json.loads(old_receipt.read_bytes());require(old.get('digest')==old_digest and old.get('image')==original_image and old.get('oomRestoreVerified') is True,'CURRENT_OOM_SOURCE_RECEIPT_UNVERIFIED')
                 export="const fs=require('node:fs');const names="+json.dumps(sorted(files))+";console.log(JSON.stringify(Object.fromEntries(names.map(n=>[n,fs.readFileSync('/app/'+n,'utf8')]))))"
                 old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',original_image,'-e',export],timeout=30))
-                if request.get('transportLifecycleRepair'):
+                if request.get('checkpointWriteBufferRepair'):
+                    require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('transportLifecycleRepair') is True,'CHECKPOINT_BUFFER_REQUIRES_VERIFIED_TRANSPORT_PIPELINE')
+                    verify_checkpoint_buffer_sources(old_files,files,old_digest)
+                elif request.get('transportLifecycleRepair'):
                     require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True,'TRANSPORT_LIFECYCLE_REQUIRES_LIVE_PIPELINE_IDENTITY')
                     verify_transport_lifecycle_sources(old_files,files,old_digest)
                 elif request.get('publicationReserveRepair'):
