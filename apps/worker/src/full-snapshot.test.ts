@@ -1,8 +1,22 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,readdir,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {createServer} from 'node:http';import {once} from 'node:events';
-import {walkSnapshot,convertSnapshotRow,fullSnapshot,fullSnapshotMemory} from './full-snapshot.js';
+import {walkSnapshot,convertSnapshotRow,fullSnapshot,fullSnapshotMemory,FULL_SNAPSHOT_LIMITS} from './full-snapshot.js';
 const row=(FixtureId:number)=>({FixtureId,Fixture:{Status:1,LastUpdate:'2026-10-19T14:00:00.0173136'},Markets:[]});
+test('full snapshot download window covers the observed rate at the unchanged byte cap',()=>{
+ const secondsAtObservedRate=FULL_SNAPSHOT_LIMITS.responseBytes/(3.5*1024*1024);
+ assert.equal(FULL_SNAPSHOT_LIMITS.responseBytes,2*1024*1024*1024);assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,20000);
+ assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,12*60*1000);assert.ok(FULL_SNAPSHOT_LIMITS.totalMs/1000>secondsAtObservedRate);
+});
+test('active snapshot response can outlast a short total window without being classified as idle',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-full-total-window-'));let applied=0;const available=process.availableMemory;process.availableMemory=()=>1024**3;
+ const server=createServer((_req,res)=>{res.write('{"Header":{"HttpStatusCode":200},"Body":[');setTimeout(()=>res.end(JSON.stringify(row(1))+']}'),120);});
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{
+  const result=await fullSnapshot({url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},limits:{totalMs:500,idleMs:300},async apply(){applied++;}});
+  assert.equal(result.rows,1);assert.equal(applied,1);assert.deepEqual(await readdir(dir),[]);
+ }finally{process.availableMemory=available;server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
+});
 test('bounded envelope parser validates ordering, trailing Header, UTF8 and rejects truncation, duplicate root and application errors',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-full-envelope-'));try{const file=join(dir,'body');
  await writeFile(file,JSON.stringify({Body:[{...row(1),Fixture:{...row(1).Fixture,Name:'Hipódromo {"} }}'}},row(2)],Header:{HttpStatusCode:200}}));let n=0;await walkSnapshot(file,async raw=>{assert.ok(convertSnapshotRow(raw).fixture);n++;});assert.equal(n,2);
