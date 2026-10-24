@@ -11,7 +11,7 @@ import {Transform} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 import {createGunzip,createInflate,createBrotliDecompress} from 'node:zlib';
 import {setImmediate as yieldTurn,setTimeout as waitTurn} from 'node:timers/promises';
-import {Mapper,GetEventRequestDto,GetEventRequest,GetEventsResultElement,TransformerUtil,IdSafeJsonParser} from 'trade360-nodejs-sdk';
+import {Mapper,GetEventRequestDto,GetInPlayEventRequestDto,GetEventRequest,GetEventsResultElement,TransformerUtil,IdSafeJsonParser} from 'trade360-nodejs-sdk';
 import {OperationError} from './diagnostics.js';
 import {snapshotCapacity} from './snapshot-capacity.js';
 import {normalizeSdkTimestamps,attachTimestampPrecision,hasInvalidProviderTimestamp} from './timestamp-contract.js';
@@ -23,7 +23,7 @@ const MiB=1024*1024;
 // byte cap; allow a bounded 12-minute total download window for a live stream.
 export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:20000,totalMs:12*60*1000,memoryWaitMs:60000,memoryRetryMs:250};
 const fail=(reason:string,shape:Partial<NonNullable<import('@lsports/contracts').IntegrationDiagnostic['snapshotValidation']>>={}):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven',...shape},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
-export function fullSnapshotMemory(){const c=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'},undefined,'prematch');if(!c.allowed){console.info(JSON.stringify({operation:'offline.memory_budget',stage:'snapshot_guard',budgetBytes:c.budgetBytes,headroomBytes:c.headroomBytes,allowed:false,memory:c.memory}));throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,snapshotMemory:c.memory,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}}
+export function fullSnapshotMemory(lane:'prematch'|'inplay'='prematch'){const c=snapshotCapacity({...process.env,[lane==='inplay'?'LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB']:'32'},undefined,lane);if(!c.allowed){console.info(JSON.stringify({operation:'offline.memory_budget',lane,stage:'snapshot_guard',budgetBytes:c.budgetBytes,headroomBytes:c.headroomBytes,allowed:false,memory:c.memory}));throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,snapshotMemory:c.memory,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}}
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.
 async function* tokens(file:string,max:number){let primitive='',quoted=false,escape=false,parts:string[]=[],size=0;
  for await(const chunk of createReadStream(file,{encoding:'utf8',highWaterMark:64*1024})){
@@ -119,8 +119,8 @@ export function convertSnapshotRow(raw:unknown):TradeEvent{
  if(row.fixtureId!==r.FixtureId||!row.fixture||row.markets?.some(m=>!Number.isSafeInteger(m.id)||!m.id||m.bets?.some(b=>b.id===undefined||b.id===null||String(b.id).trim()==='')))return fail('sdk_row_mismatch');return row;
 }
 export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string};
-export async function fullSnapshot(options:{timestamp?:number;url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;applyBatch?:(rows:TradeEvent[],started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
- const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};if(!Number.isSafeInteger(limits.memoryWaitMs)||limits.memoryWaitMs<0||limits.memoryWaitMs>60000||!Number.isSafeInteger(limits.memoryRetryMs)||limits.memoryRetryMs<1||limits.memoryRetryMs>1000)throw Error('INVALID_SNAPSHOT_MEMORY_WAIT');fullSnapshotMemory();options.assertOpen();
+export async function fullSnapshot(options:{lane?:'prematch'|'inplay';timestamp?:number;url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;applyBatch?:(rows:TradeEvent[],started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
+ const lane=options.lane??'prematch';const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};if(!Number.isSafeInteger(limits.memoryWaitMs)||limits.memoryWaitMs<0||limits.memoryWaitMs>60000||!Number.isSafeInteger(limits.memoryRetryMs)||limits.memoryRetryMs<1||limits.memoryRetryMs>1000)throw Error('INVALID_SNAPSHOT_MEMORY_WAIT');fullSnapshotMemory(lane);options.assertOpen();
  const space=await statfs(options.directory);if(Number(space.bavail)*Number(space.bsize)<limits.responseBytes+512*MiB)fail('disk_headroom');
  const dir=await mkdtemp(join(options.directory,'.full-snapshot-'));const file=join(dir,'response.private.json');
  let bytes=0,timedOut=false,httpStatus:number|undefined,validatedRows=0,appliedRows=0;let lastStage:FullSnapshotProgress['stage']='waiting_http';const progress=(stage:FullSnapshotProgress['stage'])=>{lastStage=stage;options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString()});};const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
@@ -133,18 +133,20 @@ export async function fullSnapshot(options:{timestamp?:number;url:string;credent
  const memoryReady=async()=>{
   for(;;){
    signal.throwIfAborted();options.assertOpen();
-   try{fullSnapshotMemory();return;}catch(error){
+   try{fullSnapshotMemory(lane);return;}catch(error){
     if(!(error instanceof OperationError)||error.diagnostic.reason!=='memory_budget_exceeded'||pressureWaitMs>=limits.memoryWaitMs)throw error;
-    if(performance.now()-lastMemoryLog>=1000){lastMemoryLog=performance.now();console.info(JSON.stringify({operation:'snapshot.events',lane:'prematch',status:'memory_wait',stage:lastStage,bytes,validatedRows,appliedRows,waitedMs:Math.ceil(pressureWaitMs),maximumWaitMs:limits.memoryWaitMs,spoolRetained:true,memoryBudgetBytes:error.diagnostic.memoryBudgetBytes,memoryHeadroomBytes:error.diagnostic.memoryHeadroomBytes,snapshotMemory:error.diagnostic.snapshotMemory}));}
+    if(performance.now()-lastMemoryLog>=1000){lastMemoryLog=performance.now();console.info(JSON.stringify({operation:'snapshot.events',lane,status:'memory_wait',stage:lastStage,bytes,validatedRows,appliedRows,waitedMs:Math.ceil(pressureWaitMs),maximumWaitMs:limits.memoryWaitMs,spoolRetained:true,memoryBudgetBytes:error.diagnostic.memoryBudgetBytes,memoryHeadroomBytes:error.diagnostic.memoryHeadroomBytes,snapshotMemory:error.diagnostic.snapshotMemory}));}
     const began=performance.now();await waitTurn(Math.min(limits.memoryRetryMs,limits.memoryWaitMs-pressureWaitMs),undefined,{signal});pressureWaitMs+=performance.now()-began;
    }
   }
  };
 
  try{
-  const url=new URL('/Prematch/GetEvents',options.url);if(url.username||url.password||!['http:','https:'].includes(url.protocol))fail('invalid_endpoint');
+  const url=new URL(lane==='inplay'?'/Inplay/GetEvents':'/Prematch/GetEvents',options.url);if(url.username||url.password||!['http:','https:'].includes(url.protocol))fail('invalid_endpoint');
   if(options.timestamp!==undefined&&(!Number.isSafeInteger(options.timestamp)||options.timestamp<0||options.timestamp>99999999999))throw Error('INVALID_RECOVERY_TIMESTAMP_SECONDS');
-  const body=JSON.stringify(new Mapper(options.credentials).map(new GetEventRequestDto(options.timestamp===undefined?{}:{timestamp:options.timestamp}),GetEventRequest));
+  const dto=lane==='inplay'?new GetInPlayEventRequestDto(options.timestamp===undefined?{}:{timestamp:options.timestamp}):new GetEventRequestDto(options.timestamp===undefined?{}:{timestamp:options.timestamp});
+  // The SDK does not export its InPlay request class. Serialize the same DTO fields and package credentials it maps before sending GetEvents; response handling remains the bounded SDK-compatible spool parser below.
+  const body=JSON.stringify(lane==='inplay'?{...options.credentials,...(options.timestamp===undefined?{}:{timestamp:options.timestamp})}:new Mapper(options.credentials).map(dto,GetEventRequest));
   progress('waiting_http');const download=()=>{progress('download');return new Promise<void>((resolve,reject)=>{
    const req=(url.protocol==='https:'?httpsRequest:httpRequest)(url,{method:'POST',signal,headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body),'Accept-Encoding':'gzip, deflate, br'}},res=>{
     httpStatus=res.statusCode;

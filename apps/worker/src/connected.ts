@@ -573,10 +573,10 @@ export async function session(
         const started = Date.now();
         state.set(lane,{lastSnapshotAttemptAt:new Date(started).toISOString()});
         try {
-          if(lane==='prematch'&&api.snapshotFull){
+          if(api.snapshotFull){
             if(timestampRecoveryPending){
               state.set(lane,{message:"Recuperando eventos y liquidaciones desde el checkpoint seguro; cuotas bloqueadas."});
-              await api.snapshotFull({timestamp:recoveryAnchor,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,apply:async(row,at)=>{
+              await api.snapshotFull({lane,timestamp:recoveryAnchor,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,apply:async(row,at)=>{
                 const applied=processing.then(async()=>{requireOpen();await state.publicationMutation(()=>state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()}));});processing=applied;await applied;
               }});
               requireOpen();await processing;await save();timestampRecoveryPending=false;
@@ -590,7 +590,7 @@ export async function session(
                 if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,atUTC:new Date().toISOString()}));
               });})();processing=applied;await applied;
             };
-            const result=await api.snapshotFull({signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply')snapshotApplicationActive=true;state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
+            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply')snapshotApplicationActive=true;state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
           }else if(lane==='prematch'&&api.snapshotPartitioned){
@@ -629,7 +629,7 @@ export async function session(
           state.set(lane,{lastSnapshotErrorAt:new Date().toISOString()});
           const diagnostic = describeFailure(error, "snapshot.events", "http");
           state.set(lane, { diagnostic, lastSnapshotDiagnostic: diagnostic });
-          const rejectedPartition=lane==='prematch'&&!!(api.snapshotFull||api.snapshotPartitioned)&&(api.snapshotFull?diagnostic.operation==='snapshot.events':(['invalid_response','sdk_error'].includes(diagnostic.category)||diagnostic.reason==='response_size_limit'));
+          const rejectedPartition=!!(api.snapshotFull||lane==='prematch'&&api.snapshotPartitioned)&&(api.snapshotFull?diagnostic.operation==='snapshot.events':(['invalid_response','sdk_error'].includes(diagnostic.category)||diagnostic.reason==='response_size_limit'));
           if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded" && !rejectedPartition) throw error;
           // Invalid partition HTTP is not AMQP failure. Keep persist-before-ACK and
           // baseline false, without changing the independent InPlay recovery policy.

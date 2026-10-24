@@ -203,3 +203,18 @@ test('bounded snapshot jobs preserve fixture order, publish first completion and
   assert.deepEqual(received,Array.from({length:101},(_,i)=>i+1));assert.equal(result.rows,101);assert.equal(sizes.length,7);assert.equal(progress.find(p=>p.stage==='apply'&&p.appliedRows>0).appliedRows,16);assert.equal(progress.at(-1).appliedRows,101);
  }finally{process.availableMemory=original;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
 });
+
+test('InPlay full snapshot uses the SDK request shape once and keeps the existing response cap',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-inplay-full-spool-'));let calls=0,applied=0;
+ const available=process.availableMemory;process.availableMemory=()=>768*1024*1024;const previousFlag=process.env.LSPORTS_INPLAY_STREAMED_SNAPSHOT;
+ const server=createServer(async(req,res)=>{calls++;let text='';for await(const b of req)text+=b;const body=JSON.parse(text);assert.equal(req.url,'/Inplay/GetEvents');assert.deepEqual(Object.keys(body).sort(),['packageId','password','username']);res.end(JSON.stringify({Body:[row(91)],Header:{HttpStatusCode:200}}));});
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{
+  const result=await fullSnapshot({lane:'inplay',url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4510,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},async apply(){applied++;},limits:{responseBytes:128*1024*1024}});
+  assert.equal(calls,1);assert.equal(result.rows,1);assert.equal(applied,1);assert.equal(FULL_SNAPSHOT_LIMITS.responseBytes,2*1024*1024*1024);
+  const {clients}=await import('./provider.js');process.env.LSPORTS_INPLAY_STREAMED_SNAPSHOT='true';
+  const api=clients({lane:'inplay',packageId:4510,username:'isolated',password:'isolated',hostname:'unused',vhost:'unused',queue:'unused',port:5672,tls:false},{snapshotUrl:'http://127.0.0.1:1',customersUrl:'http://127.0.0.1:1'});assert.equal(typeof api.snapshotFull,'function');
+ }finally{if(previousFlag===undefined)delete process.env.LSPORTS_INPLAY_STREAMED_SNAPSHOT;else process.env.LSPORTS_INPLAY_STREAMED_SNAPSHOT=previousFlag;process.availableMemory=available;server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
+});
+
+test('InPlay spool memory reserve checks both heap and container headroom',()=>{const original=process.availableMemory;try{process.availableMemory=()=>768*1024*1024;fullSnapshotMemory('inplay');process.availableMemory=()=>64*1024*1024;assert.throws(()=>fullSnapshotMemory('inplay'),(e:any)=>e.diagnostic.reason==='memory_budget_exceeded'&&e.diagnostic.memoryBudgetBytes===320*1024*1024&&e.diagnostic.snapshotMemory.limitingFactor==='available_memory');}finally{process.availableMemory=original;}});
