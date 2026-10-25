@@ -23,7 +23,8 @@ import {snapshotValidationReport,briefRecoveryTimeline} from './snapshot-validat
 import {validateDistribution} from './distribution-validation.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(process.env.ADL_REPO_ROOT||path.resolve(here,'../..')),runtimeRef=process.env.ADL_RUNTIME_REF||'HEAD';
-const auditEntrypoint=path.resolve(here,'../../scripts/audit-aws-cutover.ts');
+export const resolveAuditEntrypoint=(repoRoot=root)=>path.resolve(repoRoot,'scripts/audit-aws-cutover.ts');
+const auditEntrypoint=resolveAuditEntrypoint();
 const partitionWorkerSourceNames=Object.freeze(['connected.ts','connection-closer.ts','diagnostics.ts','snapshot-capacity.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','durable-ingress.mjs','durable-ingress.d.mts']);
 const partitionPackageSourceNames=Object.freeze(['packages/contracts/src/index.ts','packages/feed-store/src/index.ts']);
 const emit=value=>console.log(JSON.stringify({operation:'cutover.resumable',...value}));

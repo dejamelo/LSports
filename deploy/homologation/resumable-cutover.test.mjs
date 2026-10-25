@@ -1,6 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint} from './resumable-adl-cutover.mjs';
+import path from 'node:path';
+test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
+ assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));
+});
 test('completed stages are reused; failure stays pending and does not erase previous results',async()=>{
  const ledger={steps:{}};let saves=0,actions=0;
  const save=async()=>{saves++;};
