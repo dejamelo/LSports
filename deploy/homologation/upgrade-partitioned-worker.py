@@ -1182,7 +1182,8 @@ def upgrade_partitioned_unlocked(request):
         if request.get('snapshotPressureRepair'):require(progress.get('snapshotPressureVerified') is True,'SNAPSHOT_PRESSURE_PROOF_REQUIRED_NO_START')
         if request.get('pipelineRepair') and not progress.get('pipelineLoadVerified'):
             stage='partitioned_upgrade.offline_pipeline_load'
-            args=durable_ingress_proof_command(backup,progress['image'],PIPELINE_LOAD_PROOF,'pipeline-load-proof.mjs')
+            proof_name='pipeline-load-proof-'+hashlib.sha256(PIPELINE_LOAD_PROOF.encode()).hexdigest()[:12]+'.mjs'
+            args=durable_ingress_proof_command(backup,progress['image'],PIPELINE_LOAD_PROOF,proof_name)
             args=partition_rehearsal_args(args,progress);args[args.index('0.5')]='2'
             work=backup/'pipeline-load-work';work.mkdir(mode=0o700,exist_ok=True);os.chown(work,1000,1000)
             args[args.index('--entrypoint'):args.index('--entrypoint')]=['--mount','type=bind,source='+str(work)+',target=/proof','-e','TMPDIR=/proof']

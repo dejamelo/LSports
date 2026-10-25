@@ -15,9 +15,10 @@ class Upgrade(unittest.TestCase):
  def test_pipeline_offline_load_uses_candidate_heap_budget(self):
   source=(HERE/'upgrade-partitioned-worker.py').read_text()
   self.assertIn("args[-1:-1]=['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx']",source)
+  self.assertIn("proof_name='pipeline-load-proof-'+hashlib.sha256(PIPELINE_LOAD_PROOF.encode()).hexdigest()[:12]+'.mjs'",source)
   self.assertNotIn("args[-1:-1]=['--max-old-space-size=2560','--import','tsx']",source)
   proof=(HERE/'pipeline-load-proof.mjs').read_text()
-  for gate in ('ADL_PIPELINE_DURATION_MS||720000','writes-loadFinishedWrites>=2','backlogDropDuringSnapshot>=1000','checkpointedDuringSnapshot>=10000','backlogDropAfterLoad>=1000','checkpointedAfterLoad>=10000','PIPELINE_LOAD_SNAPSHOT_OR_DURABLE_DRAIN_NOT_VERIFIED'):
+  for gate in ('ADL_PIPELINE_DURATION_MS||720000','writes-loadFinishedWrites>=2','backlogDropDuringSnapshot>=1000','checkpointedDuringSnapshot>=10000','backlogDropAfterLoad>=1000','checkpointedAfterLoad>=requiredCheckpointCatchup','Math.min(10000,Math.max(1,loadFinishedMetrics.processed-loadFinishedMetrics.checkpointed))','finalMetrics.backlog===0','finalMetrics.checkpointed===finalMetrics.processed','PIPELINE_LOAD_SNAPSHOT_OR_DURABLE_DRAIN_NOT_VERIFIED'):
    self.assertIn(gate,proof)
  def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
   request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
