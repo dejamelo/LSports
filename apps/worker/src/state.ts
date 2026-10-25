@@ -598,7 +598,8 @@ export class TradeState {
         if (sport === "hipica") observed.add(lane);
         const context=`${lane}:${id}`;const deferred=useCache&&!row.outright;
         const summary=this.projectionSummaryCache.get(row);
-        const cacheable=useCache&&!row.outright&&summary?.context===context&&summary.selections<=TradeState.projectionCacheSelectionLimit;
+        const cacheSelections=summary?.context===context?summary.selections:[...row.markets.values()].reduce((n,market)=>n+(market.bets?.length||0),0);
+        const cacheable=useCache&&!row.outright&&cacheSelections<=TradeState.projectionCacheSelectionLimit;
         const cached=cacheable?this.cachedProjection(row,context):undefined;
         if(cached){events.push(deferAvailability?cached:maskEventAvailability(cached,blocks[lane]));continue;}
         const score = row.livescore?.value.scoreboard;
@@ -705,7 +706,7 @@ export class TradeState {
             ),
           ).toISOString(),
         });
-        if(cacheable){const base=events[events.length-1];this.rememberProjection(row,context,base,summary!.selections);if(!deferAvailability)events[events.length-1]=maskEventAvailability(base,blocks[lane]);}
+        if(cacheable){const base=events[events.length-1];this.rememberProjection(row,context,base,cacheSelections);if(!deferAvailability)events[events.length-1]=maskEventAvailability(base,blocks[lane]);}
       }
     }
     if(projectionPart)return {mode:"connected",events,outrightDiagnostics} as EventFeed;
