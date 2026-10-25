@@ -103,12 +103,12 @@ def valid_pipeline_load_receipt(backup,name,proof,metrics):
 def existing_pipeline_heap_plan(worker):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
     if options=='--max-old-space-size=2560':return None
-    require(options=='--max-old-space-size=3584' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944,'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
+    require(options in ('--max-old-space-size=3584','--max-old-space-size=3840') and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944,'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
     image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
     path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
     require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'PIPELINE_HEAP_RECEIPT_UNVERIFIED')
     old=json.loads(path.read_bytes());require(old.get('image')==image and isinstance(old.get('digest'),str) and old['digest'][:24]==image.split(':')[1] and old.get('oomRestoreVerified') is True,'PIPELINE_HEAP_RESTORE_RECEIPT_UNVERIFIED')
-    require(partition_heap_mib(old)==3584,'PIPELINE_HEAP_PLAN_UNVERIFIED')
+    require(partition_heap_mib(old)==int(options.rsplit('=',1)[1]),'PIPELINE_HEAP_PLAN_UNVERIFIED')
     found=json.loads(run(['docker','image','inspect',image]))[0]
     require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
     return copy.deepcopy(old['heapBudgetPlan'])
