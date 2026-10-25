@@ -67,10 +67,7 @@ function selectionReasons(row:Row,m:Market,b:NonNullable<Market['bets']>[number]
               ...(row.timestampRecovery?.get(`${m.id}:${b.id}`)?.status === "awaiting_fresh_amqp" ? ["awaiting_timestamp_recovery"] : []),
               ...(row.restored && !quoteConfirmed(row,`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
             ];}
-function hasSelectableSelection(row:Row,m:Market,b:NonNullable<Market['bets']>[number],status:number|undefined,connection:ConnectionState){
- if(connection.phase!=="connected")return false;
- const ingress=connection.ingressProgress;
- if(ingress&&(ingress.processingBacklog??ingress.backlog)>0&&(ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000)return false;
+function hasSelectableSelectionInRow(row:Row,m:Market,b:NonNullable<Market['bets']>[number],status:number|undefined){
  if(![1,2,9].includes(status??0)||m.status!==1||(b.betStatusId??b.status)!==1)return false;
  if(b.settlement!==undefined&&b.settlement!==0)return false;
  const price=Number(b.price);if(!(price>1&&Number.isFinite(price)))return false;
@@ -152,6 +149,7 @@ export class TradeState {
     return {state:captured,release:()=>{if(released)return;released=true;for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.delete(row);this.publicationDone=undefined;this.publicationStarted=0;this.publicationPhase='idle';done();}};
   }
   private projectionCache=new WeakMap<Row,{context:string;event:SportEvent}>();
+  private projectionSummaryCache=new WeakMap<Row,{context:string;markets:number;selections:number;selectable:boolean}>();
   restoration?:import("@lsports/contracts").EventFeed["restoration"];
   rows: Record<Lane, Map<number | string, Row>> = {
     prematch: new Map(),
@@ -241,6 +239,7 @@ export class TradeState {
       }
       if((this.projectionCaptured.has(row)||this.publicationCaptured.has(row))){row=structuredClone(row);this.rows[lane].set(key,row);}
       this.projectionCache.delete(row);
+      this.projectionSummaryCache.delete(row);
       if(observation){
         const at=new Date(observation.receivedAt).toISOString();
         const proof=(row.observation ||= {});
@@ -401,7 +400,7 @@ export class TradeState {
   }
   beginPartitionedSnapshot(lane:Lane){
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
-    for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;this.rows[lane].set(key,row);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+    for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;this.rows[lane].set(key,row);this.projectionCache.delete(row);this.projectionSummaryCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
   }
   finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
     this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));
@@ -466,15 +465,21 @@ export class TradeState {
       if(!row.fixture){target.rowsWithoutFixture++;if(row.outright&&row.marketReceipt)target.outrightMarketRowsWithoutFixture=(target.outrightMarketRowsWithoutFixture??0)+1;continue;}
       horse ||= classifySport(row.fixture.value.sport?.name)==='hipica';
       if(lane==='prematch'&&live.has(String(id))){target.rowsHiddenAsDuplicate++;continue;}
-      target.rowsPublished++;if(row.markets.size)target.eventsWithMarkets++;
-      if([...row.markets.values()].some(m=>m.bets?.length))target.eventsWithSelections++;
       const status=(row.livescore&&row.livescore.at>=(row.fixture?.at||0)?row.livescore.value.scoreboard?.status:undefined)??row.fixture.value.status;
-      let selectable=false;
-      if(!availabilityBlocks[lane]?.length)for(const market of row.markets.values()){
-        for(const bet of market.bets||[])if(hasSelectableSelection(row,market,bet,status,captured.connections[lane])){selectable=true;break;}
-        if(selectable)break;
+      const context=`${lane}:${id}`;
+      let summary=this.projectionSummaryCache.get(row);
+      if(summary?.context!==context){
+        let selections=0,selectable=false;
+        for(const market of row.markets.values()){
+          const bets=market.bets||[];selections+=bets.length;
+          if(!selectable)for(const bet of bets)if(hasSelectableSelectionInRow(row,market,bet,status)){selectable=true;break;}
+        }
+        summary={context,markets:row.markets.size,selections,selectable};
+        this.projectionSummaryCache.set(row,summary);
       }
-      if(selectable)target.eventsWithSelectableOdds++;
+      target.rowsPublished++;if(summary.markets)target.eventsWithMarkets++;
+      if(summary.selections)target.eventsWithSelections++;
+      if(summary.selectable&&!availabilityBlocks[lane]?.length)target.eventsWithSelectableOdds++;
     }
     if(horse)base.horseRacing={status:'observed',message:'Se observaron eventos de Hípica en el paquete.'};
     (base as any).events=jsonItems(function*(){for(const {part} of parts())yield* part.events;});

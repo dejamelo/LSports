@@ -97,6 +97,25 @@ test("publication projection reuses unchanged fixtures, remasks availability and
   assert.notStrictEqual(changed, first);
   assert.equal(changed.selections[1].odds, 3.8);
 });
+test("publication coverage reuses unchanged row summaries and remasks dynamic feed availability", () => {
+  const state = new TradeState();
+  state.replace("prematch", [fixture()], at);
+  state.set("prematch", { phase: "connected" });
+
+  const coverage = () => state.projection(at, false).coverage!.prematch;
+  assert.equal(coverage().eventsWithMarkets, 1);
+  assert.equal(coverage().eventsWithSelections, 1);
+  assert.equal(coverage().eventsWithSelectableOdds, 1);
+  assert.equal(coverage().eventsWithSelectableOdds, 1);
+
+  state.set("prematch", { ingressProgress: { processingBacklog: 1, oldestProcessingAgeMs: 5001 } as any });
+  assert.equal(coverage().eventsWithSelectableOdds, 0);
+  state.set("prematch", { ingressProgress: { processingBacklog: 0, oldestProcessingAgeMs: 0 } as any });
+  assert.equal(coverage().eventsWithSelectableOdds, 1);
+
+  state.apply("prematch", [{ fixtureId: 100, markets: [{ id: 1, status: 2 }] }], at + 1);
+  assert.equal(coverage().eventsWithSelectableOdds, 0);
+});
 test("disconnects, settlement and terminal fixtures disable selection; inplay wins duplicate", () => {
   const state = new TradeState();
   state.replace("prematch", [fixture()], at);
