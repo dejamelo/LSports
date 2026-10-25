@@ -45,6 +45,18 @@ class Upgrade(unittest.TestCase):
   self.assertEqual(clock[0],30)
  def test_readback_failure_resumes_without_repeating_serialization(self):
   self.test_prepare_activate_reuse_preserves_every_non_worker_field(oom=True,readback_fails=True)
+ def test_pipeline_proof_revision_gets_immutable_content_addressed_backup(self):
+  first='synthetic proof revision one';second='synthetic proof revision two'
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);backup.chmod(0o700)
+   for check in (first,second):
+    revision=NS['pipeline_proof_revision'](check);name='pipeline-load-proof-'+revision[:16]+'.mjs'
+    NS['durable_ingress_proof_command'](backup,'existing-image',check,name)
+   files=sorted(p.name for p in backup.iterdir())
+   self.assertEqual(len(files),2)
+   self.assertEqual((backup/files[0]).read_text(),first if NS['pipeline_proof_revision'](first)[:16] in files[0] else second)
+   self.assertEqual((backup/files[1]).read_text(),first if NS['pipeline_proof_revision'](first)[:16] in files[1] else second)
+  self.assertNotEqual(NS['pipeline_proof_revision'](first),NS['pipeline_proof_revision'](second))
  @unittest.skipUnless(os.environ.get('ADL_OFFLINE_PROOF_IMAGE'),'opt-in isolated Docker proof')
  def test_real_docker_proof_and_both_previous_harness_failures(self):
   image=os.environ['ADL_OFFLINE_PROOF_IMAGE'];repo=HERE.resolve().parents[1]

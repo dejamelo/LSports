@@ -179,6 +179,8 @@ def durable_ingress_proof_command(backup,image,check,name='durable-ingress-proof
     os.chmod(proof,0o644)
     return ['docker','run','--rm','--network','none','--memory','512m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=268435456,mode=1777','--mount','type=bind,source='+str(proof)+',target=/offline-proof.mjs,readonly','--entrypoint','node',image,'/offline-proof.mjs']
 
+def pipeline_proof_revision(check):return hashlib.sha256(check.encode()).hexdigest()
+
 def durable_ingress_log_summary(backup):
     path=backup/'durable-ingress-test.private.log'
     if not path.exists():return {'present':False}
@@ -1140,9 +1142,17 @@ def upgrade_partitioned_unlocked(request):
             require(b'snapshot-pressure-offline-ok' in output,'SNAPSHOT_PRESSURE_OFFLINE_TEST_FAILED')
             progress['snapshotPressureVerified']=True;save(progress)
         if request.get('snapshotPressureRepair'):require(progress.get('snapshotPressureVerified') is True,'SNAPSHOT_PRESSURE_PROOF_REQUIRED_NO_START')
+        pipeline_proof_sha256=None
+        if request.get('pipelineRepair') and 'PIPELINE_LOAD_PROOF' in globals():
+            pipeline_proof_sha256=pipeline_proof_revision(PIPELINE_LOAD_PROOF)
+            if progress.get('pipelineLoadProofSha256')!=pipeline_proof_sha256:
+                progress['pipelineLoadVerified']=False;progress['pipelineLoadProofSha256']=None;save(progress)
+        elif request.get('pipelineRepair'):
+            require(progress.get('pipelineLoadVerified') is True,'PIPELINE_LOAD_PROOF_SOURCE_UNAVAILABLE')
         if request.get('pipelineRepair') and not progress.get('pipelineLoadVerified'):
             stage='partitioned_upgrade.offline_pipeline_load'
-            args=durable_ingress_proof_command(backup,progress['image'],PIPELINE_LOAD_PROOF,'pipeline-load-proof.mjs')
+            proof_name='pipeline-load-proof-'+pipeline_proof_sha256[:16]+'.mjs'
+            args=durable_ingress_proof_command(backup,progress['image'],PIPELINE_LOAD_PROOF,proof_name)
             args=partition_rehearsal_args(args,progress);args[args.index('0.5')]='2'
             work=backup/'pipeline-load-work';work.mkdir(mode=0o700,exist_ok=True);os.chown(work,1000,1000)
             args[args.index('--entrypoint'):args.index('--entrypoint')]=['--mount','type=bind,source='+str(work)+',target=/proof','-e','TMPDIR=/proof']
@@ -1158,7 +1168,7 @@ def upgrade_partitioned_unlocked(request):
                 try:r=json.loads(line)
                 except ValueError:continue
                 if r.get('operation')=='pipeline.offline.complete':progress['pipelineLoadMetrics']={k:v for k,v in r.items() if k in ('snapshotBytes','snapshotRows','applied','preload','received','acknowledged','processed','checkpointed','finalBacklog','writes','maxPersistMs','peakRSSBytes','maxEventLoopDelayMs','readbackRows') and type(v) in (int,float)}
-            progress['pipelineLoadVerified']=True;save(progress)
+            progress['pipelineLoadVerified']=True;progress['pipelineLoadProofSha256']=pipeline_proof_sha256;save(progress)
         if request.get('pipelineRepair'):require(progress.get('pipelineLoadVerified') is True,'PIPELINE_PROOF_REQUIRED_NO_STOP')
         if phase=='prepare':
             if request.get('spoolMemoryFix') and not progress.get('spoolMemoryVerified'):
