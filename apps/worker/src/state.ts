@@ -148,8 +148,33 @@ export class TradeState {
     let done!:()=>void;this.publicationDone=new Promise<void>(resolve=>done=resolve);let released=false;
     return {state:captured,release:()=>{if(released)return;released=true;for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.delete(row);this.publicationDone=undefined;this.publicationStarted=0;this.publicationPhase='idle';done();}};
   }
-  private projectionCache=new WeakMap<Row,{context:string;event:SportEvent}>();
+  // Keep a bounded window of materialized events. An unbounded WeakMap still
+  // retains its values while the rows live, duplicating millions of market
+  // selections beside the state graph during a full snapshot publication.
+  private projectionCache={items:new Map<Row,{context:string;event:SportEvent;selections:number}>(),selections:0};
+  private static readonly projectionCacheSelectionLimit=50_000;
   private projectionSummaryCache=new WeakMap<Row,{context:string;markets:number;selections:number;selectable:boolean}>();
+  private invalidateProjection(row:Row){
+    const cached=this.projectionCache.items.get(row);
+    if(cached){this.projectionCache.items.delete(row);this.projectionCache.selections-=cached.selections;}
+  }
+  private cachedProjection(row:Row,context:string){
+    const cached=this.projectionCache.items.get(row);
+    if(!cached||cached.context!==context)return undefined;
+    this.projectionCache.items.delete(row);this.projectionCache.items.set(row,cached);
+    return cached.event;
+  }
+  private rememberProjection(row:Row,context:string,event:SportEvent,selections:number){
+    const limit=TradeState.projectionCacheSelectionLimit;
+    if(selections>limit)return;
+    this.invalidateProjection(row);
+    while(this.projectionCache.selections+selections>limit){
+      const oldest=this.projectionCache.items.entries().next().value as [Row,{context:string;event:SportEvent;selections:number}]|undefined;
+      if(!oldest)break;
+      this.projectionCache.items.delete(oldest[0]);this.projectionCache.selections-=oldest[1].selections;
+    }
+    this.projectionCache.items.set(row,{context,event,selections});this.projectionCache.selections+=selections;
+  }
   restoration?:import("@lsports/contracts").EventFeed["restoration"];
   rows: Record<Lane, Map<number | string, Row>> = {
     prematch: new Map(),
@@ -238,7 +263,7 @@ export class TradeState {
         this.rows[lane].set(key, row);
       }
       if((this.projectionCaptured.has(row)||this.publicationCaptured.has(row))){row=structuredClone(row);this.rows[lane].set(key,row);}
-      this.projectionCache.delete(row);
+      this.invalidateProjection(row);
       this.projectionSummaryCache.delete(row);
       if(observation){
         const at=new Date(observation.receivedAt).toISOString();
@@ -400,7 +425,7 @@ export class TradeState {
   }
   beginPartitionedSnapshot(lane:Lane){
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
-    for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;this.rows[lane].set(key,row);this.projectionCache.delete(row);this.projectionSummaryCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+    for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;this.rows[lane].set(key,row);this.invalidateProjection(row);this.projectionSummaryCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
   }
   finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
     this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));
@@ -572,8 +597,10 @@ export class TradeState {
         const sport = classifySport(fixture.sport?.name);
         if (sport === "hipica") observed.add(lane);
         const context=`${lane}:${id}`;const deferred=useCache&&!row.outright;
-        const cached=useCache&&!row.outright?this.projectionCache.get(row):undefined;
-        if(cached?.context===context){events.push(deferAvailability?cached.event:maskEventAvailability(cached.event,blocks[lane]));continue;}
+        const summary=this.projectionSummaryCache.get(row);
+        const cacheable=useCache&&!row.outright&&summary?.context===context&&summary.selections<=TradeState.projectionCacheSelectionLimit;
+        const cached=cacheable?this.cachedProjection(row,context):undefined;
+        if(cached){events.push(deferAvailability?cached:maskEventAvailability(cached,blocks[lane]));continue;}
         const score = row.livescore?.value.scoreboard;
         const status =
           (row.livescore && row.livescore.at >= (row.fixture?.at || 0)
@@ -678,7 +705,7 @@ export class TradeState {
             ),
           ).toISOString(),
         });
-        if(useCache&&!row.outright){const base=events[events.length-1];this.projectionCache.set(row,{context,event:base});if(!deferAvailability)events[events.length-1]=maskEventAvailability(base,blocks[lane]);}
+        if(cacheable){const base=events[events.length-1];this.rememberProjection(row,context,base,summary!.selections);if(!deferAvailability)events[events.length-1]=maskEventAvailability(base,blocks[lane]);}
       }
     }
     if(projectionPart)return {mode:"connected",events,outrightDiagnostics} as EventFeed;

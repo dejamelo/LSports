@@ -97,6 +97,19 @@ test("publication projection reuses unchanged fixtures, remasks availability and
   assert.notStrictEqual(changed, first);
   assert.equal(changed.selections[1].odds, 3.8);
 });
+test("publication projection cache stays within its selection budget on dense feeds", () => {
+  const state = new TradeState();
+  const dense = Array.from({ length: 200 }, (_, fixtureIndex) => ({
+    ...fixture(), fixtureId: 1000 + fixtureIndex,
+    markets: [{ id: 1, name: "Dense", status: 1, bets: Array.from({ length: 300 }, (_, betIndex) => ({
+      id: String(betIndex), name: `Selection ${betIndex}`, price: "2.10", status: 1, isChanged: 0,
+    })) }],
+  }));
+  state.replace("prematch", dense, at);
+  assert.equal([...state.projection(at, false).events].length, 200);
+  assert((state as any).projectionCache.selections <= 50_000);
+  assert((state as any).projectionCache.items.size < dense.length);
+});
 test("publication coverage reuses unchanged row summaries and remasks dynamic feed availability", () => {
   const state = new TradeState();
   state.replace("prematch", [fixture()], at);
