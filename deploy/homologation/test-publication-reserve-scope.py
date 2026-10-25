@@ -16,4 +16,12 @@ class PublicationScope(unittest.TestCase):
   verified={**base,**added}
   digest=hashlib.sha256(json.dumps(verified,sort_keys=True,separators=(',',':')).encode()).hexdigest()
   with self.assertRaises(RuntimeError):ns['verify_pipeline_sources'](base,{**verified,'apps/worker/src/persistence.ts':'telemetry'},digest,added)
+ def test_reviewed_publication_patch_is_verified_without_heap_repair(self):
+  old={p:'installed' for p in ns['PARTITION_FILES']}
+  digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  candidate={**old,'apps/worker/src/state.ts':'cached projection'}
+  request={'pipelineRepair':True,'livePersistenceRepair':True,'publicationReserveRepair':True}
+  ns['verify_partitioned_candidate_sources'](request,old,candidate,digest)
+  for changed in ({**candidate,'apps/worker/src/provider.ts':'unrelated'}, {p:v for p,v in candidate.items() if p!='packages/feed-store/src/index.ts'}):
+   with self.assertRaises(RuntimeError):ns['verify_partitioned_candidate_sources'](request,old,changed,digest)
 if __name__=='__main__':unittest.main()
