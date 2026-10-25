@@ -1,7 +1,8 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {setTimeout as sleep} from 'node:timers/promises';
-import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
+import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
 const pkg={lane:'prematch',packageId:4511,username:'test',password:'test',hostname:'unused',queue:'unused',vhost:'unused',tls:false,port:5672} as any;
+test('offline batch policy matches the deployed PreMatch bounds',()=>{assert.equal(PREMATCH_CHECKPOINT_BATCH_THRESHOLD,32768);assert.equal(PREMATCH_CHECKPOINT_BATCH_FLUSH_MS,120000);});
 async function until(check:()=>boolean){const end=Date.now()+15000;while(!check()){if(Date.now()>end)throw Error('isolated test deadline');await sleep(5);}}
 test('private checkpoint completes before the full public projection is materialized',async()=>{
  const order:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:start');await sleep(10);order.push('checkpoint:durable');return 22;},()=>{assert.equal(order.at(-1),'checkpoint:durable');order.push('projection:materialized');return {events:1};});

@@ -55,6 +55,8 @@ export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable
 export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkpoint:()=>Promise<TCheckpoint>,project:()=>TProjection){
  const checkpointResult=await checkpoint();return {checkpointResult,projection:project()};
 }
+export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=32768;
+export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=120000;
 // Preserve the same processing/FIFO barriers; expose which one is actually awaited.
 export async function snapshotApplyTurn<T>(processing:Promise<unknown>,state:Pick<TradeState,'exclusive'|'publicationMutation'>,apply:()=>T|Promise<T>,observe:(phase:string,elapsedMs:number)=>void,intervalMs=10000):Promise<T>{
  let phase='processing_queue',completed=false;const began=performance.now();const report=(stage:string)=>{try{observe(stage,Math.ceil(performance.now()-began));}catch{/* Instrumentation must not replace an application failure. */}};const timer=setInterval(()=>report(phase),intervalMs);timer.unref();
@@ -176,7 +178,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         while (!signal.aborted) {
           try {
             const runSession=dependencies.session ?? session;
-            const sessionDependencies=dependencies.session?undefined:{connect:amqp.connect,clientFactory:clients,durableConnect:connectDurableMq,checkpointBatchThreshold:pkg.lane==='prematch'?32768:32,checkpointBatchFlushMs:120000};
+            const sessionDependencies=dependencies.session?undefined:{connect:amqp.connect,clientFactory:clients,durableConnect:connectDurableMq,checkpointBatchThreshold:pkg.lane==='prematch'?PREMATCH_CHECKPOINT_BATCH_THRESHOLD:32,checkpointBatchFlushMs:PREMATCH_CHECKPOINT_BATCH_FLUSH_MS};
             await runSession(pkg, config, state, save, signal, sessionDependencies, `${path}.${pkg.lane}.inbox.sqlite`);
             attempt = 0;
           } catch (error) {
