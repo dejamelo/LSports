@@ -4,6 +4,23 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_offline_projection_repair_requires_exact_preserved_restore_heap_failure(self):
+  source=(HERE/'upgrade-partitioned-worker.py').read_text()
+  self.assertIn("offline_projection_repair=request.get('offlineRestoreProjectionRepair') is True",source)
+  self.assertIn("request.get('offlineRestoreProjectionRepair')",source)
+  old={'oldContainer':'a'*64};backup=Path('/var/backups/adl-partitioned-upgrade-test')
+  summary={'present':True,'logMayContainEarlierAttempts':False,'signals':['node_heap_exhausted'],'permissionFailures':[],'attemptLog':'oom-restore-attempt-0123456789abcdef.private.log','privateLogSha256':'a'*64}
+  evidence={'stageAtFailure':'projection.serialize','fatalSignals':['javascript_heap_out_of_memory'],'effectiveHeapLimitBytes':4227858432,'checkpointBaseline':{'rows':36096},'applicationStart':{'stage':'snapshot.apply'},'phaseSamples':[{'rows':16329}]}
+  keys=('oom_restore_log_summary','read_tail','rehearsal_heap_evidence','states','require');saved={k:NS.get(k) for k in keys}
+  NS.update(oom_restore_log_summary=lambda _:summary,read_tail=lambda _:b'private',rehearsal_heap_evidence=lambda _:evidence,states=lambda _:[{'id':'a'*64,'running':False,'exitCode':0,'oomKilled':False}])
+  try:
+   result=NS['verify_offline_restore_projection_failure'](old,backup)
+   self.assertTrue(result['verified']);self.assertEqual(result['stageAtFailure'],'projection.serialize');self.assertEqual(result['checkpointRows'],36096)
+   for change in ({'stageAtFailure':'snapshot.apply'},{'fatalSignals':[]},{'effectiveHeapLimitBytes':None},{'checkpointBaseline':{'rows':2}}):
+    NS['rehearsal_heap_evidence']=lambda _,bad={**evidence,**change}:bad
+    with self.assertRaises(Exception):NS['verify_offline_restore_projection_failure'](old,backup)
+   NS['rehearsal_heap_evidence']=lambda _:evidence
+  finally:NS.update(saved)
  def test_live_heap_margin_plan_requires_measured_reserve_and_keeps_container_limit(self):
   evidence={'workerRunning':True,'workerOomKilled':False,'restartCount':0,'containerLimitBytes':6442450944,'previousOldSpaceMiB':3584,'oomEvents':0,'memoryMaxEvents':0,'publicationHeapWaits':3,'minimumHeapHeadroomBytes':480*1024**2,'maxObservedRssBytes':int(4.23*1024**3),'currentCgroupBytes':int(3.88*1024**3),'hostAvailableBytes':10*1024**3}
   plan=NS['validate_live_heap_margin_evidence'](evidence)

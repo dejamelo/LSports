@@ -364,6 +364,21 @@ def rehearsal_heap_evidence(raw):
         if isinstance(counts,dict):phases[-1]['indexCounts']={k:v for k,v in counts.items() if k in ('stateRows','markets','bets','betAt','betOrder','snapshotBets','freshBets','settlementAudit','timestampRecovery') and type(v) is int and 0<=v<2**53}
     return {'fatalSignals':fatal,'gcSamples':gc[-8:],'maxLoggedHeapUsedMiB':max((g['usedBeforeMiB'] for g in gc),default=None),'nativeSubsystemHints':subsystems,'stageAtFailure':phases[-1]['stage'] if phases else 'not_recorded_unless_JS_stack_identifies_source','checkpointBaseline':next((p for p in phases if p['stage']=='checkpoint.complete'),None),'applicationStart':next((p for p in phases if p['stage']=='snapshot.apply'),None),'phaseSamples':phases[-12:],'maxObservedRSSBytes':max((p.get('maxRSSBytes',0) for p in phases),default=None),'maxSampledHeapBytes':max((p.get('sampledHeapPeakBytes',0) for p in phases),default=None),'peakRSSBytes':None,'effectiveHeapLimitBytes':phases[0].get('heapLimitBytes') if phases else None,'metricsLimit':'GC samples are not RSS or a measured heap limit. Exit code alone is not Docker OOM proof.'}
 
+def verify_offline_restore_projection_failure(old,backup):
+    summary=oom_restore_log_summary(backup)
+    require(summary.get('present') is True and summary.get('logMayContainEarlierAttempts') is False and 'node_heap_exhausted' in summary.get('signals',[]) and not summary.get('permissionFailures'),'OFFLINE_RESTORE_FAILURE_NOT_PROJECTION_HEAP')
+    raw=read_tail(backup/summary['attemptLog']);evidence=rehearsal_heap_evidence(raw)
+    require(evidence.get('stageAtFailure')=='projection.serialize' and 'javascript_heap_out_of_memory' in evidence.get('fatalSignals',[]) and
+        type(evidence.get('effectiveHeapLimitBytes')) is int and evidence['effectiveHeapLimitBytes']>0 and
+        (evidence.get('checkpointBaseline') or {}).get('rows',0)>=30000 and
+        (evidence.get('applicationStart') or {}).get('stage')=='snapshot.apply','OFFLINE_RESTORE_FAILURE_EVIDENCE_MISMATCH')
+    workers=states('worker')
+    require(len(workers)==1 and workers[0].get('id')==old.get('oldContainer') and not workers[0].get('running') and
+        workers[0].get('exitCode')==0 and workers[0].get('oomKilled') is False,'OFFLINE_RESTORE_WORKER_STATE_CHANGED')
+    return {'verified':True,'stageAtFailure':evidence['stageAtFailure'],'fatalSignals':evidence['fatalSignals'],
+        'effectiveHeapLimitBytes':evidence['effectiveHeapLimitBytes'],'checkpointRows':evidence['checkpointBaseline']['rows'],
+        'snapshotRowsApplied':(evidence.get('phaseSamples') or [{}])[-1].get('rows',0),'privateLogSha256':summary['privateLogSha256']}
+
 def rehearsal_memory_configuration(entry,backup,log_name):
     memory_limit=partition_memory(entry)
     result={'rehearsalInvocation':{'containerMemoryLimitBytes':memory_limit,'nodeMaxOldSpaceSizeMiB':partition_heap_mib(entry),'source':'executor_arguments_not_preserved_container_inspect','containerRemovedAfterExit':True},'intendedWorker':{'containerMemoryLimitBytes':memory_limit,'nodeMaxOldSpaceSizeMiB':partition_heap_mib(entry)},'effectiveRehearsalHeapLimitBytes':None,'rehearsalOOMKilled':None,'effectiveMetricsRecorded':False}
@@ -1001,10 +1016,12 @@ def upgrade_partitioned_unlocked(request):
             receipt_path,saved,files=resolve_prepared_upgrade(request,files);digest=saved['digest']
         meta=json.loads((SECURE/'deployment.json').read_bytes());base=partition_base(meta);before=model(base)
         require(control_status()==200,'API_NOT_HEALTHY')
-        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
+        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;offline_projection_repair=request.get('offlineRestoreProjectionRepair') is True
+        if offline_projection_repair:require(request.get('snapshotMemoryRepair') is True and request.get('pipelineRepair') is True and request.get('checkpointRepairBackup') and not request.get('livePersistenceRepair') and not request.get('resumeBackup'),'OFFLINE_RESTORE_PROJECTION_SCOPE_UNVERIFIED')
+        require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
         inherited_heap_plan=None
         if request.get('pipelineRepair'):
-            require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and memory_limit==6442450944,'PIPELINE_REQUIRES_SIX_GIB_VERIFIED_IDENTITY')
+            require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup') or offline_projection_repair) and request.get('snapshotMemoryRepair') is True and memory_limit==6442450944,'PIPELINE_REQUIRES_SIX_GIB_VERIFIED_IDENTITY')
             require(run(['systemctl','is-active','adl-worker-cache-reserve.service']).strip()==b'active','CACHE_RESERVE_NOT_ACTIVE_NO_WORKER_CHANGE')
             if request.get('preservedHeapBudgetRepair') and request.get('resumeBackup'):
                 require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') in ('--max-old-space-size=2560','--max-old-space-size=3584'),'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
@@ -1029,6 +1046,8 @@ def upgrade_partitioned_unlocked(request):
             require(len(previous)==1,'CHECKPOINT_REPAIR_SOURCE_NOT_UNIQUE')
             backup=source_backup
             old=previous[0];require(not any(w['running'] for w in states('worker')),'CHECKPOINT_REPAIR_REQUIRES_STOPPED_WORKER')
+            if offline_projection_repair:
+                progress['offlineRestoreProjectionFailure']=verify_offline_restore_projection_failure(old,backup)
             if request.get('stoppedRetentionRepair'):verify_stopped_retention_origin(old)
             image_info=json.loads(run(['docker','image','inspect',old['image']]))[0]
             require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'CHECKPOINT_REPAIR_IMAGE_UNVERIFIED')
@@ -1128,7 +1147,7 @@ def upgrade_partitioned_unlocked(request):
             check="""import{decodeMessage}from'/app/apps/worker/src/messages.ts';import{partitionedSnapshot,subscriptionInventory}from'/app/apps/worker/src/partitioned-snapshot.ts';await import('/app/apps/worker/src/connected.ts');const sdk=await import('trade360-nodejs-sdk');if(sdk.knownEntityKeys.get(38)!=='OutrightLeagueFixtureUpdate')throw Error();const body={Competition:{Id:1,Competitions:[{Id:2,Events:[{FixtureId:3,OutrightLeague:{FixtureName:'ISOLATED OFFLINE',Status:1,LastUpdate:'2026-10-19T06:00:00Z'}}]}]}};const decoded=decodeMessage(Buffer.from(JSON.stringify({Header:{Type:38,MsgGuid:'offline-38',ServerTimestamp:1792389601000},Body:body})),{});if(decoded.events[0]?.outright?.fixture?.fixtureName!=='ISOLATED OFFLINE')throw Error();if(subscriptionInventory({fixtures:[2,1]},{Body:{Fixtures:[2,1]}}).join(',')!=='1,2')throw Error();let rejected=false;try{subscriptionInventory({fixtures:['PRIVATE_OFFLINE']},{Body:{Fixtures:['PRIVATE_OFFLINE']}})}catch(e){rejected=e.diagnostic?.snapshotValidation?.code==='inventory_invalid_ids'}if(!rejected)throw Error();let applied=0;const p=await partitionedSnapshot({async inventory(){return[11,12]},async events(ids){return ids.map(fixtureId=>({fixtureId,fixture:{status:1}}))}},{assertOpen(){},async begin(){},async batch(rows){applied+=rows.length},async progress(){}},{batchSize:1});if(p.stage!=='complete'||applied!==2)throw Error();console.log('partitioned-offline-ok');"""
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',check],timeout=30)
             require(b'partitioned-offline-ok' in output,'UPGRADE_OFFLINE_TEST_FAILED')
-            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
+            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,'offlineRestoreProjectionRepair':offline_projection_repair,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
         if request.get('preservedHeapBudgetRepair'):
             if request.get('pipelineRepair'):
                 require(request.get('resumeBackup') and request.get('snapshotMemoryRepair'),'HEAP_REPAIR_RESUME_SCOPE_UNVERIFIED')

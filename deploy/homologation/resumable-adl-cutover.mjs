@@ -254,10 +254,14 @@ export async function run(args){
     if(durableMode)repairOptions.durableIngress=true;
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryRepair&&process.env.ADL_CHECKPOINT_REPAIR_BACKUP){const b=process.env.ADL_CHECKPOINT_REPAIR_BACKUP;if(!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(b)||process.env.ADL_RESUME_BACKUP)throw Error('DERIVED_REPAIR_BACKUP_UNVERIFIED');repairOptions.checkpointRepairBackup=b;}
+    if(process.env.ADL_OFFLINE_RESTORE_PROJECTION_REPAIR==='1'){
+     if(!snapshotMemoryRepair||!repairOptions.checkpointRepairBackup||repairOptions.livePersistenceRepair||repairOptions.resumeBackup)throw Error('OFFLINE_RESTORE_PROJECTION_REPAIR_SCOPE_UNVERIFIED');
+     repairOptions.offlineRestoreProjectionRepair=true;
+    }
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||''))throw Error('EXPECTED_CURRENT_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'){const image=persistenceExpectedImage(ledger);repairOptions.livePersistenceRepair=true;repairOptions.expectedLiveImage=image;}
     if(process.env.ADL_STOPPED_RETENTION_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.checkpointRepairBackup||repairOptions.livePersistenceRepair||repairOptions.liveOomRepair||process.env.ADL_RESUME_BACKUP)throw Error('RETENTION_REPAIR_REQUIRES_STOPPED_PREPARATION');repairOptions.stoppedRetentionRepair=true;}
-    if(process.env.ADL_PIPELINE_REPAIR==='1'){if((!repairOptions.livePersistenceRepair&&!repairOptions.stoppedRetentionRepair)||!snapshotMemoryRepair)throw Error('PIPELINE_REPAIR_REQUIRES_VERIFIED_IDENTITY');repairOptions.pipelineRepair=true;repairOptions.finalizeAfterRecovery=true;}
+    if(process.env.ADL_PIPELINE_REPAIR==='1'){if((!repairOptions.livePersistenceRepair&&!repairOptions.stoppedRetentionRepair&&!repairOptions.offlineRestoreProjectionRepair)||!snapshotMemoryRepair)throw Error('PIPELINE_REPAIR_REQUIRES_VERIFIED_IDENTITY');repairOptions.pipelineRepair=true;repairOptions.finalizeAfterRecovery=true;}
     if(process.env.ADL_PUBLICATION_RESERVE_REPAIR==='1'){if(!repairOptions.pipelineRepair||!repairOptions.livePersistenceRepair)throw Error('PUBLICATION_RESERVE_REQUIRES_VERIFIED_LIVE_PIPELINE');repairOptions.publicationReserveRepair=true;}
     if(process.env.ADL_HEAP_MARGIN_REPAIR==='1'){if(!repairOptions.pipelineRepair||!repairOptions.livePersistenceRepair||!snapshotMemoryRepair)throw Error('HEAP_MARGIN_REQUIRES_VERIFIED_LIVE_PIPELINE');repairOptions.heapMarginRepair=true;}
     if(process.env.ADL_TRANSPORT_LIFECYCLE_REPAIR==='1'){if(!repairOptions.pipelineRepair||!repairOptions.livePersistenceRepair||repairOptions.publicationReserveRepair)throw Error('TRANSPORT_LIFECYCLE_REQUIRES_VERIFIED_LIVE_PIPELINE');repairOptions.transportLifecycleRepair=true;}
