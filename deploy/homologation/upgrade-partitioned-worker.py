@@ -33,12 +33,27 @@ def partition_memory(progress):
 def partition_heap_mib(progress):
     plan=progress.get('heapBudgetPlan')
     if plan is None:return 2560
+    if plan.get('preserveExisting') is True:
+        require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('oldSpaceMiB')==3840 and plan.get('previousOldSpaceMiB')==3840 and plan.get('containerLimitUnchanged') is True and 3840*1024**2<=plan.get('effectiveHeapLimitBytes',0)<=6442450944-512*1024**2,'HEAP_PRESERVATION_PLAN_UNVERIFIED')
+        return 3840
     require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('oldSpaceMiB')==3584 and plan.get('previousOldSpaceMiB')==2560 and plan.get('containerLimitUnchanged') is True,'HEAP_BUDGET_PLAN_UNVERIFIED')
     return 3584
 
 def existing_pipeline_heap_plan(worker):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
     if options=='--max-old-space-size=2560':return None
+    if options=='--max-old-space-size=3840' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944:
+        image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
+        path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
+        require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'PIPELINE_HEAP_RECEIPT_UNVERIFIED')
+        old=json.loads(path.read_bytes());require(old.get('image')==image and isinstance(old.get('digest'),str) and old['digest'][:24]==image.split(':')[1] and old.get('oomRestoreVerified') is True,'PIPELINE_HEAP_RESTORE_RECEIPT_UNVERIFIED')
+        found=json.loads(run(['docker','image','inspect',image]))[0]
+        require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
+        probe="const s=require('node:v8').getHeapStatistics();console.log(JSON.stringify({heapLimitBytes:s.heap_size_limit}))"
+        measured=json.loads(run(['docker','run','--rm','--network','none','--memory','6g','--read-only','-e','NODE_OPTIONS='+options,'--entrypoint','node',image,'-e',probe]))
+        limit=measured.get('heapLimitBytes')
+        require(type(limit) is int and 3840*1024**2<=limit<=6442450944-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
+        return {'evidenceVerified':True,'oldSpaceMiB':3840,'previousOldSpaceMiB':3840,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':limit}
     require(options=='--max-old-space-size=3584' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944,'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
     image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
     path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
@@ -996,6 +1011,9 @@ def upgrade_partitioned_unlocked(request):
             require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT');require(shutil.disk_usage('/opt').free>=(4*1024**3 if request.get('pipelineRepair') else 1024**3),'UPGRADE_DISK_HEADROOM_INSUFFICIENT')
             original_image=before['services']['worker']['image'];base_info=json.loads(run(['docker','image','inspect',original_image]))[0]
             container=json.loads(run(['docker','inspect',workers[0]['id']]))[0];require(container['Image']==base_info['Id'],'UPGRADE_RUNNING_IMAGE_MISMATCH');require(snapshot_memory_bytes(container['HostConfig']['Memory'])==memory_limit,'UPGRADE_CONTAINER_MEMORY_LIMIT_MISMATCH')
+            if inherited_heap_plan and inherited_heap_plan.get('preserveExisting') is True:
+                actual_env=dict(v.split('=',1) for v in container.get('Config',{}).get('Env',[]) if '=' in v)
+                require(actual_env.get('NODE_OPTIONS')==before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=3840','PIPELINE_ACTIVE_HEAP_SETTING_MISMATCH')
             probe="const fs=require('node:fs'),h=require('node:crypto');let result={};for(const name of "+json.dumps(sorted(files))+ "){const p='/app/'+name;result[name]=fs.existsSync(p)?h.createHash('sha256').update(fs.readFileSync(p)).digest('hex'):null;}console.log(JSON.stringify(result));"
             hashes=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',original_image,'-e',probe]))
             if request.get('liveOomRepair') or request.get('livePersistenceRepair'):
