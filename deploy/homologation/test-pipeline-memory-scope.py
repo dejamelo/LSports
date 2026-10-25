@@ -20,6 +20,13 @@ class Scope(unittest.TestCase):
  def test_existing_four_gib_scope_is_unchanged(self):
   self.assertEqual(ns['partition_memory']({}),4294967296)
   command=['docker','run','--rm','--memory','4g','image'];self.assertEqual(ns['partition_rehearsal_args'](command[:],{}),command)
+ def test_preserved_restore_rehearsal_uses_the_same_bounded_snapshot_wait(self):
+  helper=(test_dir/'upgrade-partitioned-worker.py').read_text()
+  self.assertIn("import{waitForSnapshotCapacity}from'/app/apps/worker/src/snapshot-capacity.ts'",helper)
+  self.assertIn("LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'",helper)
+  self.assertIn('maxWaitMs:Math.max(0,60000-memoryWaited),intervalMs:250',helper)
+  self.assertIn('memoryWaited+=result.waitedMs',helper)
+  self.assertNotIn('convertSnapshotRow,fullSnapshotMemory}from',helper)
  def test_six_gib_requires_explicit_protected_scope(self):
   with self.assertRaises(RuntimeError):ns['partition_memory']({'memoryLimitBytes':6442450944})
   p={'memoryLimitBytes':6442450944,'pipelineRepair':True};self.assertEqual(ns['partition_memory'](p),6442450944)
