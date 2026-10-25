@@ -50,6 +50,11 @@ export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable
  const began=Date.now(),timer=setInterval(()=>{const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'waiting',publicationId,...state.publicationStatus(),elapsedMs:Date.now()-began,heapUsedBytes:m.heapUsed,rssBytes:m.rss}));},10000);timer.unref();
  try{return await persist(captured.state);}finally{clearInterval(timer);captured.release();}
 }
+// Keep the materialized public event graph out of memory during the private
+// checkpoint write. The same immutable captured rows feed both durable files.
+export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkpoint:()=>Promise<TCheckpoint>,project:()=>TProjection){
+ const checkpointResult=await checkpoint();return {checkpointResult,projection:project()};
+}
 // Preserve the same processing/FIFO barriers; expose which one is actually awaited.
 export async function snapshotApplyTurn<T>(processing:Promise<unknown>,state:Pick<TradeState,'exclusive'|'publicationMutation'>,apply:()=>T|Promise<T>,observe:(phase:string,elapsedMs:number)=>void,intervalMs=10000):Promise<T>{
  let phase='processing_queue',completed=false;const began=performance.now();const report=(stage:string)=>{try{observe(stage,Math.ceil(performance.now()-began));}catch{/* Instrumentation must not replace an application failure. */}};const timer=setInterval(()=>report(phase),intervalMs);timer.unref();
@@ -125,11 +130,15 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const save = coalescedPersistence(publicationId=>publicationCaptureTurn(state,stable=>operation("file.persist", "local", async () => {
         const memoryStage=(stage:string)=>{state.setPublicationPhase(stage);const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',publicationId,stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
         memoryStage('capture');
-        const started=performance.now();const feed = stable.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
-        tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
-        const {regular,...saved}=streamCheckpoint(stable);
-        const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();
-        memoryStage('regular_checkpoint');const checkpointIo=await persistRegularCheckpoint(path,stable,phase=>state.setPublicationPhase(phase));
+        const started=performance.now();const {regular,...saved}=streamCheckpoint(stable);
+        const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();memoryStage('regular_checkpoint');
+        const durable=await checkpointBeforeProjection(
+          ()=>persistRegularCheckpoint(path,stable,phase=>state.setPublicationPhase(phase)),
+          ()=>{const feed=stable.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
+            tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
+            return {feed,capturedBlocks};},
+        );
+        const checkpointIo=durable.checkpointResult,{feed,capturedBlocks}=durable.projection;
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
         const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
         memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));

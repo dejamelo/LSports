@@ -18,10 +18,10 @@ import {normalizeSdkTimestamps,attachTimestampPrecision,hasInvalidProviderTimest
 import {inspectResponse} from './response-inspection.js';
 import type {TradeEvent} from './state.js';
 const MiB=1024*1024;
-// At the observed AWS rate (~4 MiB/s), the 2-GiB response cap needs about
-// nine minutes to download. Keep the independent 20-second idle timeout and
-// byte cap; allow a bounded 12-minute total download window for a live stream.
-export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:20000,totalMs:12*60*1000,memoryWaitMs:60000,memoryRetryMs:250};
+// At the observed AWS rate (~3 MiB/s), a 2-GiB response takes about 11 minutes.
+// Allow bounded stream pauses without removing either the inactivity timeout
+// or the independent 12-minute total deadline.
+export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:60000,totalMs:12*60*1000,memoryWaitMs:60000,memoryRetryMs:250};
 const fail=(reason:string,shape:Partial<NonNullable<import('@lsports/contracts').IntegrationDiagnostic['snapshotValidation']>>={}):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven',...shape},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
 export function fullSnapshotMemory(lane:'prematch'|'inplay'='prematch'){const c=snapshotCapacity({...process.env,[lane==='inplay'?'LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB']:'32'},undefined,lane);if(!c.allowed){console.info(JSON.stringify({operation:'offline.memory_budget',lane,stage:'snapshot_guard',budgetBytes:c.budgetBytes,headroomBytes:c.headroomBytes,allowed:false,memory:c.memory}));throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,snapshotMemory:c.memory,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}}
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.

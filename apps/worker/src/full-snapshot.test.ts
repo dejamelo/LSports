@@ -5,7 +5,7 @@ import {walkSnapshot,convertSnapshotRow,fullSnapshot,fullSnapshotMemory,FULL_SNA
 const row=(FixtureId:number)=>({FixtureId,Fixture:{Status:1,LastUpdate:'2026-10-19T14:00:00.0173136'},Markets:[]});
 test('full snapshot download window covers the observed rate at the unchanged byte cap',()=>{
  const secondsAtObservedRate=FULL_SNAPSHOT_LIMITS.responseBytes/(3.5*1024*1024);
- assert.equal(FULL_SNAPSHOT_LIMITS.responseBytes,2*1024*1024*1024);assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,20000);
+ assert.equal(FULL_SNAPSHOT_LIMITS.responseBytes,2*1024*1024*1024);assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);
  assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,12*60*1000);assert.ok(FULL_SNAPSHOT_LIMITS.totalMs/1000>secondsAtObservedRate);
 });
 test('active snapshot response can outlast a short total window without being classified as idle',async()=>{
@@ -180,6 +180,23 @@ test('persistent pressure and disconnection cannot turn retained spool into a pa
    await assert.rejects(task,(e:any)=>cancel?e.name==='AbortError':e.diagnostic.reason==='memory_budget_exceeded');assert.equal(applied,0);assert.deepEqual(await readdir(dir),[]);
   }finally{process.availableMemory=available;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
  }
+});
+
+test('large snapshot tolerates bounded stream pauses while the independent total deadline remains finite',async()=>{
+ assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,12*60*1000);
+ const previous=process.availableMemory;process.availableMemory=()=>1024**3;
+ const payload=JSON.stringify({Header:{HttpStatusCode:200},Body:[row(901)]});
+ try{for(const pauseMs of [30,100]){
+  const dir=await mkdtemp(join(tmpdir(),'adl-snapshot-idle-'));let applied=0;
+  const server=createServer((_req,res)=>{res.writeHead(200,{'Content-Type':'application/json'});res.write(payload.slice(0,Math.floor(payload.length/2)));setTimeout(()=>res.end(payload.slice(Math.floor(payload.length/2))),pauseMs);});
+  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+  try{
+   const task=fullSnapshot({url:'http://127.0.0.1:'+(server.address() as any).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},limits:{idleMs:60,totalMs:1000},async apply(){applied++;}});
+   if(pauseMs<60){const result=await task;assert.equal(result.rows,1);assert.equal(applied,1);}
+   else{await assert.rejects(task,(error:any)=>error?.message==='Snapshot idle timeout');assert.equal(applied,0);}
+   assert.deepEqual(await readdir(dir),[]);
+  }finally{server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(dir,{recursive:true,force:true});}
+ }}finally{process.availableMemory=previous;}
 });
 
 test('apply progress exposes the first completed row before the next 100-row checkpoint',async()=>{
