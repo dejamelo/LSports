@@ -129,13 +129,15 @@ export class TradeState {
       // another publication may have captured before this mutation gets its turn.
       const turn=await this.exclusive(async()=>{
         if(this.publicationDone){const v=getHeapStatistics();if(v.heap_size_limit-v.used_heap_size<512*1024**2){
-          console.info(JSON.stringify({operation:'state.publication_wait',stage:'heap_reserve',heapHeadroomBytes:v.heap_size_limit-v.used_heap_size,...this.publicationStatus(),atUTC:new Date().toISOString()}));
-          return {wait:this.publicationDone};
+          const waitStarted=Date.now(),heapHeadroomBytes=v.heap_size_limit-v.used_heap_size;
+          console.info(JSON.stringify({operation:'state.publication_wait',stage:'heap_reserve',status:'waiting',heapHeadroomBytes,...this.publicationStatus(),atUTC:new Date().toISOString()}));
+          return {wait:this.publicationDone,waitStarted,heapHeadroomBytes,waitForPublication:true as const};
         }}
-        return {value:await operation()};
+        return {value:await operation(),waitForPublication:false as const};
       });
-      if(!('wait' in turn))return turn.value as T;
+      if(!turn.waitForPublication)return turn.value as T;
       waiting?.(true);try{await turn.wait;}finally{waiting?.(false);}
+      console.info(JSON.stringify({operation:'state.publication_wait',stage:'heap_reserve',status:'released',heapHeadroomBytes:turn.heapHeadroomBytes,waitedMs:Date.now()-turn.waitStarted,...this.publicationStatus(),atUTC:new Date().toISOString()}));
     }
   }
   capturePublication(){

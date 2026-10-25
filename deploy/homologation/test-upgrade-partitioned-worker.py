@@ -4,6 +4,18 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_live_heap_margin_plan_requires_measured_reserve_and_keeps_container_limit(self):
+  evidence={'workerRunning':True,'workerOomKilled':False,'restartCount':0,'containerLimitBytes':6442450944,'previousOldSpaceMiB':3584,'oomEvents':0,'memoryMaxEvents':0,'publicationHeapWaits':3,'minimumHeapHeadroomBytes':480*1024**2,'maxObservedRssBytes':int(4.23*1024**3),'currentCgroupBytes':int(3.88*1024**3),'hostAvailableBytes':10*1024**3}
+  plan=NS['validate_live_heap_margin_evidence'](evidence)
+  progress={'memoryLimitBytes':6442450944,'pipelineRepair':True,'heapBudgetPlan':plan}
+  self.assertEqual(NS['partition_heap_mib'](progress),3840);self.assertEqual(plan['minimumReserveBytes'],512*1024**2);self.assertTrue(plan['containerLimitUnchanged'])
+  for changed in ({'minimumHeapHeadroomBytes':512*1024**2},{'minimumHeapHeadroomBytes':255*1024**2},{'maxObservedRssBytes':int(4.5*1024**3)},{'oomEvents':1},{'memoryMaxEvents':1},{'containerLimitBytes':8*1024**3}):
+   with self.assertRaises(Exception):NS['validate_live_heap_margin_evidence']({**evidence,**changed})
+  with self.assertRaises(Exception):NS['partition_heap_mib']({**progress,'memoryLimitBytes':8*1024**3})
+ def test_pipeline_offline_load_uses_candidate_heap_budget(self):
+  source=(HERE/'upgrade-partitioned-worker.py').read_text()
+  self.assertIn("args[-1:-1]=['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx']",source)
+  self.assertNotIn("args[-1:-1]=['--max-old-space-size=2560','--import','tsx']",source)
  def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
   request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
   worker={'oomKilled':True,'exitCode':137,'running':False,'name':'/adl-homologation-worker-1','id':'7f43cb2939c7'+'a'*52}
