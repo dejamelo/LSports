@@ -11,6 +11,8 @@ const report=join(here,'publication-reserve-repair-'+Date.now()+'.jsonl');writeF
 const emit=row=>{console.log(JSON.stringify(row));appendFileSync(report,JSON.stringify(row)+'\n');};
 const keys=readdirSync(join(homedir(),'Downloads')).filter(n=>/Lottery.*Key\.pem$/.test(n));
 if(keys.length!==1)throw Error('SSH_KEY_NOT_UNIQUE');
+const resumeBackup=process.env.ADL_PUBLICATION_RESUME_BACKUP;
+if(resumeBackup!==undefined&&!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(resumeBackup))throw Error('RESUME_BACKUP_UNVERIFIED');
 emit({stage:'api_healthy_gate',status:'checking',report,workerMutationRequested:false});
 const source=`import json,subprocess,time,urllib.request
 for attempt in range(10):
@@ -33,6 +35,7 @@ for(const line of (check.stdout||'').split('\n'))try{const row=JSON.parse(line);
 if(check.status!==0||!healthy){emit({stage:'api_healthy_gate',status:'blocked',reason:'API_HEALTHY_NOT_VERIFIED_NO_WORKER_CHANGE',exitCode:check.status,errorCode:check.error?.code});process.exit(2);}
 const env={...process.env,ADL_LIVE_PERSISTENCE_REPAIR:'1',ADL_PIPELINE_REPAIR:'1',ADL_PUBLICATION_RESERVE_REPAIR:'1'};
 for(const key of ['ADL_STOPPED_RETENTION_REPAIR','ADL_RESUME_BACKUP','ADL_CHECKPOINT_REPAIR_BACKUP','ADL_EXPECTED_LIVE_IMAGE','ADL_FINALIZE_VERIFIED_SHUTDOWN','ADL_LIVE_OOM_REPAIR','ADL_EXPECTED_OOM_PREFIX','ADL_SNAPSHOT_PRESSURE_REPAIR'])delete env[key];
+if(resumeBackup)env.ADL_RESUME_BACKUP=resumeBackup;
 emit({stage:'worker_update',status:'starting_guarded_executor',note:'Reuse existing backup/restore/validation gates; no API, Caddy or POSNET deployment.'});
 const child=spawn(process.execPath,[join(here,'complete-adl-cutover.mjs'),'--pid','12811','--parent','12809','--snapshot-memory-repair'],{env,stdio:['inherit','pipe','inherit']});
 createInterface({input:child.stdout}).on('line',line=>{console.log(line);try{appendFileSync(report,JSON.stringify(JSON.parse(line))+'\n');}catch{}});
