@@ -88,6 +88,12 @@ def same_live_heap_budget(previous,current):
     keys=('oldSpaceMiB','previousOldSpaceMiB','minimumReserveBytes','containerLimitBytes','liveHeapMarginRepair','containerLimitUnchanged')
     return isinstance(previous,dict) and isinstance(current,dict) and all(previous.get(key)==current.get(key) for key in keys)
 
+def validate_saved_heap_margin_plan(progress,worker_state):
+    plan=progress.get('heapBudgetPlan')
+    require(worker_state.get('name')=='/adl-homologation-worker-1' and worker_state.get('running') is False and worker_state.get('oomKilled') is False and worker_state.get('exitCode')==0,'LIVE_HEAP_MARGIN_STOPPED_IDENTITY_UNVERIFIED')
+    require(isinstance(plan,dict) and plan.get('evidenceVerified') is True and plan.get('liveHeapMarginRepair') is True and plan.get('oldSpaceMiB')==3840 and plan.get('previousOldSpaceMiB')==3584 and plan.get('minimumReserveBytes')==512*1024**2 and plan.get('containerLimitBytes')==6442450944 and plan.get('containerLimitUnchanged') is True,'LIVE_HEAP_MARGIN_SAVED_PLAN_UNVERIFIED')
+    return plan
+
 def valid_pipeline_load_receipt(backup,name,proof,metrics):
     path=backup/name
     return (path.is_file() and not path.is_symlink() and path.read_bytes()==proof.encode() and isinstance(metrics,dict) and
@@ -1050,12 +1056,14 @@ def upgrade_partitioned_unlocked(request):
             if request.get('heapMarginRepair'):
                 require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('snapshotMemoryRepair') is True,'LIVE_HEAP_MARGIN_SCOPE_UNVERIFIED')
                 workers=states('worker');require(len(workers)==1,'LIVE_HEAP_MARGIN_WORKER_COUNT_UNVERIFIED')
-                heap_plan=live_heap_margin_plan(before['services']['worker'],workers[0]);same_budget=same_live_heap_budget(progress.get('heapBudgetPlan'),heap_plan)
-                progress['heapBudgetPlan']=heap_plan
-                if not same_budget:
-                    progress['pipelineLoadVerified']=False;progress['oomRestoreVerified']=False
-                    progress['projectionReadbackVerified']=False;progress['rehearsalCopyVerified']=False
-                save(progress)
+                if workers[0].get('running') is True:
+                    heap_plan=live_heap_margin_plan(before['services']['worker'],workers[0]);same_budget=same_live_heap_budget(progress.get('heapBudgetPlan'),heap_plan)
+                    progress['heapBudgetPlan']=heap_plan
+                    if not same_budget:
+                        progress['pipelineLoadVerified']=False;progress['oomRestoreVerified']=False
+                        progress['projectionReadbackVerified']=False;progress['rehearsalCopyVerified']=False
+                    save(progress)
+                else:validate_saved_heap_margin_plan(progress,workers[0])
             elif request.get('preservedHeapBudgetRepair'):
                 progress=inherit_pressure_heap_plan(progress,request,before['services']['worker']);save(progress)
             image_info=json.loads(run(['docker','image','inspect',progress['image']]))[0]

@@ -25,6 +25,12 @@ class Upgrade(unittest.TestCase):
   previous={'oldSpaceMiB':3840,'previousOldSpaceMiB':3584,'minimumReserveBytes':512*1024**2,'containerLimitBytes':6442450944,'liveHeapMarginRepair':True,'containerLimitUnchanged':True,'observedMinimumHeadroomBytes':498*1024**2}
   self.assertTrue(NS['same_live_heap_budget'](previous,{**previous,'observedMinimumHeadroomBytes':470*1024**2}))
   self.assertFalse(NS['same_live_heap_budget'](previous,{**previous,'oldSpaceMiB':4096}))
+  stopped={'name':'/adl-homologation-worker-1','running':False,'oomKilled':False,'exitCode':0}
+  saved={**previous,'evidenceVerified':True}
+  self.assertIs(NS['validate_saved_heap_margin_plan']({'heapBudgetPlan':saved},stopped)['oldSpaceMiB'],3840)
+  for changed in ({**stopped,'running':True},{**stopped,'oomKilled':True},{**stopped,'exitCode':137},{**stopped,'name':'/adl-homologation-api-1'}):
+   with self.assertRaises(Exception):NS['validate_saved_heap_margin_plan']({'heapBudgetPlan':saved},changed)
+  with self.assertRaises(Exception):NS['validate_saved_heap_margin_plan']({'heapBudgetPlan':{**saved,'containerLimitBytes':8*1024**3}},stopped)
   with tempfile.TemporaryDirectory() as directory:
    root=Path(directory);name='proof.mjs';proof='synthetic-proof-bytes';(root/name).write_text(proof)
    metrics={'finalBacklog':0,'finalProcessingBacklog':0,'snapshotRows':25416,'processed':726520,'checkpointed':726520,'readbackRows':25416}
