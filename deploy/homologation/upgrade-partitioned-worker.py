@@ -1197,7 +1197,7 @@ def upgrade_partitioned_unlocked(request):
             for line in output.decode().splitlines():
                 try:r=json.loads(line)
                 except ValueError:continue
-                if r.get('operation')=='pipeline.offline.complete':progress['pipelineLoadMetrics']={k:v for k,v in r.items() if k in ('snapshotBytes','snapshotRows','applied','preload','received','acknowledged','processed','checkpointed','finalBacklog','writes','maxPersistMs','peakRSSBytes','maxEventLoopDelayMs','readbackRows') and type(v) in (int,float)}
+                if r.get('operation')=='pipeline.offline.complete':progress['pipelineLoadMetrics']={k:v for k,v in r.items() if k in ('snapshotBytes','snapshotRows','applied','preload','received','acknowledged','processed','checkpointed','finalBacklog','finalProcessingBacklog','writes','postLoadWrites','receivedDuringSnapshot','backlogDropDuringSnapshot','checkpointedDuringSnapshot','backlogDropAfterLoad','checkpointedAfterLoad','maxPersistMs','peakRSSBytes','maxEventLoopDelayMs','readbackRows') and type(v) in (int,float)}
             progress['pipelineLoadVerified']=True;save(progress)
         if request.get('pipelineRepair'):require(progress.get('pipelineLoadVerified') is True,'PIPELINE_PROOF_REQUIRED_NO_STOP')
         if phase=='prepare':

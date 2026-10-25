@@ -16,6 +16,9 @@ class Upgrade(unittest.TestCase):
   source=(HERE/'upgrade-partitioned-worker.py').read_text()
   self.assertIn("args[-1:-1]=['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx']",source)
   self.assertNotIn("args[-1:-1]=['--max-old-space-size=2560','--import','tsx']",source)
+  proof=(HERE/'pipeline-load-proof.mjs').read_text()
+  for gate in ('ADL_PIPELINE_DURATION_MS||720000','writes-loadFinishedWrites>=2','backlogDropDuringSnapshot>=1000','checkpointedDuringSnapshot>=10000','backlogDropAfterLoad>=1000','checkpointedAfterLoad>=10000','PIPELINE_LOAD_SNAPSHOT_OR_DURABLE_DRAIN_NOT_VERIFIED'):
+   self.assertIn(gate,proof)
  def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
   request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
   worker={'oomKilled':True,'exitCode':137,'running':False,'name':'/adl-homologation-worker-1','id':'7f43cb2939c7'+'a'*52}
