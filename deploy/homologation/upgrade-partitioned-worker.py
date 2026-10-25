@@ -84,6 +84,16 @@ def live_heap_margin_plan(worker,worker_state):
         'publicationHeapWaits':len(headrooms),'minimumHeapHeadroomBytes':min(headrooms) if headrooms else None,'maxObservedRssBytes':max(rss) if rss else None,
         'currentCgroupBytes':current,'hostAvailableBytes':available})
 
+def same_live_heap_budget(previous,current):
+    keys=('oldSpaceMiB','previousOldSpaceMiB','minimumReserveBytes','containerLimitBytes','liveHeapMarginRepair','containerLimitUnchanged')
+    return isinstance(previous,dict) and isinstance(current,dict) and all(previous.get(key)==current.get(key) for key in keys)
+
+def valid_pipeline_load_receipt(backup,name,proof,metrics):
+    path=backup/name
+    return (path.is_file() and not path.is_symlink() and path.read_bytes()==proof.encode() and isinstance(metrics,dict) and
+        metrics.get('finalBacklog')==0 and metrics.get('finalProcessingBacklog')==0 and metrics.get('snapshotRows',0)>0 and
+        metrics.get('checkpointed')==metrics.get('processed') and metrics.get('readbackRows')==metrics.get('snapshotRows'))
+
 def existing_pipeline_heap_plan(worker):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
     if options=='--max-old-space-size=2560':return None
@@ -1040,8 +1050,12 @@ def upgrade_partitioned_unlocked(request):
             if request.get('heapMarginRepair'):
                 require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('snapshotMemoryRepair') is True,'LIVE_HEAP_MARGIN_SCOPE_UNVERIFIED')
                 workers=states('worker');require(len(workers)==1,'LIVE_HEAP_MARGIN_WORKER_COUNT_UNVERIFIED')
-                progress['heapBudgetPlan']=live_heap_margin_plan(before['services']['worker'],workers[0]);progress['pipelineLoadVerified']=False
-                progress['oomRestoreVerified']=False;progress['projectionReadbackVerified']=False;progress['rehearsalCopyVerified']=False;save(progress)
+                heap_plan=live_heap_margin_plan(before['services']['worker'],workers[0]);same_budget=same_live_heap_budget(progress.get('heapBudgetPlan'),heap_plan)
+                progress['heapBudgetPlan']=heap_plan
+                if not same_budget:
+                    progress['pipelineLoadVerified']=False;progress['oomRestoreVerified']=False
+                    progress['projectionReadbackVerified']=False;progress['rehearsalCopyVerified']=False
+                save(progress)
             elif request.get('preservedHeapBudgetRepair'):
                 progress=inherit_pressure_heap_plan(progress,request,before['services']['worker']);save(progress)
             image_info=json.loads(run(['docker','image','inspect',progress['image']]))[0]
@@ -1180,26 +1194,30 @@ def upgrade_partitioned_unlocked(request):
             require(b'snapshot-pressure-offline-ok' in output,'SNAPSHOT_PRESSURE_OFFLINE_TEST_FAILED')
             progress['snapshotPressureVerified']=True;save(progress)
         if request.get('snapshotPressureRepair'):require(progress.get('snapshotPressureVerified') is True,'SNAPSHOT_PRESSURE_PROOF_REQUIRED_NO_START')
-        if request.get('pipelineRepair') and not progress.get('pipelineLoadVerified'):
-            stage='partitioned_upgrade.offline_pipeline_load'
+        if request.get('pipelineRepair'):
             proof_name='pipeline-load-proof-'+hashlib.sha256(PIPELINE_LOAD_PROOF.encode()).hexdigest()[:12]+'.mjs'
-            args=durable_ingress_proof_command(backup,progress['image'],PIPELINE_LOAD_PROOF,proof_name)
-            args=partition_rehearsal_args(args,progress);args[args.index('0.5')]='2'
-            work=backup/'pipeline-load-work';work.mkdir(mode=0o700,exist_ok=True);os.chown(work,1000,1000)
-            args[args.index('--entrypoint'):args.index('--entrypoint')]=['--mount','type=bind,source='+str(work)+',target=/proof','-e','TMPDIR=/proof']
-            args[-1:-1]=['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx']
-            log=backup/('pipeline-load-'+os.urandom(6).hex()+'.private.log')
-            try:output=streamed_rehearsal_run(args,timeout=1800,log=log)
-            except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as error:
-                raw=read_tail(log);known=re.findall(rb'(?:Error: )(PIPELINE_[A-Z_]{3,100})',raw)
-                emit(operation='cutover.aws',stage=stage,status='blocked',reason='PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP',signals=classify(raw),knownFailureCode=known[-1].decode() if known else None,privateLog=log.name,childExitCode=getattr(error,'returncode',None),workerStarted=False,posnetChanged=False)
-                raise RuntimeError('PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP') from None
-            require(b'pipeline-load-offline-ok' in output and b'inbox-capacity-offline-ok' in output,'PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP')
-            for line in output.decode().splitlines():
-                try:r=json.loads(line)
-                except ValueError:continue
-                if r.get('operation')=='pipeline.offline.complete':progress['pipelineLoadMetrics']={k:v for k,v in r.items() if k in ('snapshotBytes','snapshotRows','applied','preload','received','acknowledged','processed','checkpointed','finalBacklog','finalProcessingBacklog','writes','postLoadWrites','receivedDuringSnapshot','backlogDropDuringSnapshot','checkpointedDuringSnapshot','backlogDropAfterLoad','checkpointedAfterLoad','maxPersistMs','peakRSSBytes','maxEventLoopDelayMs','readbackRows') and type(v) in (int,float)}
-            progress['pipelineLoadVerified']=True;save(progress)
+            if progress.get('pipelineLoadVerified') is True and not valid_pipeline_load_receipt(backup,proof_name,PIPELINE_LOAD_PROOF,progress.get('pipelineLoadMetrics')):
+                progress['pipelineLoadVerified']=False;save(progress)
+            if not progress.get('pipelineLoadVerified'):
+                stage='partitioned_upgrade.offline_pipeline_load'
+                args=durable_ingress_proof_command(backup,progress['image'],PIPELINE_LOAD_PROOF,proof_name)
+                args=partition_rehearsal_args(args,progress);args[args.index('0.5')]='2'
+                work=backup/'pipeline-load-work';work.mkdir(mode=0o700,exist_ok=True);os.chown(work,1000,1000)
+                args[args.index('--entrypoint'):args.index('--entrypoint')]=['--mount','type=bind,source='+str(work)+',target=/proof','-e','TMPDIR=/proof']
+                args[-1:-1]=['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx']
+                log=backup/('pipeline-load-'+os.urandom(6).hex()+'.private.log')
+                try:output=streamed_rehearsal_run(args,timeout=1800,log=log)
+                except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as error:
+                    raw=read_tail(log);known=re.findall(rb'(?:Error: )(PIPELINE_[A-Z_]{3,100})',raw)
+                    emit(operation='cutover.aws',stage=stage,status='blocked',reason='PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP',signals=classify(raw),knownFailureCode=known[-1].decode() if known else None,privateLog=log.name,childExitCode=getattr(error,'returncode',None),workerStarted=False,posnetChanged=False)
+                    raise RuntimeError('PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP') from None
+                require(b'pipeline-load-offline-ok' in output and b'inbox-capacity-offline-ok' in output,'PIPELINE_LOAD_ACCEPTANCE_FAILED_NO_STOP')
+                for line in output.decode().splitlines():
+                    try:r=json.loads(line)
+                    except ValueError:continue
+                    if r.get('operation')=='pipeline.offline.complete':progress['pipelineLoadMetrics']={k:v for k,v in r.items() if k in ('snapshotBytes','snapshotRows','applied','preload','received','acknowledged','processed','checkpointed','finalBacklog','finalProcessingBacklog','writes','postLoadWrites','receivedDuringSnapshot','backlogDropDuringSnapshot','checkpointedDuringSnapshot','backlogDropAfterLoad','checkpointedAfterLoad','maxPersistMs','peakRSSBytes','maxEventLoopDelayMs','readbackRows') and type(v) in (int,float)}
+                require(valid_pipeline_load_receipt(backup,proof_name,PIPELINE_LOAD_PROOF,progress.get('pipelineLoadMetrics')),'PIPELINE_PROOF_RECEIPT_INVALID')
+                progress['pipelineLoadVerified']=True;save(progress)
         if request.get('pipelineRepair'):require(progress.get('pipelineLoadVerified') is True,'PIPELINE_PROOF_REQUIRED_NO_STOP')
         if phase=='prepare':
             if request.get('spoolMemoryFix') and not progress.get('spoolMemoryVerified'):

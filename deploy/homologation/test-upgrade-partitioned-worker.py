@@ -16,10 +16,22 @@ class Upgrade(unittest.TestCase):
   source=(HERE/'upgrade-partitioned-worker.py').read_text()
   self.assertIn("args[-1:-1]=['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx']",source)
   self.assertIn("proof_name='pipeline-load-proof-'+hashlib.sha256(PIPELINE_LOAD_PROOF.encode()).hexdigest()[:12]+'.mjs'",source)
+  self.assertIn("same_live_heap_budget(progress.get('heapBudgetPlan'),heap_plan)",source)
   self.assertNotIn("args[-1:-1]=['--max-old-space-size=2560','--import','tsx']",source)
   proof=(HERE/'pipeline-load-proof.mjs').read_text()
   for gate in ('ADL_PIPELINE_DURATION_MS||720000','writes-loadFinishedWrites>=2','backlogDropDuringSnapshot>=1000','checkpointedDuringSnapshot>=10000','backlogDropAfterLoad>=1000','checkpointedAfterLoad>=requiredCheckpointCatchup','Math.min(10000,Math.max(1,loadFinishedMetrics.processed-loadFinishedMetrics.checkpointed))','finalMetrics.backlog===0','finalMetrics.checkpointed===finalMetrics.processed','PIPELINE_LOAD_SNAPSHOT_OR_DURABLE_DRAIN_NOT_VERIFIED'):
    self.assertIn(gate,proof)
+ def test_heap_proof_is_reused_only_for_same_budget_and_exact_load_evidence(self):
+  previous={'oldSpaceMiB':3840,'previousOldSpaceMiB':3584,'minimumReserveBytes':512*1024**2,'containerLimitBytes':6442450944,'liveHeapMarginRepair':True,'containerLimitUnchanged':True,'observedMinimumHeadroomBytes':498*1024**2}
+  self.assertTrue(NS['same_live_heap_budget'](previous,{**previous,'observedMinimumHeadroomBytes':470*1024**2}))
+  self.assertFalse(NS['same_live_heap_budget'](previous,{**previous,'oldSpaceMiB':4096}))
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);name='proof.mjs';proof='synthetic-proof-bytes';(root/name).write_text(proof)
+   metrics={'finalBacklog':0,'finalProcessingBacklog':0,'snapshotRows':25416,'processed':726520,'checkpointed':726520,'readbackRows':25416}
+   self.assertTrue(NS['valid_pipeline_load_receipt'](root,name,proof,metrics))
+   self.assertFalse(NS['valid_pipeline_load_receipt'](root,name,proof,{**metrics,'checkpointed':726519}))
+   (root/name).write_text('stale-proof')
+   self.assertFalse(NS['valid_pipeline_load_receipt'](root,name,proof,metrics))
  def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
   request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
   worker={'oomKilled':True,'exitCode':137,'running':False,'name':'/adl-homologation-worker-1','id':'7f43cb2939c7'+'a'*52}
