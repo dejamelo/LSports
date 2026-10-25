@@ -77,6 +77,26 @@ test("snapshot + deltas preserve unrelated bets, reject older odds, suspend mark
   state.replace("prematch", [], at + 4000);
   assert.deepEqual(state.feed().events, []);
 });
+test("publication projection reuses unchanged fixtures, remasks availability and invalidates changed rows", () => {
+  const state = new TradeState();
+  state.replace("prematch", [fixture()], at);
+  state.set("prematch", { phase: "connected" });
+
+  const first = [...state.projection(at, false).events][0];
+  const unchanged = [...state.projection(at + 1000, false).events][0];
+  assert.strictEqual(unchanged, first);
+  assert.equal(unchanged.selections[0].available, true);
+
+  state.set("prematch", { phase: "recovering" });
+  assert.equal([...state.projection(at + 2000, false).events][0].selections[0].available, false);
+  state.set("prematch", { phase: "connected" });
+  assert.equal([...state.projection(at + 3000, false).events][0].selections[0].available, true);
+
+  state.apply("prematch", [{ fixtureId: 100, markets: [{ id: 1, bets: [{ id: "2", price: "3.80", status: 1, isChanged: 0 }] }] }], at + 4000);
+  const changed = [...state.projection(at + 4000, false).events][0];
+  assert.notStrictEqual(changed, first);
+  assert.equal(changed.selections[1].odds, 3.8);
+});
 test("disconnects, settlement and terminal fixtures disable selection; inplay wins duplicate", () => {
   const state = new TradeState();
   state.replace("prematch", [fixture()], at);

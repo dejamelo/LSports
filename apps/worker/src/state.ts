@@ -447,7 +447,10 @@ export class TradeState {
         if(onlyOutright&&!row.outright)continue;
         const view=Object.create(captured) as TradeState;
         view.rows={prematch:new Map(),inplay:new Map()};view.rows[lane].set(id,row);
-        const part=view.feed(now,false,false,true);
+        // Publications repeatedly serialize the full feed. Reuse unchanged
+        // fixture projections so each checkpoint only rebuilds rows that were
+        // actually mutated; feed/backlog availability is remasked per pass.
+        const part=view.feed(now,true,false,true);
         if(lane==='prematch'&&live.has(String(id)))part.events=[];
         yield {lane,part};
       }
