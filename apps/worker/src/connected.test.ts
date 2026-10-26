@@ -839,14 +839,16 @@ test('snapshot confirmation shares bounded immutable observations instead of dup
  s.beginPartitionedSnapshot('prematch');
  s.apply('prematch',[{fixtureId:1,marketRecovery:true,markets:[{id:1,status:1,bets}]}],200);
  const row=s.rows.prematch.get(1)!;
- assert.equal(row.freshBets?.size,0);assert.equal(row.snapshotBets?.size,10000);
- assert.equal(new Set(row.snapshotBets?.values()).size,1);assert.equal(Object.isFrozen(row.snapshotBets?.get('1:0')),true);
- assert.equal(row.snapshotBets?.get('1:0')?.decision,'confirmed');
- row.quoteInvalidations=new Set(['1:0']);assert.equal(quoteConfirmed(row,'1:0'),false);
- s.apply('prematch',[{fixtureId:1,marketRecovery:true,markets:[{id:1,status:1,bets}]}],200);assert.equal(quoteConfirmed(row,'1:0'),true);
+ assert.equal(row.freshBets?.size,0);assert.equal(row.snapshotBets?.size,0);
+ const stored=row.markets.get('1')!.bets![0];assert.equal(quoteConfirmed(row,'1:0',stored),true);
+ row.quoteInvalidations=new Set(['1:0']);assert.equal(quoteConfirmed(row,'1:0',stored),false);
+ row.quoteInvalidations.clear();
+ s.apply('prematch',[{fixtureId:1,marketRecovery:true,markets:[{id:1,status:1,bets}]}],200);assert.equal(quoteConfirmed(row,'1:0',row.markets.get('1')!.bets![0]),true);
+ // A status-only live update preserves the confirmed stored quote.
+ s.apply('prematch',[{fixtureId:1,markets:[{id:1,status:1,bets:[{...bets[0],status:2}]}]}],200);assert.equal(quoteConfirmed(row,'1:0',row.markets.get('1')!.bets![0]),true);
  // An older snapshot observation cannot erase the prior confirmed quote.
  s.apply('prematch',[{fixtureId:1,marketRecovery:true,markets:[{id:1,bets:[{...bets[0],lastUpdate:new Date(100)}]}]}],300);
- assert.equal(row.snapshotBets?.get('1:0')?.decision,'older_than_stored');assert.equal(row.freshBets?.has('1:0'),true);
+ assert.equal(row.freshBets?.has('1:0'),true);
 });
 
 test('snapshot reuses persisted selection objects only when effective fields are identical',()=>{

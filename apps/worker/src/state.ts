@@ -53,7 +53,9 @@ export interface Row {
   // Session evidence only: a checkpoint must never restore quote confirmation.
   snapshotBets?: Map<string, import("@lsports/contracts").SnapshotQuoteObservation>;
 }
-export function quoteConfirmed(row:Row,key:string){return !row.quoteInvalidations?.has(key)&&(row.freshBets?.has(key)===true||!row.timestampRecovery?.has(key)&&row.snapshotBets?.get(key)?.decision==='confirmed');}
+const snapshotEpochByRow=new WeakMap<Row,object>();
+const snapshotEpochByBet=new WeakMap<object,object>();
+export function quoteConfirmed(row:Row,key:string,bet?:object){const epoch=snapshotEpochByRow.get(row);return !row.quoteInvalidations?.has(key)&&(row.freshBets?.has(key)===true||!!bet&&!!epoch&&snapshotEpochByBet.get(bet)===epoch||!row.timestampRecovery?.has(key)&&row.snapshotBets?.get(key)?.decision==='confirmed');}
 function selectionReasons(row:Row,m:Market,b:NonNullable<Market['bets']>[number],status:number|undefined,connection:ConnectionState,deferred=false){return [
               ...(!deferred&&connection.phase !== "connected" ? ["feed_disconnected"] : []),
               ...(!deferred&&connection.ingressProgress && (connection.ingressProgress!.processingBacklog??connection.ingressProgress!.backlog) > 0 && (connection.ingressProgress!.oldestProcessingAgeMs??connection.ingressProgress!.oldestAgeMs) > 5000 ? ["processing_backlog"] : []),
@@ -64,7 +66,7 @@ function selectionReasons(row:Row,m:Market,b:NonNullable<Market['bets']>[number]
               ...(!(Number(b.price) > 1 && Number.isFinite(Number(b.price))) ? ["invalid_price"] : []),
               ...(row.deferredTimestampBets?.has(`${m.id}:${b.id}`) ? ["ambiguous_snapshot_timestamp"] : []),
               ...(row.timestampRecovery?.get(`${m.id}:${b.id}`)?.status === "awaiting_fresh_amqp" ? ["awaiting_timestamp_recovery"] : []),
-              ...(row.restored && !quoteConfirmed(row,`${m.id}:${b.id}`) ? ["awaiting_update"] : []),
+              ...(row.restored && !quoteConfirmed(row,`${m.id}:${b.id}`,b) ? ["awaiting_update"] : []),
             ];}
 function hasSelectableSelection(row:Row,m:Market,b:NonNullable<Market['bets']>[number],status:number|undefined,connection:ConnectionState){
  if(connection.phase!=="connected")return false;
@@ -74,7 +76,7 @@ function hasSelectableSelection(row:Row,m:Market,b:NonNullable<Market['bets']>[n
  if(b.settlement!==undefined&&b.settlement!==0)return false;
  const price=Number(b.price);if(!(price>1&&Number.isFinite(price)))return false;
  const key=`${m.id}:${b.id}`;
- return !row.deferredTimestampBets?.has(key)&&row.timestampRecovery?.get(key)?.status!=="awaiting_fresh_amqp"&&(!row.restored||quoteConfirmed(row,key));
+ return !row.deferredTimestampBets?.has(key)&&row.timestampRecovery?.get(key)?.status!=="awaiting_fresh_amqp"&&(!row.restored||quoteConfirmed(row,key,b));
 }
 const startTimeFormatter=new Intl.DateTimeFormat('es-AR',{
  timeZone:'America/Argentina/Buenos_Aires',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'
@@ -236,7 +238,7 @@ export class TradeState {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
         this.rows[lane].set(key, row);
       }
-      if((this.projectionCaptured.has(row)||this.publicationCaptured.has(row))){row=structuredClone(row);this.rows[lane].set(key,row);}
+      if((this.projectionCaptured.has(row)||this.publicationCaptured.has(row))){const prior=row;row=structuredClone(row);this.rows[lane].set(key,row);const epoch=snapshotEpochByRow.get(prior);if(epoch)snapshotEpochByRow.set(row,epoch);}
       this.projectionCache.delete(row);
       if(observation){
         const at=new Date(observation.receivedAt).toISOString();
@@ -349,14 +351,18 @@ export class TradeState {
             row.settlementAudit.set(betKey, trace);
           }
           const hasPrice = bet.price !== undefined && Number.isFinite(Number(bet.price)) && Number(bet.price) > 1;
+          const previousBet=bets.get(bet.id),wasConfirmed=quoteConfirmed(row,betKey,previousBet);
+          let snapshotDecision:string|undefined;
           if (event.marketRecovery) {
-            const wasConfirmed=quoteConfirmed(row,betKey);
             const receivedPrice=bet.price !== undefined && Number.isFinite(Number(bet.price)) ? Number(bet.price) : null;
             const decision=older ? "older_than_stored" : !hasPrice ? "missing_or_invalid_price" : "confirmed";
-            const observationKey=JSON.stringify([t,receivedPrice,decision]);
-            let snapshot=snapshotObservations.get(observationKey);
-            if(!snapshot){snapshot=Object.freeze({receivedAt:isoTime(at),versionAt:isoTime(t),receivedPrice,decision});if(snapshotObservations.size<1024)snapshotObservations.set(observationKey,snapshot);}
-            (row.snapshotBets ||= new Map()).set(betKey,snapshot);
+            snapshotDecision=decision;
+            if(row.outright||!row.restored){
+              const observationKey=JSON.stringify([t,receivedPrice,decision]);
+              let snapshot=snapshotObservations.get(observationKey);
+              if(!snapshot){snapshot=Object.freeze({receivedAt:isoTime(at),versionAt:isoTime(t),receivedPrice,decision});if(snapshotObservations.size<1024)snapshotObservations.set(observationKey,snapshot);}
+              (row.snapshotBets ||= new Map()).set(betKey,snapshot);
+            }
             // Confirmation is already represented by the immutable snapshot observation.
             // Keep the separate Set only for live/previous confirmation not represented there.
             if(decision==='confirmed'&&!row.timestampRecovery?.has(betKey))row.freshBets?.delete(betKey);
@@ -366,7 +372,7 @@ export class TradeState {
             row.deferredTimestampBets?.delete(betKey);
             if(validatesReplay) {recovery.status="settlement_replayed";recovery.validatedAt=isoTime(at);}
             if(validatesRecovery) {recovery.status="validated_amqp";recovery.validatedAt=isoTime(at);}
-            const previousBet=bets.get(bet.id),incoming=defined(bet);
+            const incoming=defined(bet);
             const settlement=Number.isInteger(bet.settlement)?bet.settlement:previousBet?.settlement;
             // Full snapshots commonly repeat the exact persisted quote. Reuse
             // that immutable-by-convention record instead of retaining a second
@@ -384,6 +390,13 @@ export class TradeState {
               // A supplier correction to unsettled must carry numeric code 0.
               settlement,
             } as typeof bet);
+            const storedBet=bets.get(bet.id)!;const snapshotEpoch=snapshotEpochByRow.get(row);
+            if(event.marketRecovery&&snapshotDecision==='confirmed'&&!row.timestampRecovery?.has(betKey)&&snapshotEpoch)snapshotEpochByBet.set(storedBet,snapshotEpoch);
+            else if(!event.marketRecovery&&row.restored&&wasConfirmed&&snapshotEpoch&&previousBet){
+              const previousDate=(previousBet as any).lastUpdate,nextDate=(storedBet as any).lastUpdate;
+              const sameVersion=previousDate instanceof Date&&nextDate instanceof Date?previousDate.getTime()===nextDate.getTime():Object.is(previousDate,nextDate);
+              if(Object.is(previousBet.price,storedBet.price)&&sameVersion)snapshotEpochByBet.set(storedBet,snapshotEpoch);
+            }
             // A current snapshot explicitly reconfirms an unchanged quote. Its LastUpdate
             // describes the last price change, not when the snapshot was requested.
             // A status-only delta must never validate a price read from disk.
@@ -409,7 +422,7 @@ export class TradeState {
   }
   beginPartitionedSnapshot(lane:Lane){
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
-    for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;this.rows[lane].set(key,row);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+    const snapshotEpoch={};for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;this.rows[lane].set(key,row);snapshotEpochByRow.set(row,snapshotEpoch);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
   }
   finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
     this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));
@@ -547,7 +560,7 @@ export class TradeState {
                 settlementTrace: row.settlementAudit?.get(`${m.id}:${b.id}`),
                 timestampRecovery: row.timestampRecovery?.get(`${m.id}:${b.id}`),
                 quoteRecovery: {
-                  awaitingFreshQuote: !!row.restored && !quoteConfirmed(row,`${m.id}:${b.id}`),
+                  awaitingFreshQuote: !!row.restored && !quoteConfirmed(row,`${m.id}:${b.id}`,b),
                   snapshotSeen: !!row.snapshotBets?.has(`${m.id}:${b.id}`),
                   snapshot: row.snapshotBets?.get(`${m.id}:${b.id}`),
                 },
