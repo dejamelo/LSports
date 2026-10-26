@@ -351,7 +351,8 @@ export class TradeState {
             row.settlementAudit.set(betKey, trace);
           }
           const hasPrice = bet.price !== undefined && Number.isFinite(Number(bet.price)) && Number(bet.price) > 1;
-          const previousBet=bets.get(bet.id),wasConfirmed=quoteConfirmed(row,betKey,previousBet);
+            const previousBet=bets.get(bet.id),wasConfirmed=quoteConfirmed(row,betKey,previousBet);
+            const previousPrice=previousBet?.price,previousLastUpdate=(previousBet as any)?.lastUpdate;
           let snapshotDecision:string|undefined;
           if (event.marketRecovery) {
             const receivedPrice=bet.price !== undefined && Number.isFinite(Number(bet.price)) ? Number(bet.price) : null;
@@ -377,25 +378,23 @@ export class TradeState {
             // Full snapshots commonly repeat the exact persisted quote. Reuse
             // that immutable-by-convention record instead of retaining a second
             // object for every selection during checkpoint recovery.
-            const previousFields=previousBet as unknown as Record<string,unknown>|undefined;
-            const unchanged=!!previousBet&&settlement===previousBet.settlement&&Object.entries(incoming).every(([field,value])=>{
-              if(field==='settlement'&&!Number.isInteger(bet.settlement))return true;
-              const previous=previousFields?.[field];
-              return previous instanceof Date&&value instanceof Date?previous.getTime()===value.getTime():Object.is(previous,value);
-            });
-            bets.set(bet.id, unchanged ? previousBet : {
-              ...previousBet,
-              ...incoming,
+            let storedBet:typeof bet;
+            if(previousBet){
+              // The current row is detached from any captured publication before
+              // mutation. Updating this private record in place avoids a second
+              // multi-million-object bet graph during full snapshot recovery.
+              Object.assign(previousBet,incoming);
               // null/missing is absence of settlement, never an explicit correction.
               // A supplier correction to unsettled must carry numeric code 0.
-              settlement,
-            } as typeof bet);
-            const storedBet=bets.get(bet.id)!;const snapshotEpoch=snapshotEpochByRow.get(row);
+              previousBet.settlement=settlement;
+              storedBet=previousBet;
+            }else storedBet={...incoming,settlement} as typeof bet;
+            bets.set(bet.id,storedBet);const snapshotEpoch=snapshotEpochByRow.get(row);
             if(event.marketRecovery&&snapshotDecision==='confirmed'&&!row.timestampRecovery?.has(betKey)&&snapshotEpoch)snapshotEpochByBet.set(storedBet,snapshotEpoch);
             else if(!event.marketRecovery&&row.restored&&wasConfirmed&&snapshotEpoch&&previousBet){
-              const previousDate=(previousBet as any).lastUpdate,nextDate=(storedBet as any).lastUpdate;
-              const sameVersion=previousDate instanceof Date&&nextDate instanceof Date?previousDate.getTime()===nextDate.getTime():Object.is(previousDate,nextDate);
-              if(Object.is(previousBet.price,storedBet.price)&&sameVersion)snapshotEpochByBet.set(storedBet,snapshotEpoch);
+              const nextDate=(storedBet as any).lastUpdate;
+              const sameVersion=previousLastUpdate instanceof Date&&nextDate instanceof Date?previousLastUpdate.getTime()===nextDate.getTime():Object.is(previousLastUpdate,nextDate);
+              if(Object.is(previousPrice,storedBet.price)&&sameVersion)snapshotEpochByBet.set(storedBet,snapshotEpoch);
             }
             // A current snapshot explicitly reconfirms an unchanged quote. Its LastUpdate
             // describes the last price change, not when the snapshot was requested.

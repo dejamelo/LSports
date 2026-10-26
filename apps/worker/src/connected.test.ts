@@ -859,7 +859,7 @@ test('snapshot reuses persisted selection objects only when effective fields are
  s.apply('prematch',[{fixtureId:9,fixture:{status:1},markets:[{id:160,status:1,bets:[{id:'7',price:'2.1',status:1,lastUpdate:new Date(+time)}]}]} as any],+time,{source:'snapshot',receivedAt:+time});
  assert.strictEqual(row.markets.get('160')!.bets![0],saved,'identical snapshot fields reuse the persisted object');
  s.apply('prematch',[{fixtureId:9,fixture:{status:1},markets:[{id:160,status:1,bets:[{id:'7',price:'2.2',status:1,lastUpdate:new Date(+time+1000)}]}]} as any],+time+1000,{source:'snapshot',receivedAt:+time+1000});
- const updated=row.markets.get('160')!.bets![0];assert.notStrictEqual(updated,saved);assert.equal(updated.price,'2.2');
+ const updated=row.markets.get('160')!.bets![0];assert.strictEqual(updated,saved);assert.equal(updated.price,'2.2');
 });
 
 test('capacity pressure drains the durable inbox before snapshot and between apply batches without a circular wait',{timeout:10000},async()=>{
