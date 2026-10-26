@@ -828,6 +828,12 @@ test('heartbeat cannot queue repeated full writes while a snapshot is applying',
  state.set('prematch',{lastSnapshotErrorAt:'2026-10-22T20:01:00Z'});assert.equal(heartbeatPublicationDue(state,1000,6000),true);
 });
 
+test('durable inbox checkpoint is deferred only during full snapshot application',async()=>{
+ const {inboxCheckpointDeferredDuringSnapshot}=await import('./connected.js');
+ assert.equal(inboxCheckpointDeferredDuringSnapshot(true),true);
+ assert.equal(inboxCheckpointDeferredDuringSnapshot(false),false);
+});
+
 test('heap reserve waits for publication completion without retaining the writer gate',async()=>{
  const {spawnSync}=await import('node:child_process');const code=`import{TradeState}from'./apps/worker/src/state.ts';const s=new TradeState();const captured=await s.exclusive(()=>s.capturePublication());let mutated=false,waiting=false;const task=s.publicationMutation(()=>mutated=true,active=>waiting=active);await new Promise(r=>setTimeout(r,20));if(mutated||!waiting)throw Error('reserve not enforced');captured.release();await task;if(!mutated||waiting)throw Error('writer did not release reserve');console.log('heap-reserve-offline-ok');`;
  const child=spawnSync(process.execPath,['--max-old-space-size=128','--import','tsx','--input-type=module','-e',code],{cwd:process.cwd(),encoding:'utf8',timeout:15000});assert.equal(child.status,0,child.stderr);assert.ok(child.stdout.includes('heap-reserve-offline-ok'));

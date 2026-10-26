@@ -96,6 +96,7 @@ export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,
  const applying=Object.values(state.connections).some(c=>c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&Date.parse(c.lastSnapshotErrorAt||'')<Date.parse(c.fullSnapshot.startedAt||'') || c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&!c.lastSnapshotErrorAt);
  return !applying||now-lastCompletedAt>=60000;
 }
+export function inboxCheckpointDeferredDuringSnapshot(snapshotApplying:boolean){return snapshotApplying;}
 export type PersistenceSave = (()=>Promise<void>) & {beforeCapture?:(reserve:(publicationId:number)=>void)=>Promise<void>};
 export function coalescedPersistence(persist:(publicationId:number)=>Promise<void>){
  let tail:Promise<void>=Promise.resolve(),queued:{job:Promise<void>;reserves:((publicationId:number)=>void)[]}|undefined,sequence=0;
@@ -471,6 +472,15 @@ export async function session(
     const stageDelivery=(channel as typeof channel & {stage?:(msg:ConsumeMessage)=>void}).stage;
     const commitPending=(force=false)=>{
       if(backgroundCommit||closed||!pendingAcks.length)return;
+      // During a full snapshot apply the inbox has already accepted staged
+      // deliveries durably. A second full-state checkpoint here competes with
+      // snapshot COW mutations for the heap reserve and serializes the same
+      // multi-GB state repeatedly. Keep the processed prefix unacked and
+      // publish it immediately when the snapshot releases the apply gate.
+      if(inboxCheckpointDeferredDuringSnapshot(snapshotApplicationActive)){
+        if(!checkpointFlushTimer){checkpointFlushTimer=setTimeout(()=>{checkpointFlushTimer=undefined;commitPending(true);},1000);checkpointFlushTimer.unref();}
+        return;
+      }
       if(!force&&pendingAcks.length<checkpointBatchThreshold){
         if(!checkpointFlushTimer){checkpointFlushTimer=setTimeout(()=>{checkpointFlushTimer=undefined;commitPending(true);},checkpointBatchFlushMs);checkpointFlushTimer.unref();}
         return;
@@ -747,7 +757,7 @@ export async function session(
           coverage: state.projection(Date.now(),false).coverage?.[lane],
         }),
       );
-     }finally{snapshotApplicationActive=false;if(buffered.length&&!closed)scheduleDrain();}
+     }finally{snapshotApplicationActive=false;if(checkpointFlushTimer){clearTimeout(checkpointFlushTimer);checkpointFlushTimer=undefined;}commitPending(true);if(buffered.length&&!closed)scheduleDrain();}
     };
     await recover();
     // Metadata is ancillary. Do not let a slow metadata HTTP call hold the
