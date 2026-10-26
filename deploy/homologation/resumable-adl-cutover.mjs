@@ -1,6 +1,7 @@
 import {writeRecoverySupport} from './recovery-support.mjs';
 import {assembleRemoteHelper,helperInvocation,sanitizedHelperExit} from './remote-helper-transport.mjs';
 import {validateFullRecovery} from './full-recovery-validation.mjs';
+import {workerCapacityApproved} from './worker-capacity-gate.mjs';
 import {createHash} from 'node:crypto';
 export function persistenceExpectedImage(ledger,env=process.env){
  const image=env.ADL_EXPECTED_LIVE_IMAGE??(ledger.steps.throughput_upgrade?.status==='ok'?(ledger.steps.throughput_upgrade.result?.image??ledger.steps.throughput_image?.result?.image):undefined);
@@ -69,6 +70,14 @@ export function canonicalSourceDigest(files){
  const sorted=Object.fromEntries(Object.entries(files).sort(([a],[b])=>a<b?-1:a>b?1:0));
  const encoded=JSON.stringify(sorted).replace(/[\u007f-\uffff]/g,char=>'\\u'+char.charCodeAt(0).toString(16).padStart(4,'0'));
  return createHash('sha256').update(encoded).digest('hex');
+}
+export function pinnedResumePreparation(snapshotMemoryRepair,ledger,env=process.env){
+ if(!snapshotMemoryRepair||!env.ADL_RESUME_BACKUP)return {};
+ const backup=env.ADL_RESUME_BACKUP;
+ if(!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(backup))throw Error('RESUME_BACKUP_UNVERIFIED');
+ const prepared=ledger.steps.throughput_image;
+ const image=prepared?.status==='ok'&&prepared.result?.backup===backup&&/^adl-worker-partitioned:[0-9a-f]{24}$/.test(prepared.result?.image||'')?prepared.result.image:undefined;
+ return {resumeBackup:backup,...(image?{resumePreparedImage:image}:{})};
 }
 export function reusablePreparedImage(ledger,{backup,pipelineRepair=false,durableIngress=false,sourceDigest}={}){
  const result=ledger?.steps?.throughput_image?.status==='ok'?ledger.steps.throughput_image.result:undefined;
@@ -166,7 +175,7 @@ export async function run(args){
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
   stage='remote_consumer_gate';const pre=await remote('preflight');
   const acceptedMemory=acceptedWorkerMemoryLimits({mode:args[4],snapshotMemoryRepair,pipelineRepair:process.env.ADL_PIPELINE_REPAIR==='1',livePersistenceRepair:process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'});
-  if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!acceptedMemory.includes(String(pre.workerModel?.memoryLimitBytes))||!(args[4]==='--repair-snapshot'?['128','256']:['256']).includes(String(pre.workerModel?.prematchCapMB))||!['128','256'].includes(String(pre.workerModel?.inplayCapMB)))throw Error('REMOTE_API_OR_CREDENTIALS_UNVERIFIED');
+  if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!workerCapacityApproved(pre.workerModel,{repairSnapshot:args[4]==='--repair-snapshot'}))throw Error('REMOTE_API_OR_CAPACITY_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
   if(['--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
    stage='validation_resume_gate';
@@ -272,13 +281,19 @@ export async function run(args){
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'){const image=persistenceExpectedImage(ledger);repairOptions.livePersistenceRepair=true;repairOptions.expectedLiveImage=image;}
     if(process.env.ADL_STOPPED_RETENTION_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.checkpointRepairBackup||repairOptions.livePersistenceRepair||repairOptions.liveOomRepair||process.env.ADL_RESUME_BACKUP)throw Error('RETENTION_REPAIR_REQUIRES_STOPPED_PREPARATION');repairOptions.stoppedRetentionRepair=true;}
     if(process.env.ADL_PIPELINE_REPAIR==='1'){if((!repairOptions.livePersistenceRepair&&!repairOptions.stoppedRetentionRepair)||!snapshotMemoryRepair)throw Error('PIPELINE_REPAIR_REQUIRES_VERIFIED_IDENTITY');repairOptions.pipelineRepair=true;repairOptions.finalizeAfterRecovery=true;}
+    // Resolve the pinned resume backup before validating any feature that
+    // requires it. Previously this block ran below the measured retry gate,
+    // making an explicitly supplied, valid ADL_RESUME_BACKUP appear absent.
+    const resumePreparation=pinnedResumePreparation(snapshotMemoryRepair,ledger);
+    Object.assign(repairOptions,resumePreparation);
+    if(resumePreparation.resumeBackup)emit({stage:'resume_preparation_reference',status:'resolved',backup:repairOptions.resumeBackup,preparedImage:repairOptions.resumePreparedImage??null,source:repairOptions.resumePreparedImage?'protected_local_progress':'unique_protected_remote_receipt_required',workerStarted:false});
     if(process.env.ADL_MEASURED_SNAPSHOT_HEAP_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.livePersistenceRepair||!repairOptions.pipelineRepair||repairOptions.stoppedRetentionRepair||repairOptions.liveOomRepair)throw Error('MEASURED_SNAPSHOT_HEAP_SCOPE_UNVERIFIED');repairOptions.measuredSnapshotApplyHeapRepair=true;}
+    if(process.env.ADL_MEASURED_SNAPSHOT_RETRY_HEAP_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.livePersistenceRepair||!repairOptions.pipelineRepair||repairOptions.stoppedRetentionRepair||repairOptions.liveOomRepair||!repairOptions.resumeBackup)throw Error('MEASURED_SNAPSHOT_RETRY_HEAP_SCOPE_UNVERIFIED');repairOptions.measuredSnapshotRetryHeapRepair=true;}
     if(process.env.ADL_PUBLICATION_RESERVE_REPAIR==='1'){if(!repairOptions.pipelineRepair||!repairOptions.livePersistenceRepair)throw Error('PUBLICATION_RESERVE_REQUIRES_VERIFIED_LIVE_PIPELINE');repairOptions.publicationReserveRepair=true;}
     if(process.env.ADL_TRANSPORT_LIFECYCLE_REPAIR==='1'){if(!repairOptions.pipelineRepair||!repairOptions.livePersistenceRepair||repairOptions.publicationReserveRepair)throw Error('TRANSPORT_LIFECYCLE_REQUIRES_VERIFIED_LIVE_PIPELINE');repairOptions.transportLifecycleRepair=true;}
     if(process.env.ADL_CHECKPOINT_BUFFER_REPAIR==='1'){if(!repairOptions.transportLifecycleRepair)throw Error('CHECKPOINT_BUFFER_REQUIRES_TRANSPORT_IDENTITY');repairOptions.checkpointWriteBufferRepair=true;}
     if(process.env.ADL_PARTIAL_PREFIX_REPAIR==='1'&&!repairOptions.transportLifecycleRepair)throw Error('PARTIAL_PREFIX_CHECK_REQUIRES_GUARDED_TRANSPORT_PATCH');
     if(process.env.ADL_SNAPSHOT_PRESSURE_REPAIR==='1'){if(!repairOptions.livePersistenceRepair)throw Error('PRESSURE_REPAIR_REQUIRES_LIVE_IDENTITY');repairOptions.snapshotPressureRepair=true;}
-    if(snapshotMemoryRepair&&process.env.ADL_RESUME_BACKUP){if(!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(process.env.ADL_RESUME_BACKUP))throw Error('RESUME_BACKUP_UNVERIFIED');repairOptions.resumeBackup=process.env.ADL_RESUME_BACKUP;const prepared=ledger.steps.throughput_image;if(prepared?.status==='ok'&&prepared.result?.backup===repairOptions.resumeBackup&&/^adl-worker-partitioned:[0-9a-f]{24}$/.test(prepared.result?.image||''))repairOptions.resumePreparedImage=prepared.result.image;emit({stage:'resume_preparation_reference',status:'resolved',backup:repairOptions.resumeBackup,preparedImage:repairOptions.resumePreparedImage??null,source:repairOptions.resumePreparedImage?'protected_local_progress':'unique_protected_remote_receipt_required',workerStarted:false});}
     if(snapshotMemoryRepair&&process.env.ADL_RESUME_PROJECTION_SERIALIZATION==='1'){const directory=process.env.ADL_PROJECTION_RESUME_DIRECTORY;if(!repairOptions.checkpointRepairBackup||repairOptions.resumeBackup||!/^projection-resume-[0-9]{8}T[0-9]{4}Z$/.test(directory||''))throw Error('PROJECTION_RESUME_ARTIFACT_REFERENCE_UNVERIFIED');repairOptions.resumeProjectionSerialization=true;repairOptions.projectionResumeDirectory=directory;}
     if(process.env.ADL_PRESERVED_HEAP_BUDGET_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.snapshotPressureRepair||!repairOptions.livePersistenceRepair||repairOptions.pipelineRepair||!repairOptions.resumeBackup)throw Error('HEAP_REPAIR_REQUIRES_PINNED_PRESSURE_RESUME');repairOptions.preservedHeapBudgetRepair=true;}
     if(snapshotMemoryRepair&&process.env.ADL_FINALIZE_VERIFIED_SHUTDOWN==='1'){if(!repairOptions.resumeBackup)throw Error('FINALIZATION_REQUIRES_PINNED_PREPARATION');repairOptions.finalizeAfterRecovery=true;}

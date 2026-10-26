@@ -1,0 +1,60 @@
+import ast
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+import unittest
+
+SOURCE=Path(__file__).with_name('upgrade-partitioned-worker.py')
+tree=ast.parse(SOURCE.read_text())
+selected={'partition_memory','partition_heap_mib','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime'}
+functions=[node for node in tree.body if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in selected]
+
+def require(ok,reason):
+    if not ok:raise RuntimeError(reason)
+
+def partition_memory(progress):
+    require(progress.get('memoryLimitBytes')==6442450944,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
+    return progress['memoryLimitBytes']
+
+def read_tail(path):return path.read_bytes()
+def rehearse(_raw):return {'fatalSignals':['javascript_heap_out_of_memory'],'stageAtFailure':'snapshot.apply','effectiveHeapLimitBytes':4496293888,'maxSampledHeapBytes':4122212936,'maxObservedRSSBytes':4511752192}
+def summary(_backup,_name):return {'signals':['node_heap_exhausted']}
+def host_memory():return 12*1024**3
+
+namespace={'require':require,'partition_memory':partition_memory,'read_tail':read_tail,'rehearsal_heap_evidence':rehearse,'oom_restore_log_summary':summary,'snapshot_host_memory':host_memory,'json':json,'os':os,'re':re,'hashlib':hashlib}
+exec(compile(ast.Module(body=functions,type_ignores=[]),str(SOURCE),'exec'),namespace)
+
+class MeasuredSnapshotRetryHeap(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.backup=Path(self.tmp.name);self.backup.chmod(0o700)
+        self.log=self.backup/'oom-restore-attempt-0123456789abcdef.private.log';self.log.write_bytes(b'sanitized synthetic evidence');self.log.chmod(0o600)
+        self.pointer=self.backup/'oom-restore.latest.json';self.pointer.write_text(json.dumps({'name':self.log.name}));self.pointer.chmod(0o600)
+        self.progress={'phase':'stopped','backup':str(self.backup),'memoryLimitBytes':6442450944,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True,'oldContainer':'a'*64,'heapBudgetPlan':{'evidenceVerified':True,'measuredSnapshotApply':True,'previousOldSpaceMiB':3840,'oldSpaceMiB':4096,'containerLimitUnchanged':True,'outsideOldSpaceBytes':2147483648,'guardBudgetBytes':335544320,'sourceTailSha256':'a'*64}}
+        self.worker=[{'id':'a'*64,'running':False,'oomKilled':False,'exitCode':0}]
+    def tearDown(self):self.tmp.cleanup()
+    def test_measured_heap_failure_selects_4608_mib_inside_same_six_gib_cgroup(self):
+        plan=namespace['measured_snapshot_retry_heap_plan'](self.progress,self.backup,self.worker)
+        self.assertEqual(plan['oldSpaceMiB'],4608);self.assertEqual(plan['outsideOldSpaceBytes'],1610612736)
+        self.assertEqual(plan['containerLimitBytes'],6442450944);self.assertEqual(namespace['partition_heap_mib']({**self.progress,'heapBudgetPlan':plan}),4608)
+        self.assertEqual(plan['sourceTailSha256'],hashlib.sha256(self.log.read_bytes()).hexdigest())
+    def test_runtime_probe_keeps_512_mib_outside_heap(self):
+        plan=namespace['measured_snapshot_retry_heap_plan'](self.progress,self.backup,self.worker)
+        image='adl-worker-partitioned:'+'b'*24;image_id='sha256:'+'c'*64
+        namespace['run']=lambda *_a,**_k:json.dumps({'cgroupLimitBytes':6442450944,'effectiveHeapLimitProbeBytes':5300000000}).encode()
+        inspected={'Image':image_id,'HostConfig':{'Memory':6442450944},'Config':{'Env':['NODE_OPTIONS=--max-old-space-size=4608','LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true','LSPORTS_INPLAY_STREAMED_SNAPSHOT=true']}}
+        result=namespace['verify_budgeted_worker_runtime']({**self.progress,'heapBudgetPlan':plan},'worker',inspected,image_id)
+        self.assertEqual(result['effectiveHeapLimitProbeBytes'],5300000000)
+    def test_rejects_unverified_or_insufficient_host_memory(self):
+        previous=namespace['rehearsal_heap_evidence'];namespace['rehearsal_heap_evidence']=lambda _raw:{'fatalSignals':[],'stageAtFailure':'snapshot.apply','effectiveHeapLimitBytes':4496293888,'maxSampledHeapBytes':4122212936,'maxObservedRSSBytes':4511752192}
+        with self.assertRaisesRegex(RuntimeError,'MEASURED_SNAPSHOT_RETRY_HEAP_FAILURE_UNVERIFIED'):
+            namespace['measured_snapshot_retry_heap_plan'](self.progress,self.backup,self.worker)
+        namespace['rehearsal_heap_evidence']=previous
+        previous=namespace['snapshot_host_memory'];namespace['snapshot_host_memory']=lambda:5*1024**3
+        with self.assertRaisesRegex(RuntimeError,'MEASURED_SNAPSHOT_RETRY_HOST_HEADROOM_INSUFFICIENT'):
+            namespace['measured_snapshot_retry_heap_plan'](self.progress,self.backup,self.worker)
+        namespace['snapshot_host_memory']=previous
+
+if __name__=='__main__':unittest.main()

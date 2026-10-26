@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
  assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));
@@ -29,6 +29,13 @@ test('prepared snapshot repair image is reused only with matching backup and pas
 
 test('prepared source digest matches Python canonical JSON ordering and Unicode escaping',()=>{
  assert.equal(canonicalSourceDigest({b:'á',a:'x'}),'76404747ae9230492614230d19b592d3322e2b20c31c9a4eafbbcf46199a169e');
+});
+test('pinned resume backup is resolved before measured snapshot retry gates',()=>{
+ const backup='/var/backups/adl-partitioned-upgrade-9sab5fc5',image='adl-worker-partitioned:06b33c115981974814a08b7f';
+ const ledger={steps:{throughput_image:{status:'ok',result:{backup,image}}}};
+ assert.deepEqual(pinnedResumePreparation(true,ledger,{ADL_RESUME_BACKUP:backup}),{resumeBackup:backup,resumePreparedImage:image});
+ assert.deepEqual(pinnedResumePreparation(false,ledger,{ADL_RESUME_BACKUP:backup}),{});
+ assert.throws(()=>pinnedResumePreparation(true,ledger,{ADL_RESUME_BACKUP:'/tmp/other'}),/RESUME_BACKUP_UNVERIFIED/);
 });
 
 test('validation resumes with status only, preserves completed migration and saves current evidence',async()=>{
