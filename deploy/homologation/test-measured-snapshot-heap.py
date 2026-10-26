@@ -9,7 +9,7 @@ class MeasuredSnapshotHeap(unittest.TestCase):
    backup=Path(tmp.name)/'adl-partitioned-upgrade-w52a6rhf';backup.mkdir(mode=0o700)
    old_plan={'evidenceVerified':True,'preserveExisting':True,'oldSpaceMiB':3840,'previousOldSpaceMiB':3840,'effectiveHeapLimitBytes':4227858432,'containerLimitUnchanged':True}
    progress={'phase':'stopped','backup':str(backup),'memoryLimitBytes':6442450944,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True,'oldContainer':'a'*64,'heapBudgetPlan':old_plan}
-   failure={'operation':'offline.memory_budget','stage':'snapshot.apply','allowed':False,'budgetBytes':335544320,'headroomBytes':333903952,'memory':{'limitingFactor':'heap','heapLimitBytes':4227858432,'heapUsedBytes':3893954480,'availableMemoryBytes':2005966848}}
+   failure={'operation':'offline.memory_budget','stage':'snapshot_guard','allowed':False,'budgetBytes':335544320,'headroomBytes':333903952,'memory':{'limitingFactor':'heap','heapLimitBytes':4227858432,'heapUsedBytes':3893954480,'availableMemoryBytes':2005966848}}
    sample={'operation':'offline.memory','stage':'snapshot.apply','rows':12000,'heapUsedBytes':3783261008,'indexCounts':{'stateRows':42735,'markets':849488,'bets':5760237}}
    if mutate:mutate(failure,sample)
    log=backup/'oom-restore-attempt-1fa719d6f08dd27f.private.log';log.write_text('\n'.join(json.dumps(x) for x in (sample,failure))+'\n');log.chmod(0o600)

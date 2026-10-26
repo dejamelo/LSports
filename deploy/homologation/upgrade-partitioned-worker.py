@@ -165,7 +165,10 @@ def measured_snapshot_apply_heap_plan(progress,backup,workers):
         try:r=json.loads(line)
         except ValueError:continue
         if isinstance(r,dict) and r.get('operation') in ('offline.memory','offline.memory_budget'):records.append(r)
-    failures=[r for r in records if r.get('operation')=='offline.memory_budget' and r.get('stage')=='snapshot.apply' and r.get('allowed') is False]
+    # The runtime emits the admission decision as snapshot_guard, separately
+    # from row-level snapshot.apply progress. Match that exact guard stage so
+    # the measured recovery plan is anchored to the preserved failed attempt.
+    failures=[r for r in records if r.get('operation')=='offline.memory_budget' and r.get('stage')=='snapshot_guard' and r.get('allowed') is False]
     samples=[r for r in records if r.get('operation')=='offline.memory' and r.get('stage')=='snapshot.apply' and r.get('rows',0)>=12000]
     require(failures and samples,'MEASURED_HEAP_FAILURE_EVIDENCE_MISSING');failure=failures[-1];sample=samples[-1];memory=failure.get('memory') or {};counts=sample.get('indexCounts') or {}
     require(failure.get('budgetBytes')==335544320 and failure.get('headroomBytes')==333903952 and memory.get('limitingFactor')=='heap' and memory.get('heapLimitBytes')==4227858432 and memory.get('heapUsedBytes')==3893954480 and memory.get('availableMemoryBytes')==2005966848,'MEASURED_HEAP_FAILURE_METRICS_CHANGED')
