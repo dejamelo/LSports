@@ -2,6 +2,69 @@
 PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts'}
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
 PIPELINE_BASE_FILES=PARTITION_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
+PROJECTION_RESUME_DRIVER_SHA256='b2f7cd58ee386c3855b9225088d112fef51a8b442bd0369848fab626fa0c8034'
+
+def verify_projection_resume_artifacts(backup,progress,image_info,name):
+    require(isinstance(name,str) and re.fullmatch(r'projection-resume-[0-9]{8}T[0-9]{4}Z',name),'PROJECTION_RESUME_DIRECTORY_UNVERIFIED')
+    resume=backup/name;require(resume.parent==backup and resume.is_dir() and not resume.is_symlink() and resume.stat().st_mode&0o077==0,'PROJECTION_RESUME_DIRECTORY_UNSAFE')
+    image_digest=(image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')
+    require(image_digest==progress.get('digest') and re.fullmatch('[0-9a-f]{64}',str(image_digest or '')),'PROJECTION_RESUME_IMAGE_MISMATCH')
+    expected_public=progress.get('dataBackupHashes',{}).get('trade-feed.json')
+    require(re.fullmatch('[0-9a-f]{64}',str(expected_public or '')),'PROJECTION_RESUME_PUBLIC_HASH_MISSING')
+    rehearsal_name=progress.get('rehearsalDirectory');require(isinstance(rehearsal_name,str) and re.fullmatch(r'rehearsal-[0-9a-f]{24}',rehearsal_name),'PROJECTION_RESUME_SOURCE_DIRECTORY_UNVERIFIED')
+    original=backup/'trade-feed.json';copied=backup/rehearsal_name/'trade-feed.json'
+    for source in (original,copied):require(source.is_file() and not source.is_symlink() and snapshot_file_hash(source)==expected_public,'PROJECTION_RESUME_PUBLIC_SOURCE_CHANGED')
+    spool_rows=list((backup/rehearsal_name).glob('.full-snapshot-*/response.private.json'))
+    require(len(spool_rows)==1 and spool_rows[0].is_file() and not spool_rows[0].is_symlink() and not spool_rows[0].parent.is_symlink(),'PROJECTION_RESUME_SPOOL_IDENTITY_UNVERIFIED')
+    spool=spool_rows[0];spool_hash=snapshot_file_hash(spool)
+    require(re.fullmatch('[0-9a-f]{64}',str(progress.get('preservedSpoolHash',''))) and spool_hash==progress['preservedSpoolHash'],'PROJECTION_RESUME_SPOOL_HASH_MISMATCH')
+    pointer_path=backup/'oom-restore.latest.json';require(pointer_path.is_file() and not pointer_path.is_symlink() and pointer_path.stat().st_mode&0o077==0,'PROJECTION_RESUME_PRIOR_LOG_POINTER_UNVERIFIED')
+    prior_name=json.loads(pointer_path.read_bytes()).get('name')
+    require(isinstance(prior_name,str) and re.fullmatch(r'oom-restore-attempt-[0-9a-f]{16,32}\.private\.log',prior_name),'PROJECTION_RESUME_PRIOR_LOG_NAME_UNVERIFIED')
+    prior_log=backup/prior_name;require(prior_log.is_file() and not prior_log.is_symlink() and prior_log.stat().st_size<=8*1024**2 and prior_log.stat().st_mode&0o077==0,'PROJECTION_RESUME_PRIOR_LOG_UNVERIFIED')
+    prior=[]
+    for line in prior_log.read_bytes().splitlines():
+        try:record=json.loads(line)
+        except ValueError:continue
+        if isinstance(record,dict) and record.get('operation')=='offline.memory':prior.append(record)
+    stages={}
+    for record in prior:
+        if isinstance(record.get('stage'),str):stages.setdefault(record['stage'],[]).append(record)
+    last=lambda stage:stages.get(stage,[])[-1] if stages.get(stage) else {}
+    require(16000<=last('snapshot.validate').get('rows',0)<=16329 and last('snapshot.finalize').get('rows')==16329,'PROJECTION_RESUME_SNAPSHOT_APPLY_UNPROVEN')
+    prior_projection=last('projection.build');prior_serialize=last('projection.serialize')
+    require(prior_projection.get('rows')==prior_serialize.get('rows')==16329 and prior_projection.get('indexCounts',{}).get('stateRows')==18547,'PROJECTION_RESUME_PRIOR_STATE_UNVERIFIED')
+    driver=resume/'driver.mjs';require(driver.is_file() and not driver.is_symlink() and driver.stat().st_mode&0o077==0 and snapshot_file_hash(driver)==PROJECTION_RESUME_DRIVER_SHA256,'PROJECTION_RESUME_DRIVER_UNVERIFIED')
+    public_input=resume/'input'/'trade-feed.json';sidecar_source=backup/('projection-rehearsal-'+progress['digest'][:24])/'projection.json.regular-checkpoint.json'
+    sidecar_input=resume/'input'/'trade-feed.json.regular-checkpoint.json';sidecar_output=resume/'output'/'projection.json.regular-checkpoint.json'
+    for path in (public_input,sidecar_source,sidecar_input,sidecar_output):require(path.is_file() and not path.is_symlink() and path.stat().st_mode&0o077==0,'PROJECTION_RESUME_CHECKPOINT_FILE_UNVERIFIED')
+    require(snapshot_file_hash(public_input)==expected_public,'PROJECTION_RESUME_INPUT_CHECKPOINT_CHANGED')
+    inode=lambda path:(path.stat().st_dev,path.stat().st_ino)
+    require(inode(sidecar_source)==inode(sidecar_input)==inode(sidecar_output),'PROJECTION_RESUME_SIDECAR_COPY_MISMATCH')
+    projection=resume/'output'/'projection.json';receipt_path=resume/'output'/'receipt.json'
+    require(projection.is_file() and not projection.is_symlink() and projection.stat().st_mode&0o077==0 and receipt_path.is_file() and not receipt_path.is_symlink() and receipt_path.stat().st_mode&0o077==0 and receipt_path.stat().st_size<=65536,'PROJECTION_RESUME_OUTPUT_UNVERIFIED')
+    receipt=json.loads(receipt_path.read_bytes());projection_hash=snapshot_file_hash(projection);sidecar_hash=snapshot_file_hash(sidecar_source)
+    require(receipt.get('sha256')==projection_hash and receipt.get('bytes')==projection.stat().st_size and receipt.get('privateCheckpointSha256')==sidecar_hash and receipt.get('stateRows')==18547,'PROJECTION_RESUME_RECEIPT_MISMATCH')
+    require(prior_serialize.get('indexCounts',{}).get('stateRows')==receipt['stateRows'],'PROJECTION_RESUME_PRIOR_SERIALIZATION_STATE_MISMATCH')
+    logs={}
+    for log_name in ('serialize.log','readback.log'):
+        path=resume/log_name;require(path.is_file() and not path.is_symlink() and path.stat().st_mode&0o077==0 and path.stat().st_size<=8*1024**2,'PROJECTION_RESUME_LOG_UNVERIFIED')
+        records=[]
+        for line in path.read_bytes().splitlines():
+            if not line.startswith(b'{'):continue
+            try:record=json.loads(line)
+            except ValueError:continue
+            if isinstance(record,dict):records.append(record)
+        logs[log_name]=records
+    serialized=[r for r in logs['serialize.log'] if r.get('operation')=='projection.resume.complete']
+    returned=[r for r in logs['readback.log'] if r.get('operation')=='projection.resume.readback']
+    require(len(serialized)==len(returned)==1,'PROJECTION_RESUME_COMPLETION_MARKER_MISSING')
+    measured=serialized[0].get('receipt',{});read=returned[0]
+    require(measured==receipt and read.get('verified') is True and read.get('projection',{}).get('integrityVerified') is True and read.get('projection',{}).get('sha256')==projection_hash and read.get('stateRows')==receipt['stateRows'],'PROJECTION_RESUME_READBACK_MISMATCH')
+    metrics=receipt.get('measurements',{})
+    require(metrics.get('bytesWritten')==receipt['bytes'] and type(metrics.get('serializeAndWriteMs')) is int and metrics['serializeAndWriteMs']>0 and type(metrics.get('writeAwaitMs')) is int and 0<=metrics['writeAwaitMs']<=metrics['serializeAndWriteMs'] and type(metrics.get('fsyncMs')) is int and metrics['fsyncMs']>=0,'PROJECTION_RESUME_MEASUREMENTS_INVALID')
+    stat=projection.stat();side_stat=sidecar_source.stat()
+    return {'verified':True,'directory':name,'projectionSha256':projection_hash,'privateCheckpointSha256':sidecar_hash,'projectionBytes':receipt['bytes'],'projectionRows':receipt['rows'],'stateRows':receipt['stateRows'],'spoolSha256':spool_hash,'serializeAndWriteMs':metrics['serializeAndWriteMs'],'writeAwaitMs':metrics['writeAwaitMs'],'writeCalls':metrics.get('writeCalls'),'fsyncMs':metrics['fsyncMs'],'buildMs':metrics.get('buildMs'),'verifyMs':read.get('verifyMs'),'privateRestoreMs':read.get('privateRestoreMs'),'projectionFileIdentity':{'device':stat.st_dev,'inode':stat.st_ino,'size':stat.st_size,'mtimeNs':stat.st_mtime_ns},'privateCheckpointIdentity':{'device':side_stat.st_dev,'inode':side_stat.st_ino,'size':side_stat.st_size,'mtimeNs':side_stat.st_mtime_ns},'workerStarted':False}
 def verify_live_oom_identity(worker,request):
     require(request.get('snapshotMemoryRepair') and worker.get('oomKilled') is True and worker.get('exitCode')==137 and not worker.get('running') and worker.get('name')=='/adl-homologation-worker-1' and re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))) and str(worker.get('id','')).startswith(request['expectedOomPrefix']),'CURRENT_OOM_IDENTITY_UNVERIFIED')
 
@@ -1349,6 +1412,19 @@ def upgrade_partitioned_unlocked(request):
                 if progress.get('oomContainerId') or progress.get('verifiedExitContainerId'):archive_oom_locks(directory,backup,progress,states('worker'))
                 require(not (directory/'trade-feed.json.lock').exists() and not list(directory.glob('trade-feed.json*.reclaim')) and not list(directory.glob('trade-feed.json.snapshot-*.lock')),'OOM_LOCKS_NOT_ARCHIVED')
                 progress['inboxIntegrity']=verify_oom_inboxes(directory)
+                if request.get('resumeProjectionSerialization'):
+                    require(not request.get('resumeBackup') and phase in ('prepare','activate') and (phase!='activate' or request.get('verifyOnly') is True or progress.get('oomRestoreVerified') is True),'PROJECTION_RESUME_PHASE_UNVERIFIED')
+                    if not progress.get('oomRestoreVerified'):
+                        evidence=verify_projection_resume_artifacts(backup,progress,image_info,request.get('projectionResumeDirectory'))
+                        progress.update(projectionSerializationVerified=True,projectionReadbackVerified=True,oomRestoreVerified=True,rehearsalCopyVerified=True,preservedSpoolRehearsed=True,projectionReceiptHash=snapshot_file_hash(backup/evidence['directory']/'output'/'receipt.json'),projectionResumeEvidence=evidence)
+                        save(progress)
+                        emit(operation='cutover.aws',stage='partitioned_upgrade.projection_resume_verified',status='ok',**evidence,posnetChanged=False)
+                    else:
+                        evidence=progress.get('projectionResumeEvidence') or {};resume_name=request.get('projectionResumeDirectory')
+                        require(progress.get('projectionSerializationVerified') is True and progress.get('projectionReadbackVerified') is True and progress.get('preservedSpoolRehearsed') is True and evidence.get('verified') is True and evidence.get('directory')==resume_name,'PROJECTION_RESUME_RECEIPT_NOT_PRESENT')
+                        resume=backup/resume_name;projection=resume/'output'/'projection.json';receipt_path=resume/'output'/'receipt.json';identity=evidence.get('projectionFileIdentity') or {}
+                        require(resume.parent==backup and resume.is_dir() and not resume.is_symlink() and projection.is_file() and not projection.is_symlink() and receipt_path.is_file() and not receipt_path.is_symlink() and snapshot_file_hash(receipt_path)==progress.get('projectionReceiptHash'),'PROJECTION_RESUME_RECEIPT_CHANGED')
+                        stat=projection.stat();require({'device':stat.st_dev,'inode':stat.st_ino,'size':stat.st_size,'mtimeNs':stat.st_mtime_ns}==identity and stat.st_size==evidence.get('projectionBytes'),'PROJECTION_RESUME_FILE_IDENTITY_CHANGED')
                 if not progress.get('oomRestoreVerified'):reuse_pre_exit_restore(progress,backup,directory,image_info,save)
                 if not progress.get('oomRestoreVerified'):
                     candidates=[p for p in directory.glob('.full-snapshot-*/response.private.json') if p.is_file() and not p.is_symlink() and not p.parent.is_symlink() and re.fullmatch(r'\.full-snapshot-[A-Za-z0-9_-]{1,80}',p.parent.name) and 0<p.stat().st_size<=2*1024**3]
