@@ -849,9 +849,15 @@ test('empty InPlay snapshot is deferred without marking recovery ready',{timeout
 });
 
 test('durable inbox checkpoint is deferred only during full snapshot application',async()=>{
- const {inboxCheckpointDeferredDuringSnapshot}=await import('./connected.js');
+ const {inboxCheckpointDeferredDuringSnapshot,setDurableSnapshotApplicationActive}=await import('./connected.js');
  assert.equal(inboxCheckpointDeferredDuringSnapshot(true),true);
  assert.equal(inboxCheckpointDeferredDuringSnapshot(false),false);
+ const sharedState=new TradeState();
+ assert.equal(inboxCheckpointDeferredDuringSnapshot(false,sharedState),false);
+ setDurableSnapshotApplicationActive(sharedState,true);
+ assert.equal(inboxCheckpointDeferredDuringSnapshot(false,sharedState),true,'either lane must defer full-state checkpoints while the shared state applies a snapshot');
+ setDurableSnapshotApplicationActive(sharedState,false);
+ assert.equal(inboxCheckpointDeferredDuringSnapshot(false,sharedState),false);
 });
 
 test('heap reserve waits for publication completion without retaining the writer gate',async()=>{
