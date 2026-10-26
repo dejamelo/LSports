@@ -849,6 +849,17 @@ test('snapshot confirmation shares bounded immutable observations instead of dup
  assert.equal(row.snapshotBets?.get('1:0')?.decision,'older_than_stored');assert.equal(row.freshBets?.has('1:0'),true);
 });
 
+test('snapshot reuses persisted selection objects only when effective fields are identical',()=>{
+ const s=new TradeState(),time=new Date('2026-10-26T03:00:00.000Z');
+ s.apply('prematch',[{fixtureId:9,fixture:{status:1},markets:[{id:160,status:1,bets:[{id:'7',price:'2.1',status:1,lastUpdate:time}]}]} as any],+time);
+ const row=s.rows.prematch.get(9)!,saved=row.markets.get('160')!.bets![0];
+ s.beginPartitionedSnapshot('prematch');
+ s.apply('prematch',[{fixtureId:9,fixture:{status:1},markets:[{id:160,status:1,bets:[{id:'7',price:'2.1',status:1,lastUpdate:new Date(+time)}]}]} as any],+time,{source:'snapshot',receivedAt:+time});
+ assert.strictEqual(row.markets.get('160')!.bets![0],saved,'identical snapshot fields reuse the persisted object');
+ s.apply('prematch',[{fixtureId:9,fixture:{status:1},markets:[{id:160,status:1,bets:[{id:'7',price:'2.2',status:1,lastUpdate:new Date(+time+1000)}]}]} as any],+time+1000,{source:'snapshot',receivedAt:+time+1000});
+ const updated=row.markets.get('160')!.bets![0];assert.notStrictEqual(updated,saved);assert.equal(updated.price,'2.2');
+});
+
 test('capacity pressure drains the durable inbox before snapshot and between apply batches without a circular wait',{timeout:10000},async()=>{
  const state=new TradeState(),abort=new AbortController();let paused=true,acks=0,staged=0,persisted=0;let deliver:(m:ConsumeMessage)=>void=()=>{};
  const message=(n:number)=>({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'pressure-'+n,ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'1',Price:'2.8',Status:1}]}]}]}})),properties:{headers:{}},fields:{inboxId:n,inboxReceived:Date.now(),redelivered:false}} as unknown as ConsumeMessage);

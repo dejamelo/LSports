@@ -366,12 +366,23 @@ export class TradeState {
             row.deferredTimestampBets?.delete(betKey);
             if(validatesReplay) {recovery.status="settlement_replayed";recovery.validatedAt=isoTime(at);}
             if(validatesRecovery) {recovery.status="validated_amqp";recovery.validatedAt=isoTime(at);}
-            bets.set(bet.id, {
-              ...bets.get(bet.id),
-              ...defined(bet),
+            const previousBet=bets.get(bet.id),incoming=defined(bet);
+            const settlement=Number.isInteger(bet.settlement)?bet.settlement:previousBet?.settlement;
+            // Full snapshots commonly repeat the exact persisted quote. Reuse
+            // that immutable-by-convention record instead of retaining a second
+            // object for every selection during checkpoint recovery.
+            const previousFields=previousBet as unknown as Record<string,unknown>|undefined;
+            const unchanged=!!previousBet&&settlement===previousBet.settlement&&Object.entries(incoming).every(([field,value])=>{
+              if(field==='settlement'&&!Number.isInteger(bet.settlement))return true;
+              const previous=previousFields?.[field];
+              return previous instanceof Date&&value instanceof Date?previous.getTime()===value.getTime():Object.is(previous,value);
+            });
+            bets.set(bet.id, unchanged ? previousBet : {
+              ...previousBet,
+              ...incoming,
               // null/missing is absence of settlement, never an explicit correction.
               // A supplier correction to unsettled must carry numeric code 0.
-              settlement: Number.isInteger(bet.settlement) ? bet.settlement : bets.get(bet.id)?.settlement,
+              settlement,
             } as typeof bet);
             // A current snapshot explicitly reconfirms an unchanged quote. Its LastUpdate
             // describes the last price change, not when the snapshot was requested.
