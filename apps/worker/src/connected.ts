@@ -35,6 +35,7 @@ const transportEnd=(reason:"connection_closed"|"channel_closed"|"consumer_cancel
  operation:reason==="channel_closed"?"amqp.channel":reason==="consumer_cancelled"?"amqp.consume":"amqp.connection",protocol:"amqp",category:"network",reason,
  message:reason==="worker_stopped"?"Worker detenido por señal local.":"Transporte AMQP finalizado; el evento de cierre no informa la causa del broker.",
 });
+const durableSnapshotApplicationActive=new WeakSet<TradeState>();
 
 // Join only a not-yet-started save. Joining an active write could ACK changes
 // made after its capture; every caller must await a capture after its request.
@@ -92,8 +93,14 @@ export function decodeApplyTurn(state:TradeState,lane:import('@lsports/contracts
   const {events,...metadata}=decoded;return {...metadata,eventCount:events.length};
  });
 }
-export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,now=Date.now()){
- const active=Object.values(state.connections).flatMap(c=>{
+export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,now=Date.now(),snapshotApplicationActive=false){
+ // During application the source spool is still available for a clean retry,
+ // while uncommitted inbox rows remain durable and unacknowledged. Serializing
+ // the entire state every minute adds a multi-GB copy and repeatedly consumes
+ // the heap reserve needed by snapshot batches. The normal save after snapshot
+ // completion (or error) advances the checkpoint without risking the inbox.
+ if(snapshotApplicationActive)return false;
+  const active=Object.values(state.connections).flatMap(c=>{
   const snapshot=c.fullSnapshot;
   const errorAt=Date.parse(c.lastSnapshotErrorAt||'');
   return snapshot&&!snapshot.completedAt&&(!c.lastSnapshotErrorAt||!Number.isFinite(errorAt)||errorAt<Date.parse(snapshot.startedAt))?[snapshot]:[];
@@ -191,7 +198,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           }),
         );
       }
-      if (!writing&&heartbeatPublicationDue(state,lastCompletedPublication))
+      if (!writing&&heartbeatPublicationDue(state,lastCompletedPublication,Date.now(),durableSnapshotApplicationActive.has(state)))
         writing = save()
           .catch(() =>
             console.error("No se pudo guardar el estado local del worker."),
@@ -297,6 +304,7 @@ export async function session(
   const lane = pkg.lane,sessionId=randomUUID();
   let acknowledgedMessages=0,lastReceived=Date.now(),processedSourceFloor:number|undefined,lastIngressLog=0,ingressActorId:string|undefined;
   const durable=!!ingressPath;
+  let snapshotApplicationActive=false;
   state.set(lane, {
     consumerProgress:{acknowledgedMessages:0},fullSnapshot:undefined,
     phase: "recovering",
@@ -376,7 +384,7 @@ export async function session(
   const checkpointBatchThreshold=dependencies.checkpointBatchThreshold??1,checkpointBatchFlushMs=dependencies.checkpointBatchFlushMs??120000;
   if(!Number.isSafeInteger(checkpointBatchThreshold)||checkpointBatchThreshold<1||checkpointBatchThreshold>32768||!Number.isSafeInteger(checkpointBatchFlushMs)||checkpointBatchFlushMs<1||checkpointBatchFlushMs>120000)throw Error('INVALID_CHECKPOINT_BATCH_POLICY');
   let buffered: ConsumeMessage[] = [];
-  let bufferingForSnapshot = false;let snapshotApplicationActive=false;
+  let bufferingForSnapshot = false;
   let retireAfterFinalSave:(()=>void)|undefined;
   let drainTimer:ReturnType<typeof setTimeout>|undefined,checkpointFlushTimer:ReturnType<typeof setTimeout>|undefined;
   const seen = new Set<string>();
@@ -617,13 +625,13 @@ export async function session(
       let lastCapacityLog=0;
       const waitForInboxCapacity=async()=>{
         if(!durableConnection.intakePaused?.())return;
-        const applying=snapshotApplicationActive;snapshotApplicationActive=false;
+        const applying=snapshotApplicationActive;snapshotApplicationActive=false;if(applying)durableSnapshotApplicationActive.delete(state);
         if(buffered.length)scheduleDrain();
         try{while(durableConnection.intakePaused?.()){
           requireOpen();await processing;if(backgroundCommit)await backgroundCommit;
           if(Date.now()-lastCapacityLog>=10000){lastCapacityLog=Date.now();console.info(JSON.stringify({operation:'inbox.capacity_drain',lane,status:'snapshot_deferred_for_durable_drain',atUTC:new Date().toISOString(),ingress:state.connections[lane].ingressProgress}));}
           await delay(250,undefined,{signal});
-        }}finally{snapshotApplicationActive=applying;}
+        }}finally{snapshotApplicationActive=applying;if(applying)durableSnapshotApplicationActive.add(state);}
       };
       await waitForInboxCapacity();
       let rows: import("./state.js").TradeEvent[] | undefined;let partitionCompleted=false,fullCompleted=false;
@@ -648,7 +656,7 @@ export async function session(
                 if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,atUTC:new Date().toISOString()}));
               });})();processing=applied;await applied;
             };
-            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply')snapshotApplicationActive=true;state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
+            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply'){snapshotApplicationActive=true;durableSnapshotApplicationActive.add(state);}state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
           }else if(lane==='prematch'&&api.snapshotPartitioned){
@@ -773,7 +781,7 @@ export async function session(
           coverage: state.projection(Date.now(),false).coverage?.[lane],
         }),
       );
-     }finally{snapshotApplicationActive=false;if(checkpointFlushTimer){clearTimeout(checkpointFlushTimer);checkpointFlushTimer=undefined;}commitPending(true);if(buffered.length&&!closed)scheduleDrain();}
+     }finally{snapshotApplicationActive=false;durableSnapshotApplicationActive.delete(state);if(checkpointFlushTimer){clearTimeout(checkpointFlushTimer);checkpointFlushTimer=undefined;}commitPending(true);if(buffered.length&&!closed)scheduleDrain();}
     };
     await recover();
     // Metadata is ancillary. Do not let a slow metadata HTTP call hold the

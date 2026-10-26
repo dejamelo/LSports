@@ -821,12 +821,13 @@ test('captured checkpoint retains market versions and settlements while live sta
  try{await state.publicationMutation(()=>state.apply('prematch',[{fixtureId:1,markets:[{id:1,status:1,bets:[{id:'1',price:'3.2',status:1,isChanged:0}]}]}],200));assert.deepEqual(checkpoint(captured.state),expected);assert.notDeepEqual(checkpoint(state),expected);}finally{captured.release();}
 });
 
-test('heartbeat cannot queue repeated full writes while snapshot waits for capacity; apply retains a bounded checkpoint interval',async()=>{
+test('heartbeat skips full-state writes during durable snapshot apply and resumes after it',async()=>{
  const {heartbeatPublicationDue}=await import('./connected.js');const state=new TradeState();
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z'}});
  assert.equal(heartbeatPublicationDue(state,1000,61000),false);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z',stage:'apply'}});
- assert.equal(heartbeatPublicationDue(state,1000,6000),false);assert.equal(heartbeatPublicationDue(state,1000,61000),true);
+ assert.equal(heartbeatPublicationDue(state,1000,61000,true),false);
+ assert.equal(heartbeatPublicationDue(state,1000,61000,false),true);
  state.set('prematch',{lastSnapshotErrorAt:'2026-10-22T20:01:00Z'});assert.equal(heartbeatPublicationDue(state,1000,6000),true);
 });
 
