@@ -854,9 +854,12 @@ test('durable inbox checkpoint is deferred only during full snapshot application
  assert.equal(inboxCheckpointDeferredDuringSnapshot(false),false);
  const sharedState=new TradeState();
  assert.equal(inboxCheckpointDeferredDuringSnapshot(false,sharedState),false);
- setDurableSnapshotApplicationActive(sharedState,true);
+ setDurableSnapshotApplicationActive(sharedState,true,'prematch');
  assert.equal(inboxCheckpointDeferredDuringSnapshot(false,sharedState),true,'either lane must defer full-state checkpoints while the shared state applies a snapshot');
- setDurableSnapshotApplicationActive(sharedState,false);
+ setDurableSnapshotApplicationActive(sharedState,true,'inplay');
+ setDurableSnapshotApplicationActive(sharedState,false,'prematch');
+ assert.equal(inboxCheckpointDeferredDuringSnapshot(false,sharedState),true,'one lane must not release another lane\'s snapshot gate');
+ setDurableSnapshotApplicationActive(sharedState,false,'inplay');
  assert.equal(inboxCheckpointDeferredDuringSnapshot(false,sharedState),false);
 });
 
