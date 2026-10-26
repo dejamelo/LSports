@@ -2,7 +2,7 @@ import {writeRecoverySupport} from './recovery-support.mjs';
 import {assembleRemoteHelper,helperInvocation,sanitizedHelperExit} from './remote-helper-transport.mjs';
 import {validateFullRecovery} from './full-recovery-validation.mjs';
 export function persistenceExpectedImage(ledger,env=process.env){
- const image=env.ADL_EXPECTED_LIVE_IMAGE??(ledger.steps.throughput_upgrade?.status==='ok'?ledger.steps.throughput_upgrade.result?.image:undefined);
+ const image=env.ADL_EXPECTED_LIVE_IMAGE??(ledger.steps.throughput_upgrade?.status==='ok'?(ledger.steps.throughput_upgrade.result?.image??ledger.steps.throughput_image?.result?.image):undefined);
  if(!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(image||'')||env.ADL_LIVE_OOM_REPAIR==='1')throw Error('EXPECTED_CURRENT_PERSISTENCE_IMAGE_REQUIRED');
  return image;
 }

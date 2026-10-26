@@ -66,4 +66,9 @@ test('persistence repair obtains exact image from successful protected progress 
  ledger.steps.throughput_upgrade.status='pending';assert.throws(()=>persistenceExpectedImage(ledger,{}),/EXPECTED_CURRENT/);
 });
 
+test('persistence repair reuses the exact prepared image when successful activation progress recorded only reuse',()=>{
+ const image='adl-worker-partitioned:'+'b'.repeat(24),ledger={steps:{throughput_image:{status:'ok',result:{image}},throughput_upgrade:{status:'ok',result:{reused:true,workerStarted:true}}}};
+ assert.equal(persistenceExpectedImage(ledger,{}),image);ledger.steps.throughput_upgrade.status='pending';assert.throws(()=>persistenceExpectedImage(ledger,{}),/EXPECTED_CURRENT/);
+});
+
  test('startup keeps numeric port reason and safe system error without raw message or path',async()=>{const {startupFailure}=await import('./resumable-adl-cutover.mjs');assert.equal(startupFailure(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')).reason,'EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE');const e=Object.assign(Error('EACCES private password path'),{code:'EACCES',syscall:'open'});assert.deepEqual(startupFailure(e),{reason:'PRIVATE_OPERATION_FAILED',exceptionType:'Error',errorCode:'EACCES',syscall:'open'});});
