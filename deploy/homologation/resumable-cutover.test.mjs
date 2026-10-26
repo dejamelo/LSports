@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
  assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));
@@ -16,14 +16,19 @@ test('completed stages are reused; failure stays pending and does not erase prev
  assert.equal(actions,2);assert.ok(saves>=5);
 });
 test('prepared snapshot repair image is reused only with matching backup and passed offline gates',()=>{
- const result={image:'adl-worker-partitioned:'+'a'.repeat(24),backup:'/var/backups/adl-partitioned-upgrade-safe',progressPhase:'stopped',workerRestarted:false,offlineSnapshotMemoryVerified:true,offlinePipelineLoadVerified:true,offlineDurableIngressVerified:true};
+ const sourceDigest='a'.repeat(64),result={image:'adl-worker-partitioned:'+sourceDigest.slice(0,24),backup:'/var/backups/adl-partitioned-upgrade-safe',progressPhase:'stopped',workerRestarted:false,offlineSnapshotMemoryVerified:true,offlinePipelineLoadVerified:true,offlineDurableIngressVerified:true};
  const ledger={steps:{throughput_image:{status:'ok',result}}};
- assert.equal(reusablePreparedImage(ledger,{backup:result.backup,pipelineRepair:true,durableIngress:true}),result);
- assert.equal(reusablePreparedImage(ledger,{backup:'/var/backups/other',pipelineRepair:true}),undefined);
+ assert.equal(reusablePreparedImage(ledger,{backup:result.backup,pipelineRepair:true,durableIngress:true,sourceDigest}),result);
+ assert.equal(reusablePreparedImage(ledger,{backup:result.backup,pipelineRepair:true,durableIngress:true,sourceDigest:'b'.repeat(64)}),undefined);
+ assert.equal(reusablePreparedImage(ledger,{backup:'/var/backups/other',pipelineRepair:true,sourceDigest}),undefined);
  for(const change of [{progressPhase:'start_requested'},{workerRestarted:true},{offlineSnapshotMemoryVerified:false},{offlinePipelineLoadVerified:false},{offlineDurableIngressVerified:false}]){
-  assert.equal(reusablePreparedImage({steps:{throughput_image:{status:'ok',result:{...result,...change}}}},{backup:result.backup,pipelineRepair:true,durableIngress:true}),undefined);
+  assert.equal(reusablePreparedImage({steps:{throughput_image:{status:'ok',result:{...result,...change}}}},{backup:result.backup,pipelineRepair:true,durableIngress:true,sourceDigest}),undefined);
  }
- assert.equal(reusablePreparedImage({steps:{throughput_image:{status:'pending',result}}},{backup:result.backup}),undefined);
+ assert.equal(reusablePreparedImage({steps:{throughput_image:{status:'pending',result}}},{backup:result.backup,pipelineRepair:true,durableIngress:true,sourceDigest}),undefined);
+});
+
+test('prepared source digest matches Python canonical JSON ordering and Unicode escaping',()=>{
+ assert.equal(canonicalSourceDigest({b:'á',a:'x'}),'76404747ae9230492614230d19b592d3322e2b20c31c9a4eafbbcf46199a169e');
 });
 
 test('validation resumes with status only, preserves completed migration and saves current evidence',async()=>{

@@ -1,6 +1,7 @@
 import {writeRecoverySupport} from './recovery-support.mjs';
 import {assembleRemoteHelper,helperInvocation,sanitizedHelperExit} from './remote-helper-transport.mjs';
 import {validateFullRecovery} from './full-recovery-validation.mjs';
+import {createHash} from 'node:crypto';
 export function persistenceExpectedImage(ledger,env=process.env){
  const image=env.ADL_EXPECTED_LIVE_IMAGE??(ledger.steps.throughput_upgrade?.status==='ok'?(ledger.steps.throughput_upgrade.result?.image??ledger.steps.throughput_image?.result?.image):undefined);
  if(!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(image||'')||env.ADL_LIVE_OOM_REPAIR==='1')throw Error('EXPECTED_CURRENT_PERSISTENCE_IMAGE_REQUIRED');
@@ -64,9 +65,14 @@ export function recoveryMode(mode){
  const snapshotMemoryRepair=['--snapshot-memory-repair','--snapshot-memory-rollback'].includes(mode);
  return {snapshotMemoryRepair,durableMode:mode==='--durable-ingress-repair'||mode==='--durable-ingress-rollback'||snapshotMemoryRepair,durableRollback:mode==='--durable-ingress-rollback'||mode==='--snapshot-memory-rollback'};
 }
-export function reusablePreparedImage(ledger,{backup,pipelineRepair=false,durableIngress=false}={}){
+export function canonicalSourceDigest(files){
+ const sorted=Object.fromEntries(Object.entries(files).sort(([a],[b])=>a<b?-1:a>b?1:0));
+ const encoded=JSON.stringify(sorted).replace(/[\u007f-\uffff]/g,char=>'\\u'+char.charCodeAt(0).toString(16).padStart(4,'0'));
+ return createHash('sha256').update(encoded).digest('hex');
+}
+export function reusablePreparedImage(ledger,{backup,pipelineRepair=false,durableIngress=false,sourceDigest}={}){
  const result=ledger?.steps?.throughput_image?.status==='ok'?ledger.steps.throughput_image.result:undefined;
- if(!result||!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(result.image||'')||result.backup!==backup||result.progressPhase!=='stopped'||result.workerRestarted!==false||result.offlineSnapshotMemoryVerified!==true)return;
+ if(!result||!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(result.image||'')||!/^[0-9a-f]{64}$/.test(sourceDigest||'')||result.image!=='adl-worker-partitioned:'+sourceDigest.slice(0,24)||result.backup!==backup||result.progressPhase!=='stopped'||result.workerRestarted!==false||result.offlineSnapshotMemoryVerified!==true)return;
  if(pipelineRepair&&result.offlinePipelineLoadVerified!==true)return;
  if(durableIngress&&result.offlineDurableIngressVerified!==true)return;
  return result;
@@ -275,7 +281,8 @@ export async function run(args){
     if(process.env.ADL_PRESERVED_HEAP_BUDGET_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.snapshotPressureRepair||!repairOptions.livePersistenceRepair||repairOptions.pipelineRepair||!repairOptions.resumeBackup)throw Error('HEAP_REPAIR_REQUIRES_PINNED_PRESSURE_RESUME');repairOptions.preservedHeapBudgetRepair=true;}
     if(snapshotMemoryRepair&&process.env.ADL_FINALIZE_VERIFIED_SHUTDOWN==='1'){if(!repairOptions.resumeBackup)throw Error('FINALIZATION_REQUIRES_PINNED_PREPARATION');repairOptions.finalizeAfterRecovery=true;}
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
-    const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup}):undefined;
+    const sourceDigest=canonicalSourceDigest(files);
+    const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup,sourceDigest}):undefined;
     const prepared=reusedPrepared?(emit({stage:'prepared_image_reuse',status:'reused',image:reusedPrepared.image,backup:reusedPrepared.backup,workerStarted:false,workerRestarted:false}),reusedPrepared):await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
     if(repairOptions.pipelineRepair&&prepared.offlinePipelineLoadVerified!==true)throw Error('PIPELINE_LOAD_OFFLINE_UNVERIFIED_NO_STOP');
     if(snapshotMemoryRepair&&prepared.offlineSnapshotMemoryVerified!==true)throw Error('SNAPSHOT_MEMORY_OFFLINE_UNVERIFIED');
