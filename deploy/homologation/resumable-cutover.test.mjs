@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
  assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));
@@ -14,6 +14,16 @@ test('completed stages are reused; failure stays pending and does not erase prev
  assert.equal(ledger.steps.backup.status,'ok');assert.equal(ledger.steps.image.status,'started');
  assert.equal(await step(ledger,'image',save,async()=>{actions++;return 'patched';}),'patched');
  assert.equal(actions,2);assert.ok(saves>=5);
+});
+test('prepared snapshot repair image is reused only with matching backup and passed offline gates',()=>{
+ const result={image:'adl-worker-partitioned:'+'a'.repeat(24),backup:'/var/backups/adl-partitioned-upgrade-safe',progressPhase:'stopped',workerRestarted:false,offlineSnapshotMemoryVerified:true,offlinePipelineLoadVerified:true,offlineDurableIngressVerified:true};
+ const ledger={steps:{throughput_image:{status:'ok',result}}};
+ assert.equal(reusablePreparedImage(ledger,{backup:result.backup,pipelineRepair:true,durableIngress:true}),result);
+ assert.equal(reusablePreparedImage(ledger,{backup:'/var/backups/other',pipelineRepair:true}),undefined);
+ for(const change of [{progressPhase:'start_requested'},{workerRestarted:true},{offlineSnapshotMemoryVerified:false},{offlinePipelineLoadVerified:false},{offlineDurableIngressVerified:false}]){
+  assert.equal(reusablePreparedImage({steps:{throughput_image:{status:'ok',result:{...result,...change}}}},{backup:result.backup,pipelineRepair:true,durableIngress:true}),undefined);
+ }
+ assert.equal(reusablePreparedImage({steps:{throughput_image:{status:'pending',result}}},{backup:result.backup}),undefined);
 });
 
 test('validation resumes with status only, preserves completed migration and saves current evidence',async()=>{

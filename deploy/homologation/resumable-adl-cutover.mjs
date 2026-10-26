@@ -64,6 +64,13 @@ export function recoveryMode(mode){
  const snapshotMemoryRepair=['--snapshot-memory-repair','--snapshot-memory-rollback'].includes(mode);
  return {snapshotMemoryRepair,durableMode:mode==='--durable-ingress-repair'||mode==='--durable-ingress-rollback'||snapshotMemoryRepair,durableRollback:mode==='--durable-ingress-rollback'||mode==='--snapshot-memory-rollback'};
 }
+export function reusablePreparedImage(ledger,{backup,pipelineRepair=false,durableIngress=false}={}){
+ const result=ledger?.steps?.throughput_image?.status==='ok'?ledger.steps.throughput_image.result:undefined;
+ if(!result||!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(result.image||'')||result.backup!==backup||result.progressPhase!=='stopped'||result.workerRestarted!==false||result.offlineSnapshotMemoryVerified!==true)return;
+ if(pipelineRepair&&result.offlinePipelineLoadVerified!==true)return;
+ if(durableIngress&&result.offlineDurableIngressVerified!==true)return;
+ return result;
+}
 export async function run(args){
  const {snapshotMemoryRepair,durableMode,durableRollback}=recoveryMode(args[4]);
  if(durableMode)args=[...args.slice(0,4),durableRollback?'--recovery-throughput-rollback':'--snapshot-throughput-repair'];
@@ -268,7 +275,8 @@ export async function run(args){
     if(process.env.ADL_PRESERVED_HEAP_BUDGET_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.snapshotPressureRepair||!repairOptions.livePersistenceRepair||repairOptions.pipelineRepair||!repairOptions.resumeBackup)throw Error('HEAP_REPAIR_REQUIRES_PINNED_PRESSURE_RESUME');repairOptions.preservedHeapBudgetRepair=true;}
     if(snapshotMemoryRepair&&process.env.ADL_FINALIZE_VERIFIED_SHUTDOWN==='1'){if(!repairOptions.resumeBackup)throw Error('FINALIZATION_REQUIRES_PINNED_PREPARATION');repairOptions.finalizeAfterRecovery=true;}
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
-    const prepared=await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
+    const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup}):undefined;
+    const prepared=reusedPrepared?(emit({stage:'prepared_image_reuse',status:'reused',image:reusedPrepared.image,backup:reusedPrepared.backup,workerStarted:false,workerRestarted:false}),reusedPrepared):await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
     if(repairOptions.pipelineRepair&&prepared.offlinePipelineLoadVerified!==true)throw Error('PIPELINE_LOAD_OFFLINE_UNVERIFIED_NO_STOP');
     if(snapshotMemoryRepair&&prepared.offlineSnapshotMemoryVerified!==true)throw Error('SNAPSHOT_MEMORY_OFFLINE_UNVERIFIED');
     if(repairOptions.snapshotPressureRepair&&prepared.offlineSnapshotPressureVerified!==true)throw Error('SNAPSHOT_PRESSURE_OFFLINE_UNVERIFIED_NO_STOP');

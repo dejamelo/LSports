@@ -22,6 +22,25 @@ class InheritedHeap(unittest.TestCase):
     for changed in ({**plan,'oldSpaceMiB':3584},{**plan,'effectiveHeapLimitBytes':6442450944},{**plan,'containerLimitUnchanged':False}):
      with self.assertRaises(RuntimeError):NS['partition_heap_mib']({'memoryLimitBytes':6442450944,'pipelineRepair':True,'heapBudgetPlan':changed})
   finally:NS['SECURE']=oldSecure;NS['run']=oldRun
+ def test_runtime_verification_uses_receipted_heap_and_confirms_both_snapshot_flags(self):
+  plan={'evidenceVerified':True,'oldSpaceMiB':3840,'previousOldSpaceMiB':3840,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':4227858432}
+  progress={'memoryLimitBytes':6442450944,'pipelineRepair':True,'heapBudgetPlan':plan}
+  image_id='sha256:'+'a'*64;worker_id='b'*64
+  env=['NODE_OPTIONS=--max-old-space-size=3840','LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true','LSPORTS_INPLAY_STREAMED_SNAPSHOT=true']
+  inspected={'Image':image_id,'HostConfig':{'Memory':6442450944},'Config':{'Env':env}}
+  old=NS['run'];calls=[]
+  try:
+   def run(args,**kwargs):calls.append(args);return json.dumps({'cgroupLimitBytes':6442450944,'effectiveHeapLimitProbeBytes':4227858432}).encode()
+   NS['run']=run
+   result=NS['verify_budgeted_worker_runtime'](progress,worker_id,inspected,image_id)
+   self.assertEqual(result['nodeOptions'],'--max-old-space-size=3840');self.assertEqual(result['dockerMemoryLimitBytes'],6442450944);self.assertEqual(len(calls),1);self.assertEqual(calls[0][:4],['docker','exec',worker_id,'node'])
+   for key,value in (('NODE_OPTIONS','--max-old-space-size=3584'),('LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT','false'),('LSPORTS_INPLAY_STREAMED_SNAPSHOT','false')):
+    wrong={**inspected,'Config':{'Env':[item for item in env if not item.startswith(key+'=')]+[key+'='+value]}}
+    with self.assertRaises(RuntimeError):NS['verify_budgeted_worker_runtime'](progress,worker_id,wrong,image_id)
+   src=Path(__file__).with_name('upgrade-partitioned-worker.py').read_text()
+   self.assertIn('verify_budgeted_worker_runtime(progress,workers[0][\'id\'],current_container,image_id)',src)
+   self.assertIn('verify_budgeted_worker_runtime(progress,active[0][\'id\'],inspected,image_id)',src)
+  finally:NS['run']=old
  def test_plan_copied_only_from_protected_verified_image_receipt(self):
   oldSecure,oldRun=NS['SECURE'],NS['run']
   try:

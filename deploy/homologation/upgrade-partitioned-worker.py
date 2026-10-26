@@ -39,6 +39,15 @@ def partition_heap_mib(progress):
     require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('oldSpaceMiB')==3584 and plan.get('previousOldSpaceMiB')==2560 and plan.get('containerLimitUnchanged') is True,'HEAP_BUDGET_PLAN_UNVERIFIED')
     return 3584
 
+def verify_budgeted_worker_runtime(progress,worker_id,inspected,image_id):
+    expected_heap=partition_heap_mib(progress);expected_memory=partition_memory(progress)
+    env=dict(item.split('=',1) for item in inspected['Config'].get('Env',[]) if '=' in item)
+    require(inspected['Image']==image_id and inspected['HostConfig']['Memory']==expected_memory and env.get('NODE_OPTIONS')=='--max-old-space-size='+str(expected_heap) and env.get('LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT')=='true' and env.get('LSPORTS_INPLAY_STREAMED_SNAPSHOT')=='true','BUDGETED_RUNTIME_IDENTITY_MISMATCH')
+    probe="const fs=require('node:fs'),v8=require('node:v8');console.log(JSON.stringify({cgroupLimitBytes:Number(fs.readFileSync('/sys/fs/cgroup/memory.max','utf8')),effectiveHeapLimitProbeBytes:v8.getHeapStatistics().heap_size_limit}))"
+    configured=json.loads(run(['docker','exec',worker_id,'node','-e',probe],timeout=30))
+    require(configured.get('cgroupLimitBytes')==expected_memory and expected_heap*1024**2<=configured.get('effectiveHeapLimitProbeBytes',0)<5*1024**3,'BUDGETED_HEAP_CONFIGURATION_MISMATCH')
+    return {'nodeOptions':'--max-old-space-size='+str(expected_heap),'dockerMemoryLimitBytes':expected_memory,**configured,'probeIsSeparateProcess':True}
+
 def existing_pipeline_heap_plan(worker):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
     if options=='--max-old-space-size=2560':return None
@@ -1242,8 +1251,10 @@ def upgrade_partitioned_unlocked(request):
         if progress['phase'] in ('start_requested','running'):
             workers=states('worker');require(len(workers)==1 and workers[0]['running'],'UPGRADED_WORKER_NOT_RUNNING_NO_BLIND_RESTART');current_container=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
             require(current_container['Image']==image_id and snapshot_memory_bytes(current_container['HostConfig']['Memory'])==partition_memory(progress),'UPGRADED_CONTAINER_MISMATCH')
-            env=dict(x.split('=',1) for x in current_container['Config']['Env'] if '=' in x);require(env.get('LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT')=='true','PARTITION_FLAG_NOT_APPLIED')
+            env=dict(x.split('=',1) for x in current_container['Config']['Env'] if '=' in x);require(env.get('LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT')=='true' and env.get('LSPORTS_INPLAY_STREAMED_SNAPSHOT')=='true','PARTITION_FLAG_NOT_APPLIED')
+            runtime=verify_budgeted_worker_runtime(progress,workers[0]['id'],current_container,image_id) if progress.get('heapBudgetPlan') else None
             if request.get('snapshotMemoryRepair'):require(env.get('NODE_OPTIONS')=='--max-old-space-size='+str(partition_heap_mib(progress)),'WORKER_HEAP_RESERVE_NOT_APPLIED')
+            if runtime:emit(operation='cutover.aws',stage='partitioned_upgrade.heap_runtime_verify',status='verified',containerId=workers[0]['id'],imageId=image_id,**runtime,posnetChanged=False)
             progress['phase']='running';save(progress);emit(operation='cutover.aws',stage='partitioned_upgrade.running',status='ok',offlineRestoreVerified=progress.get('oomRestoreVerified',False),reused=True,workerStarted=True,startedAtUTC=progress.get('startAt'),posnetChanged=False);return 0
         worker_states=states('worker')
         if progress['phase']=='prepared':
@@ -1440,12 +1451,8 @@ def upgrade_partitioned_unlocked(request):
             stage='partitioned_upgrade.heap_runtime_verify'
             active=states('worker');require(len(active)==1 and active[0]['running'],'BUDGETED_WORKER_NOT_RUNNING')
             inspected=json.loads(run(['docker','inspect',active[0]['id']]))[0]
-            env=dict(item.split('=',1) for item in inspected['Config'].get('Env',[]) if '=' in item)
-            require(inspected['Image']==image_id and inspected['HostConfig']['Memory']==6442450944 and env.get('NODE_OPTIONS')=='--max-old-space-size=3584','BUDGETED_RUNTIME_IDENTITY_MISMATCH')
-            probe="const fs=require('node:fs'),v8=require('node:v8');console.log(JSON.stringify({cgroupLimitBytes:Number(fs.readFileSync('/sys/fs/cgroup/memory.max','utf8')),effectiveHeapLimitProbeBytes:v8.getHeapStatistics().heap_size_limit}))"
-            configured=json.loads(run(['docker','exec',active[0]['id'],'node','-e',probe],timeout=30))
-            require(configured.get('cgroupLimitBytes')==6442450944 and 3584*1024**2<=configured.get('effectiveHeapLimitProbeBytes',0)<5*1024**3,'BUDGETED_HEAP_CONFIGURATION_MISMATCH')
-            emit(operation='cutover.aws',stage=stage,status='verified',containerId=active[0]['id'],imageId=image_id,nodeOptions='--max-old-space-size=3584',dockerMemoryLimitBytes=6442450944,**configured,probeIsSeparateProcess=True,posnetChanged=False)
+            runtime=verify_budgeted_worker_runtime(progress,active[0]['id'],inspected,image_id)
+            emit(operation='cutover.aws',stage=stage,status='verified',containerId=active[0]['id'],imageId=image_id,**runtime,posnetChanged=False)
         emit(operation='cutover.aws',stage='partitioned_upgrade.started',status='ok',offlineRestoreVerified=progress.get('oomRestoreVerified',False),workerStarted=True,startedAtUTC=progress.get('startAt'),image=progress['image'],migrationRepeated=False,composeOverridesPreserved=True,journalsRewrittenByUpgrade=False,journalsImported=False,posnetChanged=False,backup=str(backup));return 0
     except Exception as error:
         reason=str(error) if re.fullmatch('[A-Z][A-Z_]+',str(error)) else 'PRIVATE_PARTITIONED_UPGRADE_FAILED'

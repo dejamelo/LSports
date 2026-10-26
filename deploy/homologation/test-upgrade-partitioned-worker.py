@@ -108,7 +108,7 @@ class Upgrade(unittest.TestCase):
     if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok throughput-offline-ok spool-memory-offline-ok snapshot-throughput-offline-ok planned-distribution-stop-ok durable-ingress-offline-ok snapshot-memory-offline-ok oom-checkpoint-restore-ok' if '--input-type=module' in args or any(str(a).endswith('-proof.mjs') for a in args) else json.dumps(hashes).encode()
     if args[:2]==['docker','build']:images[image]={'Id':'sha256:'+('c'*64),'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':digest}}};return b''
     if args[:2]==['docker','inspect']:
-     return json.dumps([{'Image':images[selected]['Id'],'HostConfig':{'Memory':4294967296,'RestartPolicy':{'Name':'no'}},'Config':{'Env':['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true',*(['NODE_OPTIONS=--max-old-space-size=2560'] if oom and selected==image else [])]},'Mounts':[{'Destination':'/app/.runtime/feed','Type':'volume','RW':False,'Name':'feed'}]}]).encode()
+     return json.dumps([{'Image':images[selected]['Id'],'HostConfig':{'Memory':4294967296,'RestartPolicy':{'Name':'no'}},'Config':{'Env':['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true','LSPORTS_INPLAY_STREAMED_SNAPSHOT=true',*(['NODE_OPTIONS=--max-old-space-size=2560'] if oom and selected==image else [])]},'Mounts':[{'Destination':'/app/.runtime/feed','Type':'volume','RW':False,'Name':'feed'}]}]).encode()
     if args[:3]==['docker','volume','inspect']:return json.dumps([{'Mountpoint':str(volume),'Labels':{'com.docker.compose.project':'adl-homologation'}}]).encode()
     if args[:2]==['docker','kill']:running=False;return b''
     if 'up' in args:running=True;selected=image;return b''
