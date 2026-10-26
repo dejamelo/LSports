@@ -830,6 +830,23 @@ test('heartbeat cannot queue repeated full writes while snapshot waits for capac
  state.set('prematch',{lastSnapshotErrorAt:'2026-10-22T20:01:00Z'});assert.equal(heartbeatPublicationDue(state,1000,6000),true);
 });
 
+test('empty InPlay snapshot is deferred without marking recovery ready',{timeout:10000},async()=>{
+ const {OperationError}=await import('./diagnostics.js');
+ const state=new TradeState(),abort=new AbortController();let observed=false;
+ const pkg:PackageConfig={lane:'inplay',packageId:4510,username:'isolated',password:'',hostname:'unused',vhost:'StmInPlay',port:5672,tls:false,queue:'_4510_'};
+ const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(){return{consumerTag:'empty-snapshot'};},ack(){assert.fail('No delivery expected');},nack(){assert.fail('No delivery expected');}});
+ const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel;},async close(){connection.emit('close');}});
+ const api:ReturnType<typeof clients>={async distributionStatus(){return{isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async startDistribution(){},async snapshot(){throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',attribution:'not_proven',rawCount:0,sdkCount:0},message:'isolated empty snapshot'});},async catalog(){return[];}};
+ await session(pkg,{packages:[pkg],snapshotUrl:'https://snapshot.invalid',customersUrl:'https://customers.invalid',recoveryMs:300000,staleMs:90000},state,async()=>{
+  if(state.connections.inplay.recoveryProgress?.stage==='waiting_retry'){
+   assert.equal(state.connections.inplay.recoveryProgress.regularSnapshotReady,false);
+   assert.equal(state.connections.inplay.lastSnapshotDiagnostic?.snapshotValidation?.sdkCount,0);
+   assert.ok(state.connections.inplay.lastSnapshotErrorAt);observed=true;abort.abort();
+  }
+ },abort.signal,{clientFactory:()=>api,connect:(async()=>connection) as unknown as typeof amqp.connect});
+ assert.equal(observed,true);
+});
+
 test('durable inbox checkpoint is deferred only during full snapshot application',async()=>{
  const {inboxCheckpointDeferredDuringSnapshot}=await import('./connected.js');
  assert.equal(inboxCheckpointDeferredDuringSnapshot(true),true);

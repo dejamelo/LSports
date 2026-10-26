@@ -688,11 +688,12 @@ export async function session(
           const diagnostic = describeFailure(error, "snapshot.events", "http");
           state.set(lane, { diagnostic, lastSnapshotDiagnostic: diagnostic });
           const rejectedPartition=!!(api.snapshotFull||lane==='prematch'&&api.snapshotPartitioned)&&(api.snapshotFull?diagnostic.operation==='snapshot.events':(['invalid_response','sdk_error'].includes(diagnostic.category)||diagnostic.reason==='response_size_limit'));
-          if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded" && !rejectedPartition) throw error;
+          const rejectedEmptySnapshot=diagnostic.operation==='snapshot.events'&&diagnostic.category==='invalid_response'&&diagnostic.reason==='invalid_snapshot'&&diagnostic.snapshotValidation?.code==='full_document_invalid'&&diagnostic.snapshotValidation.sdkCount===0;
+          if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded" && !rejectedPartition && !rejectedEmptySnapshot) throw error;
           // Invalid partition HTTP is not AMQP failure. Keep persist-before-ACK and
           // baseline false, without changing the independent InPlay recovery policy.
           const localDeferral=diagnostic.deferred===true&&['local_in_flight','local_host_cooldown','local_operation_cooldown'].includes(diagnostic.rateLimitSource||'');
-          nextDue["snapshot.events"] = localDeferral?retryTime(diagnostic):rejectedPartition?Math.max(retryTime(diagnostic),Date.now()+Math.max(300000,config.recoveryMs)):retryTime(diagnostic);
+          nextDue["snapshot.events"] = localDeferral?retryTime(diagnostic):rejectedPartition||rejectedEmptySnapshot?Math.max(retryTime(diagnostic),Date.now()+Math.max(300000,config.recoveryMs)):retryTime(diagnostic);
           console.warn(JSON.stringify({ lane, status: "deferred", ...diagnostic }));
         }
       }

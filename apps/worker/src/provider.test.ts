@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { clients as createClients, decodeMessage, safeFailure } from "./provider.js";
+import { OperationError } from "./diagnostics.js";
 import { loadConfig } from "./config.js";
 const headers = {
   MessageGuid: "test-guid",
@@ -60,7 +61,15 @@ test("SDK uses documented package snapshot routes with credentials only in serve
         },
         { snapshotUrl: url, customersUrl: url },
       );
-      assert.deepEqual(await client.snapshot(), []);
+      await assert.rejects(client.snapshot(), (error: unknown) => {
+        assert.equal(error instanceof OperationError, true);
+        assert.equal(
+          (error as { diagnostic?: { snapshotValidation?: { sdkCount?: number } } })
+            .diagnostic?.snapshotValidation?.sdkCount,
+          0,
+        );
+        return true;
+      });
     }
     assert.deepEqual(
       requests.map((r) => r.url),

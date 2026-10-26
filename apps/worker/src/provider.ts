@@ -133,6 +133,23 @@ export function clients(
         if (response === undefined || response === null)
           throw new Error("Invalid snapshot response");
         const rows = (Array.isArray(response) ? response : [response]) as TradeEvent[];
+        if (rows.length === 0) {
+          const evidence = responseEvidence();
+          throw new OperationError({
+            operation: "snapshot.events",
+            protocol: "http",
+            category: "invalid_response",
+            reason: "invalid_snapshot",
+            snapshotValidation: {
+              phase: "batch",
+              code: "full_document_invalid",
+              attribution: "not_proven",
+              rawCount: evidence.providerRows ?? 0,
+              sdkCount: 0,
+            },
+            message: "Snapshot vazio; baseline não pode ser marcado completo.",
+          });
+        }
         if (
           rows.some(
             (e) =>
