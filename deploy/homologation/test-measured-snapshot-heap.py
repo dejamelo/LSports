@@ -26,6 +26,12 @@ class MeasuredSnapshotHeap(unittest.TestCase):
   for bad in ({**plan,'oldSpaceMiB':4352},{**plan,'outsideOldSpaceBytes':0},{**plan,'guardBudgetBytes':0},{**plan,'sourceTailSha256':'invalid'}):
    with self.assertRaises(RuntimeError):NS['partition_heap_mib']({**progress,'heapBudgetPlan':bad})
 
+ def test_revalidates_an_already_saved_measured_plan_from_the_same_log(self):
+  backup,progress,workers=self.exercise();plan=NS['measured_snapshot_apply_heap_plan'](progress,backup,workers)
+  resumed={**progress,'heapBudgetPlan':plan}
+  self.assertEqual(NS['measured_snapshot_apply_heap_plan'](resumed,backup,workers),plan)
+  with self.assertRaises(RuntimeError):NS['measured_snapshot_apply_heap_plan']({**resumed,'heapBudgetPlan':{**plan,'oldSpaceMiB':4352}},backup,workers)
+
  def test_does_not_accept_physical_memory_or_non_snapshot_failure_as_evidence(self):
   for mutate in (lambda f,s:f.update(headroomBytes=335544320),lambda f,s:f['memory'].update(limitingFactor='available_memory'),lambda f,s:f.update(stage='projection.serialize'),lambda f,s:s['indexCounts'].update(bets=100)):
    backup,progress,workers=self.exercise(mutate)

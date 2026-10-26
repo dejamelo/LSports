@@ -156,7 +156,6 @@ def measured_snapshot_apply_heap_plan(progress,backup,workers):
     require(str(backup)==progress.get('backup') and not backup.is_symlink() and backup.is_dir() and backup.stat().st_mode&0o077==0,'MEASURED_HEAP_BACKUP_UNVERIFIED')
     require(len(workers)==1 and workers[0].get('id')==progress.get('oldContainer') and not workers[0].get('running') and not workers[0].get('oomKilled') and workers[0].get('exitCode')==0,'MEASURED_HEAP_CLEAN_STOP_UNVERIFIED')
     old_plan=progress.get('heapBudgetPlan') or {}
-    require(old_plan.get('preserveExisting') is True and old_plan.get('oldSpaceMiB')==3840 and old_plan.get('effectiveHeapLimitBytes')==4227858432,'MEASURED_HEAP_BASELINE_UNVERIFIED')
     pointer=backup/'oom-restore.latest.json';require(pointer.is_file() and not pointer.is_symlink() and pointer.stat().st_mode&0o077==0,'MEASURED_HEAP_ATTEMPT_POINTER_UNVERIFIED')
     name=json.loads(pointer.read_bytes()).get('name');require(isinstance(name,str) and re.fullmatch(r'oom-restore-attempt-[0-9a-f]{16,32}\.private\.log',name),'MEASURED_HEAP_ATTEMPT_NAME_UNVERIFIED')
     path=backup/name;require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<=8*1024**2,'MEASURED_HEAP_ATTEMPT_LOG_UNVERIFIED')
@@ -174,7 +173,15 @@ def measured_snapshot_apply_heap_plan(progress,backup,workers):
     require(failure.get('budgetBytes')==335544320 and failure.get('headroomBytes')==333903952 and memory.get('limitingFactor')=='heap' and memory.get('heapLimitBytes')==4227858432 and memory.get('heapUsedBytes')==3893954480 and memory.get('availableMemoryBytes')==2005966848,'MEASURED_HEAP_FAILURE_METRICS_CHANGED')
     require(counts.get('stateRows',0)>=42000 and counts.get('bets',0)>=5700000 and counts.get('markets',0)>=840000 and sample.get('heapUsedBytes',0)>3700000000,'MEASURED_HEAP_STATE_SHAPE_CHANGED')
     tail_hash=hashlib.sha256(raw).hexdigest()
-    return {'evidenceVerified':True,'measuredSnapshotApply':True,'previousOldSpaceMiB':3840,'oldSpaceMiB':4096,'containerLimitUnchanged':True,'containerLimitBytes':6442450944,'outsideOldSpaceBytes':2147483648,'guardBudgetBytes':335544320,'failureHeadroomBytes':failure['headroomBytes'],'failureHeapUsedBytes':memory['heapUsedBytes'],'failureAvailableMemoryBytes':memory['availableMemoryBytes'],'applyRowsAtFailure':sample['rows'],'retainedStateRows':counts['stateRows'],'retainedMarkets':counts['markets'],'retainedSelections':counts['bets'],'sourceAttempt':name,'sourceTailSha256':tail_hash,'realDataAcceptanceRequired':True}
+    plan={'evidenceVerified':True,'measuredSnapshotApply':True,'previousOldSpaceMiB':3840,'oldSpaceMiB':4096,'containerLimitUnchanged':True,'containerLimitBytes':6442450944,'outsideOldSpaceBytes':2147483648,'guardBudgetBytes':335544320,'failureHeadroomBytes':failure['headroomBytes'],'failureHeapUsedBytes':memory['heapUsedBytes'],'failureAvailableMemoryBytes':memory['availableMemoryBytes'],'applyRowsAtFailure':sample['rows'],'retainedStateRows':counts['stateRows'],'retainedMarkets':counts['markets'],'retainedSelections':counts['bets'],'sourceAttempt':name,'sourceTailSha256':tail_hash,'realDataAcceptanceRequired':True}
+    if old_plan.get('measuredSnapshotApply') is True:
+        # A previous protected run may have durably recorded the exact plan
+        # before failing at a later gate. Revalidate it from the same immutable
+        # failure log rather than rejecting our own resumable state.
+        require(old_plan==plan,'MEASURED_HEAP_PLAN_CHANGED')
+    else:
+        require(old_plan.get('preserveExisting') is True and old_plan.get('oldSpaceMiB')==3840 and old_plan.get('effectiveHeapLimitBytes')==4227858432,'MEASURED_HEAP_BASELINE_UNVERIFIED')
+    return plan
 
 def inherit_pressure_heap_plan(progress,request,worker):
     # Reuse only the exact heap budget already proven by the currently deployed
