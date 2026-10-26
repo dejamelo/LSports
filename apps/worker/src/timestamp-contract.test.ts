@@ -9,7 +9,7 @@ test("contract UTC preserves 100ns ordering across zones, SDK, snapshot, checkpo
     const script = `
  import assert from 'node:assert/strict';
  import {decodeMessage} from './apps/worker/src/messages.ts';
- import {TradeState} from './apps/worker/src/state.ts';
+ import {TradeState,preciseBetOrder} from './apps/worker/src/state.ts';
  import {providerTimestamp} from './apps/worker/src/timestamp-contract.ts';
  import {checkpoint,restore} from './apps/worker/src/persistence.ts';
  import {createPublisher} from '@lsports/feed-store';
@@ -23,7 +23,7 @@ test("contract UTC preserves 100ns ordering across zones, SDK, snapshot, checkpo
  receive(plain,'2.10');receive('2026-10-18T14:39:04.0173137Z','2.20');receive('2026-10-18T14:39:04.0173135','9.99');
  const row=state.rows.prematch.get('outright:900111:900283');assert.equal(row.markets.get('160').bets[0].price,'2.20');assert.equal(row.marketReceipt.staleBetUpdates,1);
  receive('2026-10-18T14:39:04.0173138',undefined,2);receive('2026-10-18T14:39:04.0173136Z','9.99');assert.equal(row.markets.get('160').bets[0].settlement,2);
- const directory=await mkdtemp('/tmp/adl-utc-proof-');try{await createPublisher(directory+'/feed.json')(state.feed(),checkpoint(state));const restored=new TradeState();await restore(restored,directory+'/feed.json');assert.equal(restored.rows.prematch.get('outright:900111:900283').betOrder.get('160:1'),row.betOrder.get('160:1'));assert(!restored.feed().events[0].selections[0].available);}finally{await rm(directory,{recursive:true,force:true});}
+ const directory=await mkdtemp('/tmp/adl-utc-proof-');try{await createPublisher(directory+'/feed.json')(state.feed(),checkpoint(state));const restored=new TradeState();await restore(restored,directory+'/feed.json');assert.equal(preciseBetOrder(restored.rows.prematch.get('outright:900111:900283'),'160:1',restored.rows.prematch.get('outright:900111:900283').markets.get('160').bets[0]),preciseBetOrder(row,'160:1',row.markets.get('160').bets[0]));assert(!restored.feed().events[0].selections[0].available);}finally{await rm(directory,{recursive:true,force:true});}
  console.log(JSON.stringify({utc:providerTimestamp(plain).milliseconds,order:providerTimestamp(plain).order,price:row.markets.get('160').bets[0].price,settlement:row.markets.get('160').bets[0].settlement}));`;
     const result = spawnSync(
       process.execPath,

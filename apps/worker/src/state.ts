@@ -53,6 +53,27 @@ export interface Row {
   // Session evidence only: a checkpoint must never restore quote confirmation.
   snapshotBets?: Map<string, import("@lsports/contracts").SnapshotQuoteObservation>;
 }
+const preciseOrder=Symbol('preciseBetOrder');
+type OrderedBet=NonNullable<Market['bets']>[number]&{[preciseOrder]?:string};
+export const preciseBetOrder=(row:Row,key:string,bet?:object)=>((bet as OrderedBet|undefined)?.[preciseOrder]??row.betOrder?.get(key));
+function setOrder(row:Row,key:string,bet:object,order:string,t:number){
+  const value=bet as OrderedBet;
+  if(BigInt(order)===BigInt(t)*1000000n){delete value[preciseOrder];row.betOrder?.delete(key);return;}
+  Object.defineProperty(value,preciseOrder,{value:order,writable:true,configurable:true});row.betOrder?.delete(key);
+}
+export function* persistedBetOrders(row:Row):Generator<[string,string]>{
+  if(row.betOrder)yield* row.betOrder;
+  for(const [marketId,market] of row.markets)for(const bet of market.bets||[]){
+    const order=(bet as OrderedBet)[preciseOrder];if(order!==undefined)yield [`${marketId}:${bet.id}`,order];
+  }
+}
+export function restorePreciseBetOrders(row:Row){
+  if(!row.betOrder?.size){row.betOrder=undefined;return;}
+  const indexes=new Map<string,Map<string,NonNullable<Market['bets']>[number]>>();
+  for(const [key,order] of row.betOrder){const split=key.indexOf(':');if(split<1)continue;const marketId=key.slice(0,split),selectionId=key.slice(split+1);let index=indexes.get(marketId);if(!index){const market=row.markets.get(marketId);if(!market?.bets)continue;index=new Map(market.bets.map(bet=>[String(bet.id),bet]));indexes.set(marketId,index);}const bet=index.get(selectionId);if(!bet)continue;Object.defineProperty(bet,preciseOrder,{value:order,writable:true,configurable:true});row.betOrder.delete(key);}
+  if(!row.betOrder.size)row.betOrder=undefined;
+}
+function transferPreciseBetOrders(source:Row,target:Row){for(const [marketId,market] of source.markets){const destination=target.markets.get(marketId);if(!destination?.bets)continue;for(let i=0;i<(market.bets?.length||0);i++){const order=(market.bets![i] as OrderedBet)[preciseOrder];if(order===undefined)continue;const bet=destination.bets.find(candidate=>candidate.id===market.bets![i].id);if(bet)Object.defineProperty(bet,preciseOrder,{value:order,writable:true,configurable:true});}}}
 const snapshotEpochByRow=new WeakMap<Row,object>();
 const snapshotEpochByBet=new WeakMap<object,object>();
 export function quoteConfirmed(row:Row,key:string,bet?:object){const epoch=snapshotEpochByRow.get(row);return !row.quoteInvalidations?.has(key)&&(row.freshBets?.has(key)===true||!!bet&&!!epoch&&snapshotEpochByBet.get(bet)===epoch||!row.timestampRecovery?.has(key)&&row.snapshotBets?.get(key)?.decision==='confirmed');}
@@ -238,7 +259,7 @@ export class TradeState {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
         this.rows[lane].set(key, row);
       }
-      if((this.projectionCaptured.has(row)||this.publicationCaptured.has(row))){const prior=row;row=structuredClone(row);this.rows[lane].set(key,row);const epoch=snapshotEpochByRow.get(prior);if(epoch)snapshotEpochByRow.set(row,epoch);}
+      if((this.projectionCaptured.has(row)||this.publicationCaptured.has(row))){const prior=row;row=structuredClone(row);transferPreciseBetOrders(prior,row);this.rows[lane].set(key,row);const epoch=snapshotEpochByRow.get(prior);if(epoch)snapshotEpochByRow.set(row,epoch);}
       this.projectionCache.delete(row);
       if(observation){
         const at=new Date(observation.receivedAt).toISOString();
@@ -325,7 +346,8 @@ export class TradeState {
           const previousAt = row.betAt.get(betKey) || 0;
           const field = settlementFields.get(betKey);
           const order = field?.timestamp?.orderingKey || timestampOrder(bet.lastUpdate,t);
-          const savedOrder = row.betOrder?.get(betKey);
+          const previousBetForOrder=bets.get(bet.id);
+          const savedOrder = preciseBetOrder(row,betKey,previousBetForOrder);
           const previousOrder = savedOrder && BigInt(savedOrder)/1000000n===BigInt(previousAt) ? savedOrder : (BigInt(previousAt)*1000000n).toString();
           const older = BigInt(order)<BigInt(previousOrder);
           const recovery = row.timestampRecovery?.get(betKey);
@@ -406,8 +428,7 @@ export class TradeState {
             row.betAt.set(betKey, t);
             // Millisecond order is exactly reconstructible from betAt. Keep all
             // sub-millisecond ordering keys and every non-snapshot path unchanged.
-            if(event.marketRecovery&&!event.outright&&BigInt(order)===BigInt(t)*1000000n)row.betOrder?.delete(betKey);
-            else (row.betOrder ||= new Map()).set(betKey,order);
+            setOrder(row,betKey,storedBet,order,t);
           } else {
             this.metrics[lane].staleUpdatesIgnored++;
             if (row.marketReceipt) row.marketReceipt.staleBetUpdates++;
@@ -421,7 +442,7 @@ export class TradeState {
   }
   beginPartitionedSnapshot(lane:Lane){
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
-    const snapshotEpoch={};for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;this.rows[lane].set(key,row);snapshotEpochByRow.set(row,snapshotEpoch);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+    const snapshotEpoch={};for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;if(row!==original)transferPreciseBetOrders(original,row);this.rows[lane].set(key,row);snapshotEpochByRow.set(row,snapshotEpoch);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
   }
   finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
     this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));

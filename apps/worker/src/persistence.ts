@@ -7,7 +7,7 @@ import {walkSnapshot} from './full-snapshot.js';
 import {jsonItems,writeJsonObject} from '@lsports/feed-store';
 import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
-import { TradeState, type Row } from './state.js';
+import { TradeState, persistedBetOrders, restorePreciseBetOrders, type Row } from './state.js';
 
 // The sidecar is parsed as a bounded stream, one <=32 MiB record at a time.
 // Keep a finite file cap while admitting the measured 2.20 GB production
@@ -23,7 +23,7 @@ const tuples = (v: unknown): v is [string, unknown][] => Array.isArray(v) && v.e
 export function checkpoint(state: TradeState, includeRegular=true) {
   const regular=includeRegular?(['prematch','inplay'] as const).flatMap(lane=>[...state.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({
     lane,fixtureId:Number(key),fixture:row.fixture,livescore:row.livescore,
-    markets:[...row.markets],marketAt:[...row.marketAt],betAt:[...row.betAt],betOrder:row.betOrder?[...row.betOrder]:undefined,
+    markets:[...row.markets],marketAt:[...row.marketAt],betAt:[...row.betAt],betOrder:[...persistedBetOrders(row)],
   }))):[];
   return { version: 1, regular, outright: (['prematch', 'inplay'] as const).flatMap(lane =>
     [...state.rows[lane]].filter(([, row]) => row.outright).map(([key, row]) => ({
@@ -33,7 +33,7 @@ export function checkpoint(state: TradeState, includeRegular=true) {
       timestampRecovery: row.timestampRecovery ? [...row.timestampRecovery] : undefined,
       settlementAudit: row.settlementAudit ? [...row.settlementAudit] : undefined,
       settlementMarkets: row.settlementMarkets ? [...row.settlementMarkets] : undefined,
-      betOrder: row.betOrder ? [...row.betOrder] : undefined,
+      betOrder: [...persistedBetOrders(row)],
       markets: [...row.markets], marketAt: [...row.marketAt], betAt: [...row.betAt],
     }))) };
 }
@@ -43,7 +43,7 @@ const mapItems=(value:Map<any,any>|undefined)=>value?jsonItems(function*(){yield
 function streamedRow(lane:Lane,key:string|number,row:Row,outright=false){return {
  lane,fixtureId:outright?Number(String(key).split(':').at(-1)):Number(key),fixture:row.fixture,
  ...(outright?{outright:row.outright,outrightScore:row.outrightScore}:{}),livescore:row.livescore,
- markets:mapItems(row.markets),marketAt:mapItems(row.marketAt),betAt:mapItems(row.betAt),betOrder:mapItems(row.betOrder),marketReceipt:row.marketReceipt,
+ markets:mapItems(row.markets),marketAt:mapItems(row.marketAt),betAt:mapItems(row.betAt),betOrder:jsonItems(function*(){yield* persistedBetOrders(row);}),marketReceipt:row.marketReceipt,
  deferredTimestampBets:mapItems(row.deferredTimestampBets),timestampRecovery:mapItems(row.timestampRecovery),settlementAudit:mapItems(row.settlementAudit),settlementMarkets:mapItems(row.settlementMarkets),
 };}
 // Use under publicationTurn/state.exclusive, exactly like streamed regular persistence.
@@ -174,7 +174,7 @@ export async function restore(state: TradeState, path: string, progress?:(sample
       const lane = entry.lane as Lane;
       const key = regular?entry.fixtureId:`outright:${(entry.outright as Record<string,unknown>).competitionId}:${entry.fixtureId}`;
       if (recovered.rows[lane].has(key)) throw new Error('Duplicate outright checkpoint identity');
-      recovered.rows[lane].set(key, {
+      const restoredRow:Row={
         deferredTimestampBets: entry.deferredTimestampBets === undefined ? undefined : new Map(entry.deferredTimestampBets as [string, unknown][]) as Row["deferredTimestampBets"],
         timestampRecovery: entry.timestampRecovery === undefined ? undefined : new Map(entry.timestampRecovery as [string, unknown][]) as Row["timestampRecovery"],
         settlementAudit: entry.settlementAudit === undefined ? undefined : new Map(entry.settlementAudit as [string, unknown][]) as Row["settlementAudit"],
@@ -185,7 +185,9 @@ export async function restore(state: TradeState, path: string, progress?:(sample
         betOrder: entry.betOrder === undefined ? undefined : new Map(entry.betOrder as [string,string][]),
         markets: new Map(entry.markets) as Map<string, Market>,
         marketAt: new Map(entry.marketAt) as Map<string, number>, betAt: new Map(entry.betAt) as Map<string, number>,
-      });
+      };
+      restorePreciseBetOrders(restoredRow);
+      recovered.rows[lane].set(key, restoredRow);
       rows++;
     };
     await walkSnapshot(path,async()=>{},32*1024**2,'events',async(entry,regular)=>{
