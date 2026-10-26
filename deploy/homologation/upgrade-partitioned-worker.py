@@ -96,6 +96,9 @@ def partition_memory(progress):
 def partition_heap_mib(progress):
     plan=progress.get('heapBudgetPlan')
     if plan is None:return 2560
+    if plan.get('measuredSnapshotApply') is True:
+        require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('previousOldSpaceMiB')==3840 and plan.get('oldSpaceMiB')==4096 and plan.get('containerLimitUnchanged') is True and plan.get('outsideOldSpaceBytes')==2147483648 and plan.get('guardBudgetBytes')==335544320 and re.fullmatch('[0-9a-f]{64}',str(plan.get('sourceTailSha256',''))),'MEASURED_HEAP_PLAN_UNVERIFIED')
+        return 4096
     if plan.get('preserveExisting') is True:
         require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('oldSpaceMiB')==3840 and plan.get('previousOldSpaceMiB')==3840 and plan.get('containerLimitUnchanged') is True and 3840*1024**2<=plan.get('effectiveHeapLimitBytes',0)<=6442450944-512*1024**2,'HEAP_PRESERVATION_PLAN_UNVERIFIED')
         return 3840
@@ -126,6 +129,18 @@ def existing_pipeline_heap_plan(worker):
         limit=measured.get('heapLimitBytes')
         require(type(limit) is int and 3840*1024**2<=limit<=6442450944-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
         return {'evidenceVerified':True,'oldSpaceMiB':3840,'previousOldSpaceMiB':3840,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':limit}
+    if options=='--max-old-space-size=4096' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944:
+        image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
+        path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
+        require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'PIPELINE_HEAP_RECEIPT_UNVERIFIED')
+        old=json.loads(path.read_bytes());require(old.get('image')==image and old.get('oomRestoreVerified') is True,'PIPELINE_HEAP_RESTORE_RECEIPT_UNVERIFIED')
+        require(partition_heap_mib(old)==4096,'PIPELINE_MEASURED_HEAP_RECEIPT_UNVERIFIED')
+        found=json.loads(run(['docker','image','inspect',image]))[0]
+        require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old.get('digest'),'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
+        probe="const s=require('node:v8').getHeapStatistics();console.log(JSON.stringify({heapLimitBytes:s.heap_size_limit}))"
+        measured=json.loads(run(['docker','run','--rm','--network','none','--memory','6g','--read-only','-e','NODE_OPTIONS='+options,'--entrypoint','node',image,'-e',probe]))
+        require(4096*1024**2<=measured.get('heapLimitBytes',0)<5*1024**3,'PIPELINE_MEASURED_HEAP_HEADROOM_UNVERIFIED')
+        return copy.deepcopy(old['heapBudgetPlan'])
     require(options=='--max-old-space-size=3584' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944,'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
     image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
     path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
@@ -135,6 +150,28 @@ def existing_pipeline_heap_plan(worker):
     found=json.loads(run(['docker','image','inspect',image]))[0]
     require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
     return copy.deepcopy(old['heapBudgetPlan'])
+
+def measured_snapshot_apply_heap_plan(progress,backup,workers):
+    require(progress.get('phase')=='stopped' and progress.get('memoryLimitBytes')==6442450944 and progress.get('pipelineRepair') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True,'MEASURED_HEAP_SCOPE_UNVERIFIED')
+    require(str(backup)==progress.get('backup') and not backup.is_symlink() and backup.is_dir() and backup.stat().st_mode&0o077==0,'MEASURED_HEAP_BACKUP_UNVERIFIED')
+    require(len(workers)==1 and workers[0].get('id')==progress.get('oldContainer') and not workers[0].get('running') and not workers[0].get('oomKilled') and workers[0].get('exitCode')==0,'MEASURED_HEAP_CLEAN_STOP_UNVERIFIED')
+    old_plan=progress.get('heapBudgetPlan') or {}
+    require(old_plan.get('preserveExisting') is True and old_plan.get('oldSpaceMiB')==3840 and old_plan.get('effectiveHeapLimitBytes')==4227858432,'MEASURED_HEAP_BASELINE_UNVERIFIED')
+    pointer=backup/'oom-restore.latest.json';require(pointer.is_file() and not pointer.is_symlink() and pointer.stat().st_mode&0o077==0,'MEASURED_HEAP_ATTEMPT_POINTER_UNVERIFIED')
+    name=json.loads(pointer.read_bytes()).get('name');require(isinstance(name,str) and re.fullmatch(r'oom-restore-attempt-[0-9a-f]{16,32}\.private\.log',name),'MEASURED_HEAP_ATTEMPT_NAME_UNVERIFIED')
+    path=backup/name;require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<=8*1024**2,'MEASURED_HEAP_ATTEMPT_LOG_UNVERIFIED')
+    raw=read_tail(path);records=[]
+    for line in raw.decode(errors='replace').splitlines():
+        try:r=json.loads(line)
+        except ValueError:continue
+        if isinstance(r,dict) and r.get('operation') in ('offline.memory','offline.memory_budget'):records.append(r)
+    failures=[r for r in records if r.get('operation')=='offline.memory_budget' and r.get('stage')=='snapshot.apply' and r.get('allowed') is False]
+    samples=[r for r in records if r.get('operation')=='offline.memory' and r.get('stage')=='snapshot.apply' and r.get('rows',0)>=12000]
+    require(failures and samples,'MEASURED_HEAP_FAILURE_EVIDENCE_MISSING');failure=failures[-1];sample=samples[-1];memory=failure.get('memory') or {};counts=sample.get('indexCounts') or {}
+    require(failure.get('budgetBytes')==335544320 and failure.get('headroomBytes')==333903952 and memory.get('limitingFactor')=='heap' and memory.get('heapLimitBytes')==4227858432 and memory.get('heapUsedBytes')==3893954480 and memory.get('availableMemoryBytes')==2005966848,'MEASURED_HEAP_FAILURE_METRICS_CHANGED')
+    require(counts.get('stateRows',0)>=42000 and counts.get('bets',0)>=5700000 and counts.get('markets',0)>=840000 and sample.get('heapUsedBytes',0)>3700000000,'MEASURED_HEAP_STATE_SHAPE_CHANGED')
+    tail_hash=hashlib.sha256(raw).hexdigest()
+    return {'evidenceVerified':True,'measuredSnapshotApply':True,'previousOldSpaceMiB':3840,'oldSpaceMiB':4096,'containerLimitUnchanged':True,'containerLimitBytes':6442450944,'outsideOldSpaceBytes':2147483648,'guardBudgetBytes':335544320,'failureHeadroomBytes':failure['headroomBytes'],'failureHeapUsedBytes':memory['heapUsedBytes'],'failureAvailableMemoryBytes':memory['availableMemoryBytes'],'applyRowsAtFailure':sample['rows'],'retainedStateRows':counts['stateRows'],'retainedMarkets':counts['markets'],'retainedSelections':counts['bets'],'sourceAttempt':name,'sourceTailSha256':tail_hash,'realDataAcceptanceRequired':True}
 
 def inherit_pressure_heap_plan(progress,request,worker):
     # Reuse only the exact heap budget already proven by the currently deployed
@@ -1144,6 +1181,13 @@ def upgrade_partitioned_unlocked(request):
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',check],timeout=30)
             require(b'partitioned-offline-ok' in output,'UPGRADE_OFFLINE_TEST_FAILED')
             progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
+        if request.get('measuredSnapshotApplyHeapRepair'):
+            require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('snapshotMemoryRepair') is True,'MEASURED_HEAP_REQUEST_SCOPE_UNVERIFIED')
+            plan=measured_snapshot_apply_heap_plan(progress,backup,states('worker'))
+            if progress.get('heapBudgetPlan',{}).get('measuredSnapshotApply') is True:
+                require(progress['heapBudgetPlan']==plan,'MEASURED_HEAP_PLAN_CHANGED')
+            progress['heapBudgetPlan']=plan;progress['measuredSnapshotApplyHeapRepair']=True;save(progress)
+            emit(operation='cutover.aws',stage='partitioned_upgrade.heap_budget',status='candidate_for_real_copy_acceptance',**plan,workerStarted=False,posnetChanged=False)
         if request.get('preservedHeapBudgetRepair'):
             if request.get('pipelineRepair'):
                 require(request.get('resumeBackup') and request.get('snapshotMemoryRepair'),'HEAP_REPAIR_RESUME_SCOPE_UNVERIFIED')
