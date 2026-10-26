@@ -593,6 +593,15 @@ export async function session(
         recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady},
         message: "Recuperando snapshot; cuotas bloqueadas.",
       });
+      // Gate the expensive public projection before the first recovery save.
+      // In particular, a full durable inbox must be drained before the HTTP
+      // snapshot can start. Publishing the same multi-GB projection during
+      // each checkpoint in that drain added ~43s to every ~62s private save
+      // and held the publication gate while capacity was already exhausted.
+      // The private checkpoint still advances before inbox retirement; the
+      // fresh verified snapshot publishes the next public projection.
+      const snapshotPending=Date.now()>=nextDue["snapshot.events"]&&!!api.snapshotFull;
+      if(snapshotPending)state.set(lane,{fullSnapshot:{method:"disk_spool_two_pass",startedAt:new Date().toISOString(),stage:"waiting_capacity"}});
       await processing;
       requireOpen();
       await save();
@@ -626,7 +635,7 @@ export async function session(
               console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
             }
             const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
-            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();
+            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();
             const applySnapshotBatch=async(rows:import('./state.js').TradeEvent[],at:number)=>{
               await waitForInboxCapacity();
               const prefix=processing;const applied=(async()=>{for(let index=0;index<rows.length;index++)await snapshotApplyTurn(index===0?prefix:Promise.resolve(),state,()=>{requireOpen();state.apply(lane,[{...rows[index],marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{

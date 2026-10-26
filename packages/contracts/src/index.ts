@@ -381,7 +381,7 @@ export interface ConnectionState {
   ingressProgress?:{checkpointed?:number;processingBacklog?:number;oldestProcessingAgeMs?:number;received:number;acknowledged:number;processed:number;backlog:number;bytes:number;oldestAgeMs:number;receivedBytes:number;lastReceiveAt:string|null;lastAckAt:string|null;durableCommitMs:number;rssBytes:number;ingressMaxEventLoopDelayMs:number;metricWindowStartUTC:string;metricWindowEndUTC:string;headersByType:Record<string,number>};
   consumerProgress?:{acknowledgedMessages:number;lastAckAt?:string;registeredAt?:string;active?:boolean};
   persistenceProgress?:{writes:number;lastDurationMs:number;lastCompletedAt:string;captureDurationMs?:number;regularDurationMs?:number;publishDurationMs?:number;maxEventLoopDelayMs?:number;metricWindowStartUTC?:string;metricWindowEndUTC?:string;rssBytes?:number};
-  fullSnapshot?:{stage?:'waiting_http'|'download'|'validate'|'apply'|'complete';validatedRows?:number;appliedRows?:number;lastProgressAt?:string;method:'disk_spool_two_pass';startedAt:string;completedAt?:string;rows?:number;bytes?:number;ackedDuringRecovery?:number};
+  fullSnapshot?:{stage?:'waiting_capacity'|'waiting_http'|'download'|'validate'|'apply'|'complete';validatedRows?:number;appliedRows?:number;lastProgressAt?:string;method:'disk_spool_two_pass';startedAt:string;completedAt?:string;rows?:number;bytes?:number;ackedDuringRecovery?:number};
   distributionObservations?:DistributionObservation[];
   session?: {id:string;startedAt:string};
   sessionEnds?: {id:string;startedAt:string;endedAt:string;diagnostic:IntegrationDiagnostic}[];
