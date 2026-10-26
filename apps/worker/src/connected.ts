@@ -607,7 +607,7 @@ export async function session(
       // The private checkpoint still advances before inbox retirement; the
       // fresh verified snapshot publishes the next public projection.
       const snapshotPending=Date.now()>=nextDue["snapshot.events"]&&!!api.snapshotFull;
-      if(snapshotPending)state.set(lane,{fullSnapshot:{method:"disk_spool_two_pass",startedAt:new Date().toISOString(),stage:"waiting_capacity"}});
+      if(snapshotPending)state.set(lane,{fullSnapshot:{method:"disk_spool_two_pass",startedAt:new Date().toISOString()}});
       await processing;
       requireOpen();
       await save();
@@ -641,7 +641,7 @@ export async function session(
               console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
             }
             const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
-            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();
+            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();
             const applySnapshotBatch=async(rows:import('./state.js').TradeEvent[],at:number)=>{
               await waitForInboxCapacity();
               const prefix=processing;const applied=(async()=>{for(let index=0;index<rows.length;index++)await snapshotApplyTurn(index===0?prefix:Promise.resolve(),state,()=>{requireOpen();state.apply(lane,[{...rows[index],marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{

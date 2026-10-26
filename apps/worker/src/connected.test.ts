@@ -823,7 +823,7 @@ test('captured checkpoint retains market versions and settlements while live sta
 
 test('heartbeat cannot queue repeated full writes while snapshot waits for capacity; apply retains a bounded checkpoint interval',async()=>{
  const {heartbeatPublicationDue}=await import('./connected.js');const state=new TradeState();
- state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z',stage:'waiting_capacity'}});
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z'}});
  assert.equal(heartbeatPublicationDue(state,1000,61000),false);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z',stage:'apply'}});
  assert.equal(heartbeatPublicationDue(state,1000,6000),false);assert.equal(heartbeatPublicationDue(state,1000,61000),true);
