@@ -10,7 +10,7 @@ import unittest
 
 SOURCE=Path(__file__).with_name('upgrade-partitioned-worker.py')
 tree=ast.parse(SOURCE.read_text())
-selected={'partition_memory','partition_heap_mib','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime','existing_pipeline_heap_plan'}
+selected={'partition_memory','partition_heap_mib','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime','existing_pipeline_heap_plan','pre_stop_copy_files'}
 functions=[node for node in tree.body if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in selected]
 
 def require(ok,reason):
@@ -73,5 +73,29 @@ class MeasuredSnapshotRetryHeap(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'MEASURED_SNAPSHOT_RETRY_HOST_HEADROOM_INSUFFICIENT'):
             namespace['measured_snapshot_retry_heap_plan'](self.progress,self.backup,self.worker)
         namespace['snapshot_host_memory']=previous
+
+class PreStopCopySet(unittest.TestCase):
+    def setUp(self):self.tmp=tempfile.TemporaryDirectory();self.directory=Path(self.tmp.name)
+    def tearDown(self):self.tmp.cleanup()
+    def touch(self,name):
+        p=self.directory/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'preserved');return p
+    def test_capacity_estimate_matches_verified_checkpoint_and_inbox_copy_set(self):
+        expected={
+            'trade-feed.json','trade-feed.json.regular-checkpoint.json',
+            'trade-feed.json.prematch.inbox.sqlite','trade-feed.json.prematch.inbox.sqlite-wal','trade-feed.json.prematch.inbox.sqlite-shm',
+            'trade-feed.json.inplay.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite-wal','trade-feed.json.inplay.inbox.sqlite-shm',
+        }
+        for name in expected|{'trade-feed.json.regular-checkpoint.json.7.tmp','.full-snapshot-prematch/response.private.json'}:
+            self.touch(name)
+        paths=namespace['pre_stop_copy_files'](self.directory)
+        self.assertEqual({p.relative_to(self.directory).as_posix() for p in paths},expected)
+        self.assertTrue((self.directory/'trade-feed.json.regular-checkpoint.json.7.tmp').exists())
+        self.assertTrue((self.directory/'.full-snapshot-prematch/response.private.json').exists())
+    def test_rejects_missing_lane_or_symlink_in_preserved_files(self):
+        for name in ('trade-feed.json','trade-feed.json.regular-checkpoint.json','trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite'):
+            self.touch(name)
+        (self.directory/'trade-feed.json.inplay.inbox.sqlite').unlink()
+        with self.assertRaisesRegex(RuntimeError,'PRE_STOP_INBOX_COPY_SET_UNVERIFIED'):
+            namespace['pre_stop_copy_files'](self.directory)
 
 if __name__=='__main__':unittest.main()

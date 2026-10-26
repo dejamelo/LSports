@@ -738,15 +738,30 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     emit(operation='cutover.aws',stage='partitioned_upgrade.offline_disk',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
     require(short==0,'OFFLINE_REHEARSAL_DISK_EXPANSION_REQUIRED_NO_START')
 
+def pre_stop_copy_files(directory):
+    checkpoint=directory/'trade-feed.json';regular=directory/'trade-feed.json.regular-checkpoint.json'
+    inboxes=sorted(directory.glob('trade-feed.json.*.inbox.sqlite*'))
+    databases=[p for p in inboxes if re.fullmatch(r'trade-feed\.json\.(prematch|inplay)\.inbox\.sqlite',p.name)]
+    require(checkpoint.is_file() and not checkpoint.is_symlink() and regular.is_file() and not regular.is_symlink(),'PRE_STOP_CHECKPOINT_COPY_SET_UNVERIFIED')
+    require(len(databases)==2 and {p.name for p in databases}=={'trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite'},'PRE_STOP_INBOX_COPY_SET_UNVERIFIED')
+    paths=[checkpoint,regular,*inboxes]
+    require(all(p.is_file() and not p.is_symlink() for p in paths),'PRE_STOP_PERSISTED_COPY_FILE_UNVERIFIED')
+    return paths
+
 def storage_before_stop(backup,container):
     mounts=[m for m in container.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed']
     require(len(mounts)==1,'PRE_STOP_FEED_MOUNT_UNVERIFIED')
     directory=Path(mounts[0]['Source'])
-    files=[p for p in directory.rglob('*') if p.is_file() and not p.is_symlink() and (p.name.startswith('trade-feed.json') or p.name=='response.private.json')]
+    files=pre_stop_copy_files(directory)
     total=sum(p.stat().st_size for p in files)
-    # Backup + working copy + conservative 8x projection output + activation margin.
+    # Use the exact checkpoint + SQLite/WAL/SHM set copied and read back by
+    # pre_exit_disk_plan. Snapshot response spools and unfinished *.tmp files
+    # remain untouched in the active volume and are not duplicated by recovery.
     required=total*10+4*1024**3;free=shutil.disk_usage(backup).free
-    emit(operation='cutover.aws',stage='partitioned_upgrade.pre_stop_disk',status='verified' if free>=required else 'blocked',freeDiskBytes=free,requiredFreeBytes=required,missingBytes=max(0,required-free),inputBytes=total,budgetBasis='conservative pre-stop upper reserve; stopped-state plan remains authoritative',signalsSent=0,workerStarted=False,posnetChanged=False)
+    retained_spools=[p for p in directory.rglob('response.private.json') if p.is_file() and not p.is_symlink()]
+    unfinished=[p for p in directory.rglob('*.tmp') if p.is_file() and not p.is_symlink()]
+    retained_bytes=sum(p.stat().st_size for p in retained_spools+unfinished)
+    emit(operation='cutover.aws',stage='partitioned_upgrade.pre_stop_disk',status='verified' if free>=required else 'blocked',freeDiskBytes=free,requiredFreeBytes=required,missingBytes=max(0,required-free),inputBytes=total,retainedInPlaceBytes=retained_bytes,retainedInPlaceFiles=True,copySet=['trade-feed.json','trade-feed.json.regular-checkpoint.json','prematch+inplay inbox SQLite/WAL/SHM'],budgetBasis='10x exact persisted files copied and read back by the protected restore proof plus 4 GiB reserve; snapshot spools and unfinished temporary checkpoints remain in the active volume and are not duplicated',signalsSent=0,workerStarted=False,posnetChanged=False)
     require(free>=required,'PRE_STOP_DISK_HEADROOM_INSUFFICIENT_NO_STOP')
 
 def pre_exit_disk_plan(backup,total,hashes,proof,previous_original):
