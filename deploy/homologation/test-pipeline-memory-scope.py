@@ -45,6 +45,11 @@ class RetentionOrigin(unittest.TestCase):
   ns['verify_stopped_retention_origin'](old)
   for changed in ({'phase':'stop_requested'},{'pipelineRepair':False},{'memoryLimitBytes':4294967296},{'preExitProof':{'verified':False}},{'verifiedExitContainerId':'b'*64}):
    with self.assertRaises(RuntimeError):ns['verify_stopped_retention_origin']({**old,**changed})
+ def test_clean_graceful_exit_requires_final_persist_and_preserved_data_integrity(self):
+  old={'phase':'stopped','pipelineRepair':True,'memoryLimitBytes':6442450944,'oldContainer':'a'*64,'supplierStoppedBeforeConsumer':True,'shutdownObservation':{'samples':[{'running':False,'exitCode':0,'oomKilled':False,'signalsSent':0,'lastCompletedPersistence':{'operation':'file.persist'}}]},'dataBackupHashes':{str(i):'b'*64 for i in range(6)},'inboxIntegrity':[{'lane':'prematch','integrity':'ok'},{'lane':'inplay','integrity':'ok'}]}
+  ns['verify_stopped_retention_origin'](old)
+  for change in ({'supplierStoppedBeforeConsumer':False},{'shutdownObservation':{'samples':[{'running':False,'exitCode':137,'oomKilled':True,'signalsSent':1,'lastCompletedPersistence':{'operation':'file.persist'}}]}},{'dataBackupHashes':{}},{'inboxIntegrity':[{'lane':'prematch','integrity':'ok'}]}):
+   with self.assertRaises(RuntimeError):ns['verify_stopped_retention_origin']({**old,**change})
 class StopResumeBudget(unittest.TestCase):
  def test_only_actual_previous_progress_gets_bounded_completion_window(self):
   self.assertEqual(ns['resumed_stop_budget']({}),180)

@@ -920,7 +920,16 @@ def resolve_prepared_upgrade(request,candidate_files):
     return found,record,files
 
 def verify_stopped_retention_origin(old):
-    require(old.get('phase')=='stopped' and old.get('pipelineRepair') is True and partition_memory(old)==6442450944 and old.get('preExitProof',{}).get('verified') is True and old.get('verifiedExitContainerId')==old.get('oldContainer') and re.fullmatch('[0-9a-f]{64}',str(old.get('oldContainer'))),'RETENTION_REPAIR_PRIOR_RECOVERY_UNVERIFIED')
+    identity=old.get('phase')=='stopped' and old.get('pipelineRepair') is True and partition_memory(old)==6442450944 and re.fullmatch('[0-9a-f]{64}',str(old.get('oldContainer')))
+    interrupted=old.get('preExitProof',{}).get('verified') is True and old.get('verifiedExitContainerId')==old.get('oldContainer')
+    # A graceful shutdown after a completed persistence cycle is equally safe
+    # to derive from: the next phase still hashes the preserved copy and runs
+    # the full restore/readback rehearsal before any worker can start. Do not
+    # manufacture a pre-exit proof or replay termination for an exited worker.
+    samples=old.get('shutdownObservation',{}).get('samples',[])
+    final=samples[-1] if samples else {}
+    graceful=(old.get('supplierStoppedBeforeConsumer') is True and final.get('running') is False and final.get('exitCode')==0 and final.get('oomKilled') is False and final.get('signalsSent')==0 and isinstance(final.get('lastCompletedPersistence'),dict) and final['lastCompletedPersistence'].get('operation')=='file.persist' and len(old.get('dataBackupHashes',{}))>=6 and all(re.fullmatch('[0-9a-f]{64}',str(value)) for value in old.get('dataBackupHashes',{}).values()) and {row.get('lane') for row in old.get('inboxIntegrity',[]) if row.get('integrity')=='ok'}=={'prematch','inplay'})
+    require(identity and (interrupted or graceful),'RETENTION_REPAIR_PRIOR_RECOVERY_UNVERIFIED')
 
 def upgrade_partitioned_unlocked(request):
     stage='partitioned_upgrade.input';backup=None
