@@ -7,7 +7,7 @@ class Cgroup(unittest.TestCase):
    root=Path(tmp);cg=root/'cg';leaf=cg/'slice'/'worker';leaf.mkdir(parents=True);proc=root/'proc'/'123';proc.mkdir(parents=True);(proc/'cgroup').write_text('0::/slice/worker\n')
    for k,v in {'memory.current':str(4294967296-262144),'memory.max':'4294967296','memory.high':high,'memory.stat':'anon 1600000000\nfile 2600000000\ninactive_file 2200000000\nfile_dirty 300000000\nfile_writeback 100000000\n','memory.events':'oom 0\noom_kill 0\n','memory.pressure':'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n'}.items():(leaf/k).write_text(v)
    def mapped(value):
-    if value=='/sys/fs/cgroup':return cg
+    if value=='/sys/fs/cgroup':return cg.resolve()
     if value.startswith('/proc/'):return root/'proc'/value[len('/proc/'):]
     return Path(value)
    def require(condition,reason):

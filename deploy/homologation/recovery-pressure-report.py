@@ -31,8 +31,10 @@ def pressure_logs(cid,start):
             safe.update(operation=record['operation'])
             for key in ('lane','stage','status'):
                 if isinstance(record.get(key),str) and re.fullmatch('[a-z_]{1,60}',record[key]):safe[key]=record[key]
-            for key in ('bytes','validatedRows','appliedRows','rssBytes','heapUsedBytes','externalBytes','arrayBuffersBytes','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','waitedMs','maximumWaitMs','batchRows','rowInBatch','heapHeadroomBytes','memoryBudgetBytes','memoryHeadroomBytes'):
+            for key in ('bytes','validatedRows','appliedRows','httpStatus','responseHeaderStatusCode','rssBytes','heapUsedBytes','externalBytes','arrayBuffersBytes','writes','lastDurationMs','captureDurationMs','regularDurationMs','publishDurationMs','maxEventLoopDelayMs','waitedMs','maximumWaitMs','batchRows','rowInBatch','heapHeadroomBytes','memoryBudgetBytes','memoryHeadroomBytes'):
                 if type(record.get(key)) is int:safe[key]=record[key]
+            if type(record.get('emptyResponse')) is bool:safe['emptyResponse']=record['emptyResponse']
+            if type(record.get('publicProjectionDeferredForSnapshot')) is bool:safe['publicProjectionDeferredForSnapshot']=record['publicProjectionDeferredForSnapshot']
             if record['operation']=='snapshot.events':safe['diagnostic']=safe_feed_diagnostic(record)
             if record['operation']=='feed.coverage':
                 safe['lanes']={}

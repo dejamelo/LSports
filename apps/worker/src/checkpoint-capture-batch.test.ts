@@ -1,12 +1,22 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {setTimeout as sleep} from 'node:timers/promises';
-import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
+import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,deferPublicProjectionDuringSnapshot,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
 const pkg={lane:'prematch',packageId:4511,username:'test',password:'test',hostname:'unused',queue:'unused',vhost:'unused',tls:false,port:5672} as any;
 test('offline batch policy matches the deployed PreMatch bounds',()=>{assert.equal(PREMATCH_CHECKPOINT_BATCH_THRESHOLD,32768);assert.equal(PREMATCH_CHECKPOINT_BATCH_FLUSH_MS,120000);});
 async function until(check:()=>boolean){const end=Date.now()+15000;while(!check()){if(Date.now()>end)throw Error('isolated test deadline');await sleep(5);}}
 test('private checkpoint completes before the full public projection is materialized',async()=>{
  const order:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:start');await sleep(10);order.push('checkpoint:durable');return 22;},()=>{assert.equal(order.at(-1),'checkpoint:durable');order.push('projection:materialized');return {events:1};});
  assert.deepEqual(order,['checkpoint:start','checkpoint:durable','projection:materialized']);assert.equal(result.checkpointResult,22);assert.deepEqual(result.projection,{events:1});
+});
+test('snapshot application defers full public projection until the verified baseline is complete',()=>{
+ const state=new TradeState();assert.equal(deferPublicProjectionDuringSnapshot(state),false);
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),false);
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'apply',bytes:10,validatedRows:1,appliedRows:1,lastProgressAt:new Date().toISOString()}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),true);
+ state.set('prematch',{fullSnapshot:{...state.connections.prematch.fullSnapshot!,stage:'complete'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
+ state.set('prematch',{fullSnapshot:{...state.connections.prematch.fullSnapshot!,completedAt:new Date().toISOString()}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),false);
 });
 for(const fail of [false,true])test(`queued checkpoint reserves the complete applied prefix before next capture; ${fail?'failed persistence retains all rows':'commit retires only durable captured rows'}`,{timeout:25000},async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-capture-batch-')),path=join(dir,'feed.json'),dbPath=path+'.prematch.inbox.sqlite',state=new TradeState(),abort=new AbortController();

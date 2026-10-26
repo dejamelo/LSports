@@ -118,12 +118,12 @@ export function convertSnapshotRow(raw:unknown):TradeEvent{
  const row=TransformerUtil.transform(normalizeSdkTimestamps(raw),GetEventsResultElement) as TradeEvent;attachTimestampPrecision(raw,row);
  if(row.fixtureId!==r.FixtureId||!row.fixture||row.markets?.some(m=>!Number.isSafeInteger(m.id)||!m.id||m.bets?.some(b=>b.id===undefined||b.id===null||String(b.id).trim()==='')))return fail('sdk_row_mismatch');return row;
 }
-export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string};
+export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string;httpStatus?:number;responseHeaderStatusCode?:number;emptyResponse?:boolean};
 export async function fullSnapshot(options:{lane?:'prematch'|'inplay';timestamp?:number;url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;applyBatch?:(rows:TradeEvent[],started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
  const lane=options.lane??'prematch';const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};if(!Number.isSafeInteger(limits.memoryWaitMs)||limits.memoryWaitMs<0||limits.memoryWaitMs>60000||!Number.isSafeInteger(limits.memoryRetryMs)||limits.memoryRetryMs<1||limits.memoryRetryMs>1000)throw Error('INVALID_SNAPSHOT_MEMORY_WAIT');fullSnapshotMemory(lane);options.assertOpen();
  const space=await statfs(options.directory);if(Number(space.bavail)*Number(space.bsize)<limits.responseBytes+512*MiB)fail('disk_headroom');
  const dir=await mkdtemp(join(options.directory,'.full-snapshot-'));const file=join(dir,'response.private.json');
- let bytes=0,timedOut=false,httpStatus:number|undefined,validatedRows=0,appliedRows=0;let lastStage:FullSnapshotProgress['stage']='waiting_http';const progress=(stage:FullSnapshotProgress['stage'])=>{lastStage=stage;options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString()});};const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
+ let bytes=0,timedOut=false,httpStatus:number|undefined,responseHeaderStatusCode:number|undefined,emptyResponse:boolean|undefined,validatedRows=0,appliedRows=0;let lastStage:FullSnapshotProgress['stage']='waiting_http';const progress=(stage:FullSnapshotProgress['stage'])=>{lastStage=stage;options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString(),...(httpStatus!==undefined?{httpStatus}:{}),...(responseHeaderStatusCode!==undefined?{responseHeaderStatusCode}:{}),...(emptyResponse!==undefined?{emptyResponse}:{})});};const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
  const timer=setTimeout(()=>{timedOut=true;abort.abort();},limits.totalMs);timer.unref();
  let pressureWaitMs=0,lastMemoryLog=-Infinity;
  // A complete HTTP download is not an invalid document when live memory dips.
@@ -164,7 +164,8 @@ export async function fullSnapshot(options:{lane?:'prematch'|'inplay';timestamp?
   const downloaded=await open(file,'r');try{await downloaded.sync();}finally{await downloaded.close();}
   progress('validate');await memoryReady();
   const ids=new Set<number>();let rows=0;
-  await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){await memoryReady();await yieldTurn();}},limits.itemBytes);
+  const responseHeader=await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){await memoryReady();await yieldTurn();}},limits.itemBytes);
+  if(responseHeader&&typeof responseHeader==='object'&&!Array.isArray(responseHeader)){const code=(responseHeader as Record<string,unknown>).HttpStatusCode;if(Number.isSafeInteger(code)&&Number(code)>=100&&Number(code)<=599)responseHeaderStatusCode=Number(code);}emptyResponse=rows===0;
   // The file stays on disk: never reserve four copies of the entire HTTP body.
   // Conversion is item-bounded; re-check live heap/available headroom before EACH row.
   await memoryReady();

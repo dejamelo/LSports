@@ -8,6 +8,11 @@ test('full snapshot download window covers the observed rate at the unchanged by
  assert.equal(FULL_SNAPSHOT_LIMITS.responseBytes,2*1024*1024*1024);assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);
  assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,12*60*1000);assert.ok(FULL_SNAPSHOT_LIMITS.totalMs/1000>secondsAtObservedRate);
 });
+test('sanitized progress distinguishes an HTTP 200 empty snapshot without retaining response content',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'-adl-empty-snapshot-')),server=createServer((_req,res)=>res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}))),progress:any[]=[];
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{const result=await fullSnapshot({lane:'inplay',url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4510,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},progress:p=>progress.push(p),async apply(){assert.fail('empty response cannot apply a row');}});assert.equal(result.rows,0);const complete=progress.at(-1);assert.equal(complete.stage,'complete');assert.equal(complete.httpStatus,200);assert.equal(complete.responseHeaderStatusCode,200);assert.equal(complete.emptyResponse,true);assert.equal(JSON.stringify(complete).includes('isolated'),false);}finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
+});
 test('active snapshot response can outlast a short total window without being classified as idle',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-full-total-window-'));let applied=0;const available=process.availableMemory;process.availableMemory=()=>1024**3;
  const server=createServer((_req,res)=>{res.write('{"Header":{"HttpStatusCode":200},"Body":[');setTimeout(()=>res.end(JSON.stringify(row(1))+']}'),120);});

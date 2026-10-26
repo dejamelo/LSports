@@ -55,6 +55,18 @@ export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable
 export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkpoint:()=>Promise<TCheckpoint>,project:()=>TProjection){
  const checkpointResult=await checkpoint();return {checkpointResult,projection:project()};
 }
+// Once a blocked baseline is published, keep it stable throughout snapshot
+// download, validation and application. Rewriting its multi-gigabyte
+// projection after every private inbox checkpoint needlessly holds
+// publicationDone and starves snapshot mutations. The atomic regular sidecar
+// still advances before ACK; the verified snapshot triggers the next publish.
+export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'connections'>){
+ return Object.values(state.connections).some(c=>{
+  const snapshot=c.fullSnapshot;if(!snapshot||snapshot.completedAt)return false;
+  const startedAt=Date.parse(snapshot.startedAt),failedAt=Date.parse(c.lastSnapshotErrorAt||'');
+  return snapshot.stage!==undefined&&!(Number.isFinite(startedAt)&&Number.isFinite(failedAt)&&failedAt>=startedAt);
+ });
+}
 export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=32768;
 export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=120000;
 // Preserve the same processing/FIFO barriers; expose which one is actually awaited.
@@ -134,6 +146,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         memoryStage('capture');
         const started=performance.now();const {regular,...saved}=streamCheckpoint(stable);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();memoryStage('regular_checkpoint');
+        const deferProjection=deferPublicProjectionDuringSnapshot(stable);
         const durable=await checkpointBeforeProjection(
           ()=>persistRegularCheckpoint(path,stable,phase=>state.setPublicationPhase(phase)),
           ()=>{const feed=stable.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
@@ -142,10 +155,12 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         );
         const checkpointIo=durable.checkpointResult,{feed,capturedBlocks}=durable.projection;
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
-        const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
-        memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
+        if(!deferProjection){
+          const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
+          memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
+        }else memoryStage('snapshot_projection_deferred');
         lastCompletedPublication=Date.now();
-        const metric={publicationId,checkpointIo,writes:++writes,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
+        const metric={publicationId,checkpointIo,writes:++writes,publicProjectionDeferredForSnapshot:deferProjection,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:deferProjection?0:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
     }),publicationId));
@@ -601,7 +616,7 @@ export async function session(
                 if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,atUTC:new Date().toISOString()}));
               });})();processing=applied;await applied;
             };
-            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply')snapshotApplicationActive=true;state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,...progress}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
+            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply')snapshotApplicationActive=true;state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
           }else if(lane==='prematch'&&api.snapshotPartitioned){
