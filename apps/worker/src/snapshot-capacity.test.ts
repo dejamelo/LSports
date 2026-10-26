@@ -196,18 +196,18 @@ test('snapshot memory wait times out without reducing the protected reserve',asy
  assert.equal(result.timedOut,true);assert.equal(result.waitedMs,500);assert.equal(samples,3);assert.equal(result.capacity.allowed,false);assert.equal(result.capacity.budgetBytes,budget);assert.equal(result.capacity.headroomBytes,budget-1);
 });
 
-test('actual HTTP adapter waits for available container memory and issues no early snapshot request',async()=>{
+test('actual HTTP adapter waits for available container memory and rejects an empty baseline',async()=>{
  let calls=0,memoryCalls=0;const original=process.availableMemory;
  const server=createServer((_req,res)=>{calls++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}));});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
  try{
   const address=server.address();assert(address&&typeof address!=='string');const url=`http://127.0.0.1:${address.port}`;
   const api=clients({lane:'inplay',packageId:4510,username:'isolated',password:'',hostname:'unused',vhost:'StmInPlay',queue:'_4510_',port:5672,tls:false},{snapshotUrl:url,customersUrl:url},{run:async(_name,action)=>action()});
   process.availableMemory=()=>++memoryCalls<=3?0:1800*MiB;
-  assert.deepEqual(await api.snapshot(),[]);assert.equal(calls,1);assert(memoryCalls>=4);assert.equal(api.snapshotAudit?.()?.transport?.responseLimitBytes,128*MiB);
+  await assert.rejects(api.snapshot(),e=>(e as OperationError).diagnostic.reason==='invalid_snapshot');assert.equal(calls,1);assert(memoryCalls>=4);
  }finally{process.availableMemory=original;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
 });
 
-test('official clients use lane context and wait under explicit per-lane caps',async()=>{
+test('official clients apply per-lane caps and reject empty snapshots after the capacity gate',async()=>{
  const keys=['LSPORTS_SNAPSHOT_MAX_RESPONSE_MB','LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB','LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB'];
  const saved=keys.map(k=>process.env[k]);const original=process.availableMemory;let calls=0;
  const server=createServer(async(req,res)=>{for await(const _ of req){}calls++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}));});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
@@ -215,8 +215,8 @@ test('official clients use lane context and wait under explicit per-lane caps',a
   process.env.LSPORTS_SNAPSHOT_MAX_RESPONSE_MB='256';process.env.LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB='255';delete process.env.LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB;let memoryCalls=0;process.availableMemory=()=>++memoryCalls<=5?1800*MiB:2400*MiB;
   const address=server.address();assert(address&&typeof address!=='string');const url=`http://127.0.0.1:${address.port}`;
   const make=(lane:'prematch'|'inplay')=>clients({lane,packageId:lane==='prematch'?4511:4510,username:'isolated',password:'',hostname:'unused',vhost:'unused',queue:'unused',port:5672,tls:false},{snapshotUrl:url,customersUrl:url},{run:async(_name,action)=>action()});
-  const inplay=make('inplay');assert.deepEqual(await inplay.snapshot(),[]);assert.equal(inplay.snapshotAudit?.()?.transport?.responseLimitBytes,128*MiB);
-  const prematch=make('prematch');assert.deepEqual(await prematch.snapshot(),[]);assert.equal(prematch.snapshotAudit?.()?.transport?.responseLimitBytes,255*MiB);
+  const inplay=make('inplay');await assert.rejects(inplay.snapshot(),e=>(e as OperationError).diagnostic.reason==='invalid_snapshot'&&(e as OperationError).diagnostic.httpStatus===200);assert(memoryCalls<=2);
+  const prematch=make('prematch');await assert.rejects(prematch.snapshot(),e=>(e as OperationError).diagnostic.reason==='invalid_snapshot'&&(e as OperationError).diagnostic.httpStatus===200);assert(memoryCalls>=6);
   assert.equal(calls,2);assert(memoryCalls>=6);
  }finally{process.availableMemory=original;keys.forEach((k,i)=>{if(saved[i]===undefined)delete process.env[k];else process.env[k]=saved[i];});server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));}
 });
