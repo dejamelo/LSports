@@ -30,6 +30,9 @@ class MeasuredSnapshotHeap(unittest.TestCase):
   backup,progress,workers=self.exercise();plan=NS['measured_snapshot_apply_heap_plan'](progress,backup,workers)
   resumed={**progress,'heapBudgetPlan':plan}
   self.assertEqual(NS['measured_snapshot_apply_heap_plan'](resumed,backup,workers),plan)
+  readback=backup/'oom-restore-attempt-aaaaaaaaaaaaaaaa.private.log';readback.write_text('{"operation":"offline.projection_readback","verified":true}\n');readback.chmod(0o600)
+  pointer=backup/'oom-restore.latest.json';pointer.write_text(json.dumps({'name':readback.name}));pointer.chmod(0o600)
+  self.assertEqual(NS['measured_snapshot_apply_heap_plan'](resumed,backup,workers),plan)
   with self.assertRaises(RuntimeError):NS['measured_snapshot_apply_heap_plan']({**resumed,'heapBudgetPlan':{**plan,'oldSpaceMiB':4352}},backup,workers)
 
  def test_does_not_accept_physical_memory_or_non_snapshot_failure_as_evidence(self):

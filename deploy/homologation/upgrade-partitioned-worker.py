@@ -156,14 +156,23 @@ def measured_snapshot_apply_heap_plan(progress,backup,workers):
     require(str(backup)==progress.get('backup') and not backup.is_symlink() and backup.is_dir() and backup.stat().st_mode&0o077==0,'MEASURED_HEAP_BACKUP_UNVERIFIED')
     require(len(workers)==1 and workers[0].get('id')==progress.get('oldContainer') and not workers[0].get('running') and not workers[0].get('oomKilled') and workers[0].get('exitCode')==0,'MEASURED_HEAP_CLEAN_STOP_UNVERIFIED')
     old_plan=progress.get('heapBudgetPlan') or {}
-    pointer=backup/'oom-restore.latest.json';require(pointer.is_file() and not pointer.is_symlink() and pointer.stat().st_mode&0o077==0,'MEASURED_HEAP_ATTEMPT_POINTER_UNVERIFIED')
-    name=json.loads(pointer.read_bytes()).get('name');require(isinstance(name,str) and re.fullmatch(r'oom-restore-attempt-[0-9a-f]{16,32}\.private\.log',name),'MEASURED_HEAP_ATTEMPT_NAME_UNVERIFIED')
+    if old_plan.get('measuredSnapshotApply') is True:
+        # The latest-log pointer is intentionally advanced to the independent
+        # readback log after a successful rehearsal. Resume from the failure
+        # artifact named by the already-saved, hash-pinned plan instead.
+        name=old_plan.get('sourceAttempt')
+    else:
+        pointer=backup/'oom-restore.latest.json';require(pointer.is_file() and not pointer.is_symlink() and pointer.stat().st_mode&0o077==0,'MEASURED_HEAP_ATTEMPT_POINTER_UNVERIFIED')
+        name=json.loads(pointer.read_bytes()).get('name')
+    require(isinstance(name,str) and re.fullmatch(r'oom-restore-attempt-[0-9a-f]{16,32}\.private\.log',name),'MEASURED_HEAP_ATTEMPT_NAME_UNVERIFIED')
     path=backup/name;require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<=8*1024**2,'MEASURED_HEAP_ATTEMPT_LOG_UNVERIFIED')
     raw=read_tail(path);records=[]
     for line in raw.decode(errors='replace').splitlines():
         try:r=json.loads(line)
         except ValueError:continue
         if isinstance(r,dict) and r.get('operation') in ('offline.memory','offline.memory_budget'):records.append(r)
+    if old_plan.get('measuredSnapshotApply') is True:
+        require(hashlib.sha256(raw).hexdigest()==old_plan.get('sourceTailSha256'),'MEASURED_HEAP_SOURCE_LOG_CHANGED')
     # The runtime emits the admission decision as snapshot_guard, separately
     # from row-level snapshot.apply progress. Match that exact guard stage so
     # the measured recovery plan is anchored to the preserved failed attempt.
