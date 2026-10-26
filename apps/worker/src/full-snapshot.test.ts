@@ -1,6 +1,7 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,readdir,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {createServer} from 'node:http';import {once} from 'node:events';
+import {OperationError} from './diagnostics.js';
 import {walkSnapshot,convertSnapshotRow,fullSnapshot,fullSnapshotMemory,FULL_SNAPSHOT_LIMITS} from './full-snapshot.js';
 const row=(FixtureId:number)=>({FixtureId,Fixture:{Status:1,LastUpdate:'2026-10-19T14:00:00.0173136'},Markets:[]});
 test('full snapshot deadline covers the measured download and both bounded passes',()=>{
@@ -10,10 +11,12 @@ test('full snapshot deadline covers the measured download and both bounded passe
  assert.equal(FULL_SNAPSHOT_LIMITS.responseBytes,2*1024*1024*1024);assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);
  assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,30*60*1000);assert.ok(FULL_SNAPSHOT_LIMITS.totalMs/1000>measuredSeconds);
 });
-test('sanitized progress distinguishes an HTTP 200 empty snapshot without retaining response content',async()=>{
- const dir=await mkdtemp(join(tmpdir(),'-adl-empty-snapshot-')),server=createServer((_req,res)=>res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}))),progress:any[]=[];
- await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
- try{const result=await fullSnapshot({lane:'inplay',url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4510,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},progress:p=>progress.push(p),async apply(){assert.fail('empty response cannot apply a row');}});assert.equal(result.rows,0);const complete=progress.at(-1);assert.equal(complete.stage,'complete');assert.equal(complete.httpStatus,200);assert.equal(complete.responseHeaderStatusCode,200);assert.equal(complete.emptyResponse,true);assert.equal(JSON.stringify(complete).includes('isolated'),false);}finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
+test('streamed HTTP 200 empty snapshots reject for both lanes before marking a baseline ready',async()=>{
+ for(const lane of ['prematch','inplay'] as const){
+  const dir=await mkdtemp(join(tmpdir(),'-adl-empty-snapshot-')),server=createServer((_req,res)=>res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}))),progress:any[]=[];
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{await assert.rejects(fullSnapshot({lane,url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4510,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},progress:p=>progress.push(p),async apply(){assert.fail('empty response cannot apply a row');}}),(error:any)=>error instanceof OperationError&&error.diagnostic.reason==='invalid_snapshot'&&error.diagnostic.snapshotValidation?.code==='full_document_invalid'&&error.diagnostic.snapshotValidation?.sdkCount===0);const final=progress.at(-1);assert.equal(final.stage,'validate');assert.equal(final.httpStatus,200);assert.equal(final.responseHeaderStatusCode,200);assert.equal(final.emptyResponse,true);assert.equal(JSON.stringify(final).includes('isolated'),false);}finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
+ }
 });
 test('active snapshot response can outlast a short total window without being classified as idle',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-full-total-window-'));let applied=0;const available=process.availableMemory;process.availableMemory=()=>1024**3;

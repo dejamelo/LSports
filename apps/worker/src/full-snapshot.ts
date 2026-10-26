@@ -172,6 +172,9 @@ export async function fullSnapshot(options:{lane?:'prematch'|'inplay';timestamp?
   const ids=new Set<number>();let rows=0;
   const responseHeader=await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){await memoryReady();await yieldTurn();}},limits.itemBytes);
   if(responseHeader&&typeof responseHeader==='object'&&!Array.isArray(responseHeader)){const code=(responseHeader as Record<string,unknown>).HttpStatusCode;if(Number.isSafeInteger(code)&&Number(code)>=100&&Number(code)<=599)responseHeaderStatusCode=Number(code);}emptyResponse=rows===0;
+  // HTTP 200 with a valid envelope but no rows is not a recoverable baseline.
+  // Reject the streamed path too, before applying or marking either lane ready.
+  if(emptyResponse)fail('empty_snapshot',{rawCount:0,sdkCount:0});
   // The file stays on disk: never reserve four copies of the entire HTTP body.
   // Conversion is item-bounded; re-check live heap/available headroom before EACH row.
   await memoryReady();
