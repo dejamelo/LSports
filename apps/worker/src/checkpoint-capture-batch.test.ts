@@ -8,6 +8,10 @@ test('private checkpoint completes before the full public projection is material
  const order:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:start');await sleep(10);order.push('checkpoint:durable');return 22;},()=>{assert.equal(order.at(-1),'checkpoint:durable');order.push('projection:materialized');return {events:1};});
  assert.deepEqual(order,['checkpoint:start','checkpoint:durable','projection:materialized']);assert.equal(result.checkpointResult,22);assert.deepEqual(result.projection,{events:1});
 });
+test('deferred public projection skips materialization after the private checkpoint',async()=>{
+ const order:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:durable');return 23;},()=>{order.push('projection:materialized');return {events:1};},true);
+ assert.deepEqual(order,['checkpoint:durable']);assert.equal(result.checkpointResult,23);assert.equal('projection'in result,false);
+});
 test('snapshot application defers full public projection until the verified baseline is complete',()=>{
  const state=new TradeState();assert.equal(deferPublicProjectionDuringSnapshot(state),false);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);

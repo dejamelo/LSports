@@ -52,8 +52,10 @@ export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable
 }
 // Keep the materialized public event graph out of memory during the private
 // checkpoint write. The same immutable captured rows feed both durable files.
-export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkpoint:()=>Promise<TCheckpoint>,project:()=>TProjection){
- const checkpointResult=await checkpoint();return {checkpointResult,projection:project()};
+export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkpoint:()=>Promise<TCheckpoint>,project:()=>TProjection,deferProjection=false){
+ const checkpointResult=await checkpoint();
+ if(deferProjection)return{checkpointResult};
+ return {checkpointResult,projection:project()};
 }
 // Once a blocked baseline is published, keep it stable throughout snapshot
 // download, validation and application. Rewriting its multi-gigabyte
@@ -155,10 +157,12 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           ()=>{const feed=stable.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
             tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
             return {feed,capturedBlocks};},
+          deferProjection,
         );
-        const checkpointIo=durable.checkpointResult,{feed,capturedBlocks}=durable.projection;
+        const checkpointIo=durable.checkpointResult;
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
         if(!deferProjection){
+          const {feed,capturedBlocks}=durable.projection!;
           const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
           memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
         }else memoryStage('snapshot_projection_deferred');
