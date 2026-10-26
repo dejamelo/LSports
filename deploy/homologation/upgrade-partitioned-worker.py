@@ -144,6 +144,18 @@ def existing_pipeline_heap_plan(worker):
         measured=json.loads(run(['docker','run','--rm','--network','none','--memory','6g','--read-only','-e','NODE_OPTIONS='+options,'--entrypoint','node',image,'-e',probe]))
         require(4096*1024**2<=measured.get('heapLimitBytes',0)<5*1024**3,'PIPELINE_MEASURED_HEAP_HEADROOM_UNVERIFIED')
         return copy.deepcopy(old['heapBudgetPlan'])
+    if options=='--max-old-space-size=4608' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944:
+        image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
+        path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
+        require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'PIPELINE_HEAP_RECEIPT_UNVERIFIED')
+        old=json.loads(path.read_bytes());require(old.get('image')==image and isinstance(old.get('digest'),str) and old['digest'][:24]==image.split(':')[1] and old.get('oomRestoreVerified') is True and old.get('measuredSnapshotRetryHeapRepair') is True,'PIPELINE_MEASURED_RETRY_RECEIPT_UNVERIFIED')
+        require(partition_heap_mib(old)==4608,'PIPELINE_MEASURED_RETRY_HEAP_PLAN_UNVERIFIED')
+        found=json.loads(run(['docker','image','inspect',image]))[0]
+        require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
+        probe="const s=require('node:v8').getHeapStatistics();console.log(JSON.stringify({heapLimitBytes:s.heap_size_limit}))"
+        measured=json.loads(run(['docker','run','--rm','--network','none','--memory','6g','--read-only','-e','NODE_OPTIONS='+options,'--entrypoint','node',image,'-e',probe]))
+        require(type(measured.get('heapLimitBytes')) is int and 4608*1024**2<=measured['heapLimitBytes']<=6442450944-512*1024**2,'PIPELINE_MEASURED_RETRY_HEADROOM_UNVERIFIED')
+        return copy.deepcopy(old['heapBudgetPlan'])
     require(options=='--max-old-space-size=3584' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944,'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
     image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
     path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')

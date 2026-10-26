@@ -1,4 +1,5 @@
 import ast
+import copy
 import hashlib
 import json
 import os
@@ -9,22 +10,23 @@ import unittest
 
 SOURCE=Path(__file__).with_name('upgrade-partitioned-worker.py')
 tree=ast.parse(SOURCE.read_text())
-selected={'partition_memory','partition_heap_mib','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime'}
+selected={'partition_memory','partition_heap_mib','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime','existing_pipeline_heap_plan'}
 functions=[node for node in tree.body if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in selected]
 
 def require(ok,reason):
     if not ok:raise RuntimeError(reason)
 
 def partition_memory(progress):
-    require(progress.get('memoryLimitBytes')==6442450944,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
-    return progress['memoryLimitBytes']
+    value=progress.get('memoryLimitBytes',4294967296)
+    require(value==4294967296 or value==6442450944 and (progress.get('pipelineRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('snapshotPressureRepair') is True and progress.get('livePersistenceRepair') is True),'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
+    return value
 
 def read_tail(path):return path.read_bytes()
 def rehearse(_raw):return {'fatalSignals':['javascript_heap_out_of_memory'],'stageAtFailure':'snapshot.apply','effectiveHeapLimitBytes':4496293888,'maxSampledHeapBytes':4122212936,'maxObservedRSSBytes':4511752192}
 def summary(_backup,_name):return {'signals':['node_heap_exhausted']}
 def host_memory():return 12*1024**3
 
-namespace={'require':require,'partition_memory':partition_memory,'read_tail':read_tail,'rehearsal_heap_evidence':rehearse,'oom_restore_log_summary':summary,'snapshot_host_memory':host_memory,'json':json,'os':os,'re':re,'hashlib':hashlib}
+namespace={'require':require,'partition_memory':partition_memory,'read_tail':read_tail,'rehearsal_heap_evidence':rehearse,'oom_restore_log_summary':summary,'snapshot_host_memory':host_memory,'json':json,'os':os,'re':re,'hashlib':hashlib,'copy':copy,'snapshot_memory_bytes':lambda value:value}
 exec(compile(ast.Module(body=functions,type_ignores=[]),str(SOURCE),'exec'),namespace)
 
 class MeasuredSnapshotRetryHeap(unittest.TestCase):
@@ -47,6 +49,21 @@ class MeasuredSnapshotRetryHeap(unittest.TestCase):
         inspected={'Image':image_id,'HostConfig':{'Memory':6442450944},'Config':{'Env':['NODE_OPTIONS=--max-old-space-size=4608','LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true','LSPORTS_INPLAY_STREAMED_SNAPSHOT=true']}}
         result=namespace['verify_budgeted_worker_runtime']({**self.progress,'heapBudgetPlan':plan},'worker',inspected,image_id)
         self.assertEqual(result['effectiveHeapLimitProbeBytes'],5300000000)
+    def test_existing_measured_4608_heap_is_reused_only_with_pinned_receipt(self):
+        plan=namespace['measured_snapshot_retry_heap_plan'](self.progress,self.backup,self.worker)
+        image='adl-worker-partitioned:'+'b'*24;digest='b'*24+'c'*40
+        receipt={'image':image,'digest':digest,'oomRestoreVerified':True,'memoryLimitBytes':6442450944,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True,'measuredSnapshotRetryHeapRepair':True,'heapBudgetPlan':plan}
+        path=self.backup/('partitioned-upgrade-'+('b'*24)+'.json');path.write_text(json.dumps(receipt));path.chmod(0o600)
+        namespace['SECURE']=self.backup
+        def run(args,**_kwargs):
+            if args[1]=='image':return json.dumps([{'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}}]).encode()
+            return json.dumps({'heapLimitBytes':5300000000}).encode()
+        namespace['run']=run
+        worker={'environment':{'NODE_OPTIONS':'--max-old-space-size=4608'},'mem_limit':6442450944,'image':image}
+        self.assertEqual(namespace['existing_pipeline_heap_plan'](worker),plan)
+        worker['environment']['NODE_OPTIONS']='--max-old-space-size=5120'
+        with self.assertRaisesRegex(RuntimeError,'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT'):
+            namespace['existing_pipeline_heap_plan'](worker)
     def test_rejects_unverified_or_insufficient_host_memory(self):
         previous=namespace['rehearsal_heap_evidence'];namespace['rehearsal_heap_evidence']=lambda _raw:{'fatalSignals':[],'stageAtFailure':'snapshot.apply','effectiveHeapLimitBytes':4496293888,'maxSampledHeapBytes':4122212936,'maxObservedRSSBytes':4511752192}
         with self.assertRaisesRegex(RuntimeError,'MEASURED_SNAPSHOT_RETRY_HEAP_FAILURE_UNVERIFIED'):
