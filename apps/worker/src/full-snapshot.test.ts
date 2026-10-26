@@ -3,10 +3,12 @@ import {mkdtemp,writeFile,readdir,rm} from 'node:fs/promises';import {tmpdir} fr
 import {createServer} from 'node:http';import {once} from 'node:events';
 import {walkSnapshot,convertSnapshotRow,fullSnapshot,fullSnapshotMemory,FULL_SNAPSHOT_LIMITS} from './full-snapshot.js';
 const row=(FixtureId:number)=>({FixtureId,Fixture:{Status:1,LastUpdate:'2026-10-19T14:00:00.0173136'},Markets:[]});
-test('full snapshot download window covers the observed rate at the unchanged byte cap',()=>{
- const secondsAtObservedRate=FULL_SNAPSHOT_LIMITS.responseBytes/(3.5*1024*1024);
+test('full snapshot deadline covers the measured download and both bounded passes',()=>{
+ const actualBytes=822_816_714,measuredDownloadBytesPerSecond=actualBytes/156;
+ const fixtureRows=40_864,validationRowsPerSecond=61,applyRowsPerSecond=56;
+ const measuredSeconds=actualBytes/measuredDownloadBytesPerSecond+fixtureRows/validationRowsPerSecond+fixtureRows/applyRowsPerSecond;
  assert.equal(FULL_SNAPSHOT_LIMITS.responseBytes,2*1024*1024*1024);assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);
- assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,12*60*1000);assert.ok(FULL_SNAPSHOT_LIMITS.totalMs/1000>secondsAtObservedRate);
+ assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,30*60*1000);assert.ok(FULL_SNAPSHOT_LIMITS.totalMs/1000>measuredSeconds);
 });
 test('sanitized progress distinguishes an HTTP 200 empty snapshot without retaining response content',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'-adl-empty-snapshot-')),server=createServer((_req,res)=>res.end(JSON.stringify({Header:{HttpStatusCode:200},Body:[]}))),progress:any[]=[];
@@ -188,7 +190,7 @@ test('persistent pressure and disconnection cannot turn retained spool into a pa
 });
 
 test('large snapshot tolerates bounded stream pauses while the independent total deadline remains finite',async()=>{
- assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,12*60*1000);
+ assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,30*60*1000);
  const previous=process.availableMemory;process.availableMemory=()=>1024**3;
  const payload=JSON.stringify({Header:{HttpStatusCode:200},Body:[row(901)]});
  try{for(const pauseMs of [30,100]){

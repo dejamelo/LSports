@@ -20,8 +20,14 @@ import type {TradeEvent} from './state.js';
 const MiB=1024*1024;
 // At the observed AWS rate (~3 MiB/s), a 2-GiB response takes about 11 minutes.
 // Allow bounded stream pauses without removing either the inactivity timeout
-// or the independent 12-minute total deadline.
-export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:60000,totalMs:12*60*1000,memoryWaitMs:60000,memoryRetryMs:250};
+// or the independent total deadline.
+// This operation downloads a private spool, validates every fixture in one pass,
+// then rereads and applies it in bounded batches. At the measured 50-65 fixtures/s
+// for the 40k-row recovery, 12 minutes expires before the two local passes finish.
+// Keep the idle timeout and all heap gates unchanged; the measured 823-MB,
+// 40.8k-row recovery needs about 26 minutes across download, validation and
+// application at measured rates. The 30-minute deadline leaves bounded slack.
+export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fixtures:50000,idleMs:60000,totalMs:30*60*1000,memoryWaitMs:60000,memoryRetryMs:250};
 const fail=(reason:string,shape:Partial<NonNullable<import('@lsports/contracts').IntegrationDiagnostic['snapshotValidation']>>={}):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven',...shape},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
 export function fullSnapshotMemory(lane:'prematch'|'inplay'='prematch'){const c=snapshotCapacity({...process.env,[lane==='inplay'?'LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB']:'32'},undefined,lane);if(!c.allowed){console.info(JSON.stringify({operation:'offline.memory_budget',lane,stage:'snapshot_guard',budgetBytes:c.budgetBytes,headroomBytes:c.headroomBytes,allowed:false,memory:c.memory}));throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,snapshotMemory:c.memory,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}}
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.
