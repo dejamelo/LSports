@@ -93,8 +93,14 @@ export function decodeApplyTurn(state:TradeState,lane:import('@lsports/contracts
  });
 }
 export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,now=Date.now()){
- const applying=Object.values(state.connections).some(c=>c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&Date.parse(c.lastSnapshotErrorAt||'')<Date.parse(c.fullSnapshot.startedAt||'') || c.fullSnapshot?.stage==='apply'&&!c.fullSnapshot.completedAt&&!c.lastSnapshotErrorAt);
- return !applying||now-lastCompletedAt>=60000;
+ const active=Object.values(state.connections).flatMap(c=>{
+  const snapshot=c.fullSnapshot;
+  const errorAt=Date.parse(c.lastSnapshotErrorAt||'');
+  return snapshot&&!snapshot.completedAt&&(!c.lastSnapshotErrorAt||!Number.isFinite(errorAt)||errorAt<Date.parse(snapshot.startedAt))?[snapshot]:[];
+ });
+ const waiting=active.some(snapshot=>snapshot.stage!=='apply');
+ const applying=active.some(snapshot=>snapshot.stage==='apply');
+ return !waiting&&(!applying||now-lastCompletedAt>=60000);
 }
 export function inboxCheckpointDeferredDuringSnapshot(snapshotApplying:boolean){return snapshotApplying;}
 export type PersistenceSave = (()=>Promise<void>) & {beforeCapture?:(reserve:(publicationId:number)=>void)=>Promise<void>};
