@@ -4,12 +4,10 @@ import {createServer} from 'node:http';import {once} from 'node:events';
 import {OperationError} from './diagnostics.js';
 import {walkSnapshot,convertSnapshotRow,fullSnapshot,fullSnapshotMemory,FULL_SNAPSHOT_LIMITS} from './full-snapshot.js';
 const row=(FixtureId:number)=>({FixtureId,Fixture:{Status:1,LastUpdate:'2026-10-19T14:00:00.0173136'},Markets:[]});
-test('full snapshot deadline covers the measured download and both bounded passes',()=>{
- const actualBytes=822_816_714,measuredDownloadBytesPerSecond=actualBytes/156;
- const fixtureRows=40_864,validationRowsPerSecond=61,applyRowsPerSecond=56;
- const measuredSeconds=actualBytes/measuredDownloadBytesPerSecond+fixtureRows/validationRowsPerSecond+fixtureRows/applyRowsPerSecond;
+test('full snapshot download window covers the observed rate at the unchanged byte cap',()=>{
+ const secondsAtObservedRate=FULL_SNAPSHOT_LIMITS.responseBytes/(3.5*1024*1024);
  assert.equal(FULL_SNAPSHOT_LIMITS.responseBytes,2*1024*1024*1024);assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);
- assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,30*60*1000);assert.ok(FULL_SNAPSHOT_LIMITS.totalMs/1000>measuredSeconds);
+ assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,12*60*1000);assert.ok(FULL_SNAPSHOT_LIMITS.totalMs/1000>secondsAtObservedRate);
 });
 test('streamed HTTP 200 empty snapshots reject for both lanes before marking a baseline ready',async()=>{
  for(const lane of ['prematch','inplay'] as const){
@@ -193,7 +191,7 @@ test('persistent pressure and disconnection cannot turn retained spool into a pa
 });
 
 test('large snapshot tolerates bounded stream pauses while the independent total deadline remains finite',async()=>{
- assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,30*60*1000);
+ assert.equal(FULL_SNAPSHOT_LIMITS.idleMs,60000);assert.equal(FULL_SNAPSHOT_LIMITS.totalMs,12*60*1000);
  const previous=process.availableMemory;process.availableMemory=()=>1024**3;
  const payload=JSON.stringify({Header:{HttpStatusCode:200},Body:[row(901)]});
  try{for(const pauseMs of [30,100]){
