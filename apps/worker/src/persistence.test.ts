@@ -7,12 +7,23 @@ import { EventEmitter } from 'node:events';
 import amqp from 'amqplib';
 import { createPublisher, readConnectedFeed } from '@lsports/feed-store';
 import { TradeState } from './state.js';
-import { checkpoint, restore, persistRegularCheckpoint } from './persistence.js';
+import { checkpoint, restore, persistRegularCheckpoint, privateCheckpointFileAllowed, MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES } from './persistence.js';
 import { session } from './connected.js';
 import { createApp } from '../../api/src/app.js';
 import type { PackageConfig } from './config.js';
 
 const fixtureId = 20540377;
+
+test('bounded streamed restore accepts measured >2 GiB sidecars without relaxing record or memory guards',()=>{
+ const measuredBytes=2_202_771_778;
+ assert.ok(measuredBytes>2*1024**3);
+ assert.ok(measuredBytes<MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES);
+ assert.equal(privateCheckpointFileAllowed(measuredBytes,true,false),true);
+ assert.equal(privateCheckpointFileAllowed(MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES,true,false),true);
+ assert.equal(privateCheckpointFileAllowed(MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES+1,true,false),false);
+ assert.equal(privateCheckpointFileAllowed(measuredBytes,false,false),false);
+ assert.equal(privateCheckpointFileAllowed(measuredBytes,true,true),false);
+});
 function seed() {
   const state = new TradeState();
   for (const lane of ['prematch', 'inplay'] as const) {

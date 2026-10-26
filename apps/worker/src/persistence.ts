@@ -9,6 +9,14 @@ import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
 import { TradeState, type Row } from './state.js';
 
+// The sidecar is parsed as a bounded stream, one <=32 MiB record at a time.
+// Keep a finite file cap while admitting the measured 2.20 GB production
+// checkpoint; this does not change heap, inbox, response or record limits.
+export const MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES = 3 * 1024 ** 3;
+export function privateCheckpointFileAllowed(size:number,isFile:boolean,isSymbolicLink:boolean){
+  return Number.isSafeInteger(size)&&size>=0&&size<=MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES&&isFile&&!isSymbolicLink;
+}
+
 const validId = (n: unknown): n is number => Number.isSafeInteger(n) && Number(n) > 0;
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const tuples = (v: unknown): v is [string, unknown][] => Array.isArray(v) && v.every(e => Array.isArray(e) && e.length === 2 && typeof e[0] === 'string');
@@ -186,7 +194,7 @@ export async function restore(state: TradeState, path: string, progress?:(sample
     });
     if(saved.regularExternal===true){
       const sidePath=path+'.regular-checkpoint.json',info=await lstat(sidePath);
-      if(!info.isFile()||info.isSymbolicLink()||info.size>2*1024**3)throw new Error('Private regular checkpoint identity guard; original preserved');
+      if(!privateCheckpointFileAllowed(info.size,info.isFile(),info.isSymbolicLink()))throw new Error('Private regular checkpoint identity guard; original preserved');
       restoreStage='checkpoint.sidecar';progress?.({stage:restoreStage,rows});
       await walkSnapshot(sidePath,async entry=>{restoreEntry(entry,true);},32*1024**2,'regular');
     }else if(Array.isArray(saved.regular))for(const entry of saved.regular)restoreEntry(entry,true);
