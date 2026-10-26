@@ -10,8 +10,9 @@ test('private checkpoint completes before the full public projection is material
 });
 test('snapshot application defers full public projection until the verified baseline is complete',()=>{
  const state=new TradeState();assert.equal(deferPublicProjectionDuringSnapshot(state),false);
- state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),false);
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
+ state.set('prematch',{lastSnapshotErrorAt:new Date().toISOString()});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'apply',bytes:10,validatedRows:1,appliedRows:1,lastProgressAt:new Date().toISOString()}});
  assert.equal(deferPublicProjectionDuringSnapshot(state),true);
  state.set('prematch',{fullSnapshot:{...state.connections.prematch.fullSnapshot!,stage:'complete'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);

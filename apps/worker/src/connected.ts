@@ -62,9 +62,12 @@ export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkp
 // still advances before ACK; the verified snapshot triggers the next publish.
 export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'connections'>){
  return Object.values(state.connections).some(c=>{
-  const snapshot=c.fullSnapshot;if(!snapshot||snapshot.completedAt)return false;
-  const startedAt=Date.parse(snapshot.startedAt),failedAt=Date.parse(c.lastSnapshotErrorAt||'');
-  return snapshot.stage!==undefined&&!(Number.isFinite(startedAt)&&Number.isFinite(failedAt)&&failedAt>=startedAt);
+  // `startedAt` is set before the initial save and before waiting_http. That
+  // interval can last minutes; gate publication from then through successful
+  // completion, including local in-flight/heap deferrals. These failures leave
+  // the blocked baseline in place and must not trigger another multi-GB publish.
+  const snapshot=c.fullSnapshot;
+  return !!snapshot&&!snapshot.completedAt&&Number.isFinite(Date.parse(snapshot.startedAt||''));
  });
 }
 export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=32768;
@@ -743,24 +746,20 @@ export async function session(
      }finally{snapshotApplicationActive=false;if(buffered.length&&!closed)scheduleDrain();}
     };
     await recover();
-    try {
-      const sports = await api.catalog();
-      state.set(lane, {
-        catalogHorseRacing: sports.some(
-          (s) => classifySport(s.name) === "hipica",
-        ),
-      });
-      await save();
-    } catch (error) {
-      const diagnostic = describeFailure(error, "metadata.sports", "http");
-      console.warn(
-        JSON.stringify({
-          lane,
-          status: "metadata_unavailable",
-          ...diagnostic,
-        }),
-      );
-    }
+    // Metadata is ancillary. Do not let a slow metadata HTTP call hold the
+    // lane's retry loop after a snapshot was deferred by the shared scheduler.
+    void (async()=>{
+      console.info(JSON.stringify({lane,operation:"metadata.sports",status:"started",atUTC:new Date().toISOString()}));
+      try {
+        const sports = await api.catalog();
+        state.set(lane, { catalogHorseRacing: sports.some((s) => classifySport(s.name) === "hipica") });
+        await save();
+        console.info(JSON.stringify({lane,operation:"metadata.sports",status:"completed",sports:sports.length,atUTC:new Date().toISOString()}));
+      } catch (error) {
+        const diagnostic = describeFailure(error, "metadata.sports", "http");
+        console.warn(JSON.stringify({lane,status:"metadata_unavailable",...diagnostic}));
+      }
+    })();
     let nextStatus=Date.now()+30000;
     let nextSnapshot = Math.min(...Object.values(nextDue));
     while (!closed && !signal.aborted) {

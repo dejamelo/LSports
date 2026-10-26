@@ -1,6 +1,7 @@
 import {ingressStability} from './ingress-stability.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 const currentSession=(lane,since)=>Number.isFinite(since)&&Date.parse(lane?.session?.startedAt)>=since;
+const latestMarketActivity=l=>Math.max(Date.parse(l?.updates?.lastMarketReceivedAt)||0,Date.parse(l?.updates?.lastMarketDecodedAt)||0);
 export function fullRecoveryResult(status,{requireSupplierOrder=false}={}){const since=Date.parse(status.validationSinceUTC),pm=status.lanes?.prematch,ip=status.lanes?.inplay,full=pm?.fullSnapshot,consumer=pm?.consumerProgress;
  const current=l=>!!l&&l.phase==='connected'&&l.recoveryProgress?.regularSnapshotReady===true&&Date.parse(l.session?.startedAt)>=since&&Date.parse(l.lastSnapshotAt)>=Date.parse(l.session?.startedAt);
  const snapshots=Number.isFinite(since)&&status.status==='snapshots_ready'&&current(pm)&&current(ip)&&full?.method==='disk_spool_two_pass'&&Date.parse(full.completedAt)>=Date.parse(pm.session?.startedAt);
@@ -8,7 +9,7 @@ export function fullRecoveryResult(status,{requireSupplierOrder=false}={}){const
  const consumed=currentSession(pm,since)&&!!consumer&&consumer.acknowledgedMessages>0&&Date.parse(consumer.lastAckAt)>=Date.parse(pm?.session?.startedAt);
  const registered=l=>currentSession(l,since)&&['connected','recovering'].includes(l?.phase)&&l?.consumerProgress?.active===true&&Date.parse(l.consumerProgress.registeredAt)>=Date.parse(l?.session?.startedAt);
  const distribution=l=>currentSession(l,since)&&(l?.distributionObservations||[]).some(o=>o.stage==='after_propagation'&&o.bodyIsDistributionOn===true&&o.sdkIsDistributionOn===true&&Date.parse(o.observedAtUTC)>=Date.parse(l?.session?.startedAt));
- const market=l=>currentSession(l,since)&&Date.parse((l?.updates?.lastMarketReceivedAt??l?.updates?.lastMarketDecodedAt))>=Date.parse(l?.session?.startedAt);
+ const market=l=>currentSession(l,since)&&latestMarketActivity(l)>=Date.parse(l?.session?.startedAt);
  const registrationVerified=registered(pm)&&registered(ip),distributionVerified=distribution(pm)&&distribution(ip),marketUpdatesVerified=market(pm)&&market(ip);
  const registrationEvidence=Object.fromEntries(Object.entries(status.lanes||{}).map(([lane,l])=>[lane,{phase:l.phase,brokerConsumerCount:l.distributionObservations?.at(-1)?.consumerCount??null,checkpointActive:l.consumerProgress?.active??null,registeredAt:l.consumerProgress?.registeredAt??null,sessionStartedAt:l.session?.startedAt??null,registrationTimeCurrent:Date.parse(l.consumerProgress?.registeredAt)>=Date.parse(l.session?.startedAt),acknowledgedMessages:l.consumerProgress?.acknowledgedMessages??null,lastAckAt:l.consumerProgress?.lastAckAt??null,registrationVerified:registered(l),deliveryEvidence:(lane==='prematch'?consumed:inplayConsumed)?'persisted_and_acknowledged':'not_observed'}]));
  return{registrationEvidence,consumerRegistrationObserved:registrationVerified,distributionActiveVerified:distributionVerified,marketUpdatesVerified,ackEvidenceMeaning:'delivery_persisted_and_acknowledged_only',snapshotsVerified:!!snapshots,continuousConsumptionObserved:registered(pm)&&consumed&&full?.ackedDuringRecovery>0,ackObserved:{prematch:consumed,inplay:inplayConsumed},consumerActiveObserved:registered(pm)&&consumed,inplayConsumerActiveObserved:registered(ip)&&inplayConsumed,projectionOddsAvailable:snapshots&&status.selectableSelections>0,selectableSelections:status.selectableSelections??0,projectionByLane:status.projectionByLane,
@@ -23,11 +24,11 @@ export async function validateFullRecovery(remote,handoff,ledger,save,progress,{
   }
   if(!requireIngress&&stableForMs>0&&result.reason==='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED'){
    const sessions=JSON.stringify(Object.values(current.lanes||{}).map(l=>l.session?.id||l.session?.startedAt));
-   if(!stable||stable.sessions!==sessions)stable={since:now(),sessions,counts:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,l.consumerProgress?.acknowledgedMessages||0])),markets:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,Date.parse((l.updates?.lastMarketReceivedAt??l.updates?.lastMarketDecodedAt))||0]))};
+   if(!stable||stable.sessions!==sessions)stable={since:now(),sessions,counts:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,l.consumerProgress?.acknowledgedMessages||0])),markets:Object.fromEntries(Object.entries(current.lanes).map(([k,l])=>[k,latestMarketActivity(l)]))};
    result.stabilityElapsedMs=now()-stable.since;result.stabilityRequiredMs=stableForMs;
    if(result.stabilityElapsedMs<stableForMs)result.reason='RECOVERY_STABILITY_WINDOW_PENDING';
    else if(!Object.entries(current.lanes).every(([k,l])=>(l.consumerProgress?.acknowledgedMessages||0)>stable.counts[k]))result.reason='NO_ACK_ADVANCE_DURING_STABILITY_WINDOW';
-   else if(!Object.entries(current.lanes).every(([k,l])=>(Date.parse((l.updates?.lastMarketReceivedAt??l.updates?.lastMarketDecodedAt))||0)>stable.markets[k]))result.reason='NO_MARKET_UPDATE_DURING_STABILITY_WINDOW';
+   else if(!Object.entries(current.lanes).every(([k,l])=>latestMarketActivity(l)>stable.markets[k]))result.reason='NO_MARKET_UPDATE_DURING_STABILITY_WINDOW';
    else result.stableConsumptionVerified=true;
   }else if(result.reason!=='FULL_RECOVERY_FEEDS_AND_ODDS_VERIFIED')stable=undefined;
   if(!requireIngress&&allowTransientReconnect&&result.newAMQP320.length<2&&result.snapshotsVerified&&result.consumerRegistrationObserved&&current.selectableSelections===0){zeroSince??=now();if(now()-zeroSince>=120000)result.reason='SNAPSHOTS_READY_NO_CURRENT_SELECTABLE_MARKETS';}else zeroSince=undefined;
