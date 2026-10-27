@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PlatformStore } from "./platform.js";
 import { TenantTickets } from "./tenant-tickets.js";
-import { defaultRiskConfig } from "./operation-risk.js";
+import { defaultRiskConfig, riskObservationMayExist } from "./operation-risk.js";
+import { MAX_SHARED_RECONCILIATION_RECORDS, sharedReconciliationFeed } from "./tenant-tickets.js";
 import { exposure } from "./risk-exposure.js";
 import type { EventFeed, TestTicket } from "@lsports/contracts";
 async function setup() {
@@ -393,4 +394,60 @@ test("event/market/selection concentration stays scoped and a blocked event does
   } finally {
     await s.close();
   }
+});
+
+test("risk reconciliation skips a verified projection with no selectable odds", async () => {
+  const s = await setup();
+  try {
+    let traversed = false;
+    const feed = {
+      ...s.feed,
+      coverage: {
+        prematch: { eventsWithSelectableOdds: 0 },
+        inplay: { eventsWithSelectableOdds: 0 },
+      },
+      events: {
+        *[Symbol.iterator]() {
+          traversed = true;
+          throw new Error("zero-odds feed should not be traversed for risk prices");
+        },
+      },
+    } as unknown as EventFeed;
+    assert.equal(riskObservationMayExist(feed), false);
+    s.store.risk.observe(feed);
+    assert.equal(traversed, false);
+  } finally {
+    await s.close();
+  }
+});
+
+test("small lazy settlement indexes are shared across tenant reconciliations", () => {
+  let walks = 0;
+  const outcomes = {
+    *[Symbol.iterator]() {
+      walks++;
+      yield { eventId: "prematch:1", marketId: "160", selectionId: "a", settlement: 1, updatedAt: new Date().toISOString() };
+    },
+  };
+  const feed = { mode: "connected", notice: "", events: [], ticketOutcomes: outcomes } as unknown as EventFeed;
+  const shared = sharedReconciliationFeed(feed);
+  assert.notEqual(shared, feed);
+  assert.equal([...shared.ticketOutcomes!].length, 1);
+  assert.equal([...shared.ticketOutcomes!].length, 1);
+  assert.equal(walks, 1);
+});
+
+test("large lazy reconciliation indexes retain the bounded legacy path", () => {
+  let yielded = 0;
+  const outcomes = {
+    *[Symbol.iterator]() {
+      while (yielded < MAX_SHARED_RECONCILIATION_RECORDS + 1) {
+        yielded++;
+        yield { eventId: "prematch:1", marketId: "160", selectionId: String(yielded), settlement: 1, updatedAt: new Date().toISOString() };
+      }
+    },
+  };
+  const feed = { mode: "connected", notice: "", events: [], ticketOutcomes: outcomes } as unknown as EventFeed;
+  assert.equal(sharedReconciliationFeed(feed), feed);
+  assert.equal(yielded, MAX_SHARED_RECONCILIATION_RECORDS + 1);
 });

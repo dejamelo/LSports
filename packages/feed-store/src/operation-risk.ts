@@ -22,6 +22,20 @@ export const riskKinds = [
   "feedHealth",
 ] as const;
 export type RiskKind = (typeof riskKinds)[number];
+
+// Projection coverage is computed from the same availability predicates used
+// by risk.observe. When both lanes report zero selectable events, iterating the
+// lazy feed again only rebuilds every market/selection without recording a
+// single risk price. Missing coverage remains conservative for legacy callers.
+export function riskObservationMayExist(feed: EventFeed): boolean {
+  if (feed.mode !== "connected") return false;
+  const prematch = feed.coverage?.prematch?.eventsWithSelectableOdds;
+  const inplay = feed.coverage?.inplay?.eventsWithSelectableOdds;
+  if (Number.isSafeInteger(prematch) && Number.isSafeInteger(inplay))
+    return Number(prematch) + Number(inplay) > 0;
+  return true;
+}
+
 export interface RiskRule {
   enabled: boolean;
   action: "alert" | "block";
@@ -646,6 +660,7 @@ export class OperationRisk {
     }
   }
   observe(feed: EventFeed) {
+    if (!riskObservationMayExist(feed)) return;
     this.transaction(() => {
       for (const event of feed.events)
         for (const market of event.markets || [])
