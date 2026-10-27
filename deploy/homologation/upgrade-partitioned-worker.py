@@ -1300,6 +1300,26 @@ def resumed_stop_budget(progress):
     previous=progress.get('shutdownObservation',{}).get('samples',[])
     if progress.get('pipelineRepair') is True:
         measured=max((s.get('lastCompletedPersistence',{}).get('lastDurationMs',0) for s in previous if isinstance(s,dict)),default=0)
+        # A graceful stop can complete one persist and immediately begin another
+        # final pass. If that second pass is already observable, budget its measured
+        # remaining stage time instead of timing out against only the prior cycle.
+        if previous and measured>0:
+            sample=previous[-1];completed=sample.get('lastCompletedPersistence') or {}
+            records=[r for r in sample.get('records',[]) if isinstance(r,dict) and r.get('operation')=='file.persist' and r.get('stage') in ('capture','regular_checkpoint','projection')]
+            active=records[-1] if records else None
+            if active and active.get('loggedAtUTC') and sample.get('atUTC'):
+                try:
+                    active_at=datetime.datetime.fromisoformat(active['loggedAtUTC'].replace('Z','+00:00'))
+                    sample_at=datetime.datetime.fromisoformat(sample['atUTC'].replace('Z','+00:00'))
+                    elapsed_ms=max(0,int((sample_at-active_at).total_seconds()*1000))
+                    stage=active.get('stage')
+                    if stage=='regular_checkpoint':
+                        remaining_ms=max(0,int(completed.get('regularDurationMs',0))-elapsed_ms)+int(completed.get('publishDurationMs',0))
+                    elif stage=='projection':remaining_ms=max(0,int(completed.get('publishDurationMs',0))-elapsed_ms)
+                    elif stage=='capture':remaining_ms=max(0,int(completed.get('captureDurationMs',0))-elapsed_ms)+int(completed.get('regularDurationMs',0))+int(completed.get('publishDurationMs',0))
+                    else:remaining_ms=0
+                    if remaining_ms>0:return min(1200,max(180,int((remaining_ms+120000+999)//1000)))
+                except (TypeError,ValueError,OverflowError):pass
         if type(measured) in (int,float) and measured>0:return min(900,max(180,int((measured+120000+999)//1000)))
         if partition_memory(progress)==6442450944:return 600
     # Only a pinned interrupted operation with measured write progress qualifies.

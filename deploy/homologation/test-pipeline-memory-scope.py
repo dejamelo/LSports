@@ -68,6 +68,9 @@ class StopResumeBudget(unittest.TestCase):
   self.assertEqual(ns['resumed_stop_budget']({'shutdownObservation':{'samples':[{'progressSincePreviousSample':False}]}}),180)
   self.assertEqual(ns['resumed_stop_budget']({'shutdownObservation':{'samples':[{'progressSincePreviousSample':True}]}}),600)
   self.assertEqual(ns['resumed_stop_budget']({'pipelineRepair':True,'memoryLimitBytes':8589934592,'shutdownObservation':{'samples':[{'lastCompletedPersistence':{'lastDurationMs':525734}}]}}),646)
+ def test_active_final_regular_pass_gets_only_its_measured_remaining_budget(self):
+  sample={'atUTC':'2026-10-27T22:35:53Z','lastCompletedPersistence':{'lastDurationMs':490873,'regularDurationMs':414643,'publishDurationMs':76224,'captureDurationMs':7},'records':[{'operation':'file.persist','stage':'regular_checkpoint','loggedAtUTC':'2026-10-27T22:33:02.828Z'}],'progressSincePreviousSample':True}
+  self.assertEqual(ns['resumed_stop_budget']({'pipelineRepair':True,'memoryLimitBytes':8589934592,'shutdownObservation':{'samples':[sample]}}),441)
 class OperationLock(unittest.TestCase):
  def test_remote_interrupted_client_cannot_duplicate_operation(self):
   with tempfile.TemporaryDirectory() as tmp:
