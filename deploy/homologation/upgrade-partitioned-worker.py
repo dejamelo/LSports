@@ -911,21 +911,23 @@ def pre_stop_copy_files(directory):
     require(all(p.is_file() and not p.is_symlink() for p in paths),'PRE_STOP_PERSISTED_COPY_FILE_UNVERIFIED')
     return paths
 
-def storage_before_stop(backup,container):
+def storage_before_stop(backup,container,progress,digest):
     mounts=[m for m in container.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed']
     require(len(mounts)==1,'PRE_STOP_FEED_MOUNT_UNVERIFIED')
     directory=Path(mounts[0]['Source'])
     files=pre_stop_copy_files(directory)
     total=sum(p.stat().st_size for p in files)
-    # Use the exact checkpoint + SQLite/WAL/SHM set copied and read back by
-    # pre_exit_disk_plan. Snapshot response spools and unfinished *.tmp files
-    # remain untouched in the active volume and are not duplicated by recovery.
-    required=total*10+4*1024**3;free=shutil.disk_usage(backup).free
+    # Run the same phased peak plan before stopping the only writer. The old
+    # total*10 estimate counted many copies that never coexist and could block
+    # every cutover despite a smaller, explicitly budgeted recovery sequence.
     retained_spools=[p for p in directory.rglob('response.private.json') if p.is_file() and not p.is_symlink()]
     unfinished=[p for p in directory.rglob('*.tmp') if p.is_file() and not p.is_symlink()]
     retained_bytes=sum(p.stat().st_size for p in retained_spools+unfinished)
-    emit(operation='cutover.aws',stage='partitioned_upgrade.pre_stop_disk',status='verified' if free>=required else 'blocked',freeDiskBytes=free,requiredFreeBytes=required,missingBytes=max(0,required-free),inputBytes=total,retainedInPlaceBytes=retained_bytes,retainedInPlaceFiles=True,copySet=['trade-feed.json','trade-feed.json.regular-checkpoint.json','prematch+inplay inbox SQLite/WAL/SHM'],budgetBasis='10x exact persisted files copied and read back by the protected restore proof plus 4 GiB reserve; snapshot spools and unfinished temporary checkpoints remain in the active volume and are not duplicated',signalsSent=0,workerStarted=False,posnetChanged=False)
-    require(free>=required,'PRE_STOP_DISK_HEADROOM_INSUFFICIENT_NO_STOP')
+    candidates=[p for p in retained_spools if 0<p.stat().st_size<=2*1024**3]
+    spool=max(candidates,key=lambda p:p.stat().st_mtime) if candidates else None
+    staged_recovery_disk_preflight(directory,backup,progress,digest,spool)
+    free=shutil.disk_usage(backup).free
+    emit(operation='cutover.aws',stage='partitioned_upgrade.pre_stop_disk',status='verified',freeDiskBytes=free,inputBytes=total,retainedInPlaceBytes=retained_bytes,retainedInPlaceFiles=True,copySet=['trade-feed.json','trade-feed.json.regular-checkpoint.json','prematch+inplay inbox SQLite/WAL/SHM'],budgetBasis='phased recovery preflight includes the one consistent copy, the largest mutually exclusive rehearsal/output phase, 4 GiB safety reserve, and 2 GiB explicit execution margin; active spools and unfinished checkpoints remain in place',signalsSent=0,workerStarted=False,posnetChanged=False)
 
 def pre_exit_disk_plan(backup,total,hashes,proof,previous_original):
     # Working SQLite may have changed after replay. Only byte-identical, unreferenced
@@ -1624,7 +1626,7 @@ def upgrade_partitioned_unlocked(request):
             require(old_container['Image']==progress['baseImageId'] and snapshot_memory_bytes(old_container['HostConfig']['Memory'])==partition_memory(progress),'OLD_WORKER_IDENTITY_CHANGED_BEFORE_STOP')
             if worker_states[0]['running'] and request.get('snapshotMemoryRepair'):
                 stage='partitioned_upgrade.pre_stop_disk'
-                storage_before_stop(backup,old_container)
+                storage_before_stop(backup,old_container,progress,digest)
             if request.get('fullRecovery') and not progress.get('supplierStoppedBeforeConsumer'):
                 stage='partitioned_upgrade.distribution_stop'
                 info=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0]
