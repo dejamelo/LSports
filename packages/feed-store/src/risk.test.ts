@@ -296,6 +296,21 @@ test("event/market/selection suspension applies to POS and preserves accepted ti
     await s.close();
   }
 });
+test("risk reconciliation and suspension overlay support lazy worker event iterables", async()=>{
+  const s=await setup();
+  try{
+    const events=s.feed.events;
+    const streamed={...s.feed,events:{[Symbol.iterator]:function*(){yield* events;}}} as unknown as EventFeed;
+    assert.equal(Array.isArray(streamed.events),false);
+    assert.doesNotThrow(()=>s.store.reconcile(streamed));
+    s.store.risk.suspend(s.admin,{kind:"selection",eventId:"9001",marketId:"160",selectionId:"runner",active:true,reason:"isolated test"});
+    const projected=s.store.risk.overlay(streamed);
+    assert.equal(Array.isArray(projected.events),false);
+    const event=[...projected.events][0];
+    assert.equal(event.markets![0].selections[0].available,false);
+    assert.equal(s.feed.events[0].markets![0].selections[0].available,true);
+  }finally{await s.close();}
+});
 test("odds-jump rule only evaluates two reliable explicit versions; ambiguous timestamps are ignored and technical blocking remains intact", async () => {
   const s = await setup();
   try {

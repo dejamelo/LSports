@@ -88,13 +88,18 @@ const validDate = (value: unknown): value is string =>
   /T.*(?:Z|[+-]\d\d:\d\d)$/.test(value) &&
   Number.isFinite(Date.parse(value));
 const eventInfo = (feed: EventFeed, id: string) => {
-  const e = feed.events.find((e) => eventKey(e.id) === id);
+  let e: EventFeed["events"][number] | undefined;
+  for (const event of feed.events) if (eventKey(event.id) === id) { e = event; break; }
   return {
     eventId: id,
     startDisplay: e?.time || null,
     live: e?.live ?? null,
     updatedAt: e?.updatedAt || feed.updatedAt || null,
   };
+};
+const mapEvents = (events: Iterable<EventFeed["events"][number]>, map: (event: EventFeed["events"][number]) => EventFeed["events"][number]): EventFeed["events"] => {
+  if(Array.isArray(events))return events.map(map);
+  return { [Symbol.iterator]: function* () { for (const event of events) yield map(event); }, } as EventFeed["events"];
 };
 export class OperationRisk {
   constructor(
@@ -437,24 +442,16 @@ export class OperationRisk {
         x.potentialGrossMinor,
         pending,
       );
-    const ambiguous = feed.events.reduce(
-      (n, e) =>
-        n +
-        (e.markets || []).reduce(
-          (a, m) =>
-            a +
-            m.selections.filter((s) =>
-              s.unavailableReasons?.some((r) =>
-                [
-                  "ambiguous_snapshot_timestamp",
-                  "awaiting_timestamp_recovery",
-                ].includes(r),
-              ),
-            ).length,
-          0,
-        ),
-      0,
-    );
+    // Worker publications expose `events` as a restartable lazy iterable to
+    // avoid materializing a second multi-gigabyte array. Keep this scan lazy.
+    let ambiguous = 0;
+    for (const event of feed.events)
+      for (const market of event.markets || [])
+        for (const selection of market.selections || [])
+          if (selection.unavailableReasons?.some((reason) =>
+            reason === "ambiguous_snapshot_timestamp" ||
+            reason === "awaiting_timestamp_recovery",
+          )) ambiguous++;
     const stale =
       feed.mode === "connected" &&
       (ambiguous > 0 ||
@@ -848,7 +845,7 @@ export class OperationRisk {
     return {
       ...feed,
       notice: `${feed.notice || ""} Algunas nuevas jugadas tienen suspensión administrativa.`,
-      events: feed.events.map((event) => {
+      events: mapEvents(feed.events, (event) => {
         const eventBlocked = targets.some(
           (t) =>
             t.kind === "operation" ||

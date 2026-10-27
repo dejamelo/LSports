@@ -1,5 +1,5 @@
 """Prepare a verified derived worker image, then activate once; preserve migration and POSNET."""
-PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts'}
+PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts'}
 OOM_REHEARSAL_TIMEOUT_SECONDS=1200
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
 PIPELINE_BASE_FILES=PARTITION_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
@@ -400,16 +400,21 @@ def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
     verified_base={**old_files,**added_old_files}
     require(hashlib.sha256(json.dumps(verified_base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
     changed={n for n in files if files[n]!=verified_base[n]}
-    require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
+    require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','packages/feed-store/src/operation-risk.ts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
 
 def verify_publication_reserve_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PUBLICATION_RESERVE_BASE_DIGEST_MISMATCH')
     changed={n for n in files if files[n]!=old_files[n]}
     # State: wait outside FIFO; connected: decode inside guarded apply, bounded
     # metadata retention; persistence/feed-store: awaited write/fsync telemetry.
-    # feed-store also carries the already reviewed API read containment, without
-    # deploying/replacing the API. No format, provider or transport changes.
-    require(changed and changed<={'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts'},'PUBLICATION_RESERVE_PATCH_SCOPE_UNVERIFIED')
+    # feed-store carries read containment plus lazy-iterable-safe settlement and
+    # risk reconciliation; the API is not replaced. No format/provider changes.
+    require(changed and changed<={'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts'},'PUBLICATION_RESERVE_PATCH_SCOPE_UNVERIFIED')
+
+def verify_checkpoint_repair_sources(old_files,files):
+    changed={name for name in files if files[name]!=old_files[name]}
+    require(changed and changed<={'apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/state.ts','apps/worker/src/connected.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts'},'CHECKPOINT_REPAIR_DIFF_NOT_ALLOWED')
+    return changed
 
 def verify_checkpoint_buffer_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CHECKPOINT_BUFFER_BASE_DIGEST_MISMATCH')
@@ -1397,8 +1402,7 @@ def upgrade_partitioned_unlocked(request):
             old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',old['image'],'-e',export],timeout=30))
             require(set(old_files)==set(files) and all(isinstance(v,str) and len(v.encode())<256*1024 for v in old_files.values()),'CHECKPOINT_REPAIR_SOURCE_UNVERIFIED')
             require(hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old['digest'],'CHECKPOINT_REPAIR_SOURCE_DIGEST_MISMATCH')
-            changed={name for name in files if files[name]!=old_files[name]}
-            require(changed and changed<= {'apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/state.ts','apps/worker/src/connected.ts','packages/feed-store/src/index.ts'},'CHECKPOINT_REPAIR_DIFF_NOT_ALLOWED')
+            changed=verify_checkpoint_repair_sources(old_files,files)
             context=source_backup/('checkpoint-fix-tagged-'+digest[:24]);context.mkdir(mode=0o700,exist_ok=True)
             for name in changed:
                 target=context/'overlay'/name;target.parent.mkdir(parents=True,exist_ok=True,mode=0o755)
