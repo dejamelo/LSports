@@ -75,6 +75,16 @@ def verify_live_v8_heap_oom_identity(worker,request):
     require(logs.returncode==0,'CURRENT_V8_HEAP_OOM_LOG_READ_FAILED')
     require(b'Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory' in logs.stdout+logs.stderr,'CURRENT_V8_HEAP_OOM_SIGNATURE_UNVERIFIED')
 
+def verify_stopped_upgrade_worker(worker,request,reason,verify_identity=True,expected_container_id=None):
+    if worker.get('running') is True or worker.get('running') is False and worker.get('exitCode')==0 and worker.get('oomKilled') is False:return
+    if request.get('snapshotMemoryRepair') and worker.get('oomKilled') is True and worker.get('exitCode')==137:
+        if verify_identity and expected_container_id is not None:require(worker.get('id')==expected_container_id,'CURRENT_OOM_CONTAINER_CHANGED')
+        return
+    if request.get('v8HeapOomRepair') and worker.get('oomKilled') is False and worker.get('exitCode')==134 and worker.get('running') is False:
+        if verify_identity:verify_live_v8_heap_oom_identity(worker,request)
+        return
+    require(False,reason)
+
 def verify_live_persistence_identity(worker,request,image):
     expected=request.get('expectedLiveImage')
     checks={'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'workerRunning':worker.get('running') is True,'workerNotOomKilled':worker.get('oomKilled') is False,'workerNameMatches':worker.get('name')=='/adl-homologation-worker-1','expectedImageFormat':bool(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',str(expected))),'imageReferenceMatches':image==expected}
@@ -1203,7 +1213,7 @@ def upgrade_partitioned_unlocked(request):
             image_info=json.loads(run(['docker','image','inspect',progress['image']]))[0]
             require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==digest,'UPGRADE_IMAGE_LABEL_MISMATCH')
         else:
-            require(phase=='prepare','UPGRADE_MUST_BE_PREPARED');workers=states('worker');require(len(workers)==1,'UPGRADE_WORKER_COUNT_UNVERIFIED');known_stopped_oom=request.get('snapshotMemoryRepair') and not workers[0].get('running') and (workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137 or request.get('v8HeapOomRepair') is True and workers[0].get('oomKilled') is False and workers[0].get('exitCode')==134);require(workers[0]['running'] or known_stopped_oom,'UPGRADE_REQUIRES_VERIFIED_RUNNING_OR_OOM_WORKER')
+            require(phase=='prepare','UPGRADE_MUST_BE_PREPARED');workers=states('worker');require(len(workers)==1,'UPGRADE_WORKER_COUNT_UNVERIFIED');verify_stopped_upgrade_worker(workers[0],request,'UPGRADE_REQUIRES_VERIFIED_RUNNING_OR_OOM_WORKER',False)
             require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT');require(shutil.disk_usage('/opt').free>=(4*1024**3 if request.get('pipelineRepair') else 1024**3),'UPGRADE_DISK_HEADROOM_INSUFFICIENT')
             original_image=before['services']['worker']['image'];base_info=json.loads(run(['docker','image','inspect',original_image]))[0]
             container=json.loads(run(['docker','inspect',workers[0]['id']]))[0];require(container['Image']==base_info['Id'],'UPGRADE_RUNNING_IMAGE_MISMATCH');require(snapshot_memory_bytes(container['HostConfig']['Memory'])==memory_limit,'UPGRADE_CONTAINER_MEMORY_LIMIT_MISMATCH')
@@ -1447,7 +1457,7 @@ def upgrade_partitioned_unlocked(request):
         worker_states=states('worker')
         if progress['phase']=='prepared':
             emit(operation='cutover.aws',stage='partitioned_upgrade.old_worker.inspect',status='collected',workerStates=worker_states,backup=str(backup),posnetChanged=False)
-            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');require(worker_states[0]['running'] or worker_states[0].get('exitCode')==0 and not worker_states[0].get('oomKilled') or request.get('snapshotMemoryRepair') and worker_states[0].get('exitCode')==137 and worker_states[0].get('oomKilled') is True,'OLD_WORKER_EXIT_REQUIRES_REVIEW');require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
+            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');verify_stopped_upgrade_worker(worker_states[0],request,'OLD_WORKER_EXIT_REQUIRES_REVIEW',True,progress.get('oomContainerId'));require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
             old_container=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0];
             if request.get('snapshotMemoryRepair') and not worker_states[0]['running']:
                 require(old_container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'OOM_RESTART_POLICY_UNSAFE');progress['oomContainerId']=worker_states[0]['id'];save(progress)
