@@ -1,11 +1,15 @@
 """Prepare a verified derived worker image, then activate once; preserve migration and POSNET."""
 PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'}
-PARTITION_DIGEST_FILES=PARTITION_FILES-{'packages/feed-store/src/operation-risk.ts'}
+PARTITION_DIGEST_FILES=PARTITION_FILES-{'packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'}
 PIPELINE_AUXILIARY_FILES={'packages/feed-store/src/operation-risk.ts'}
 OOM_REHEARSAL_TIMEOUT_SECONDS=1200
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
+PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256={'packages/feed-store/src/tenant-tickets.ts':'6879295a6a025dd17be0aa056c40c3b0501e23adb6fb0dbfd457c46e1da46e78'}
 PIPELINE_BASE_FILES=PARTITION_DIGEST_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
 PROJECTION_RESUME_DRIVER_SHA256='b2f7cd58ee386c3855b9225088d112fef51a8b442bd0369848fab626fa0c8034'
+
+def verify_pinned_added_dependencies(files,pins):
+    return all(name in files and hashlib.sha256(files[name].encode()).hexdigest()==digest for name,digest in pins.items())
 
 def verify_projection_resume_artifacts(backup,progress,image_info,name):
     require(isinstance(name,str) and re.fullmatch(r'projection-resume-[0-9]{8}T[0-9]{4}Z',name),'PROJECTION_RESUME_DIRECTORY_UNVERIFIED')
@@ -143,12 +147,14 @@ def verify_current_worker_identity(worker,request,image):
 def verify_live_oom_sources(old_files,files,old_digest):
     legacy_files={name:value for name,value in old_files.items() if name in PARTITION_DIGEST_FILES and name!='apps/worker/src/timestamp-recovery.ts'}
     require(set(old_files)==set(files) and 'apps/worker/src/timestamp-recovery.ts' in old_files and hashlib.sha256(json.dumps(legacy_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_OOM_SOURCE_DIGEST_MISMATCH')
+    require(verify_pinned_added_dependencies(old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'CURRENT_OOM_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     changed={name for name in files if files[name]!=old_files[name]}
     require(changed and changed<= {'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/feed-store/src/index.ts'},'CURRENT_OOM_PATCH_SCOPE_UNVERIFIED')
 
 def verify_live_snapshot_pressure_sources(old_files,files,old_digest):
     base={name:old_files[name] for name in PARTITION_DIGEST_FILES if name in old_files}
     require(set(old_files)==set(files) and set(base)==PARTITION_DIGEST_FILES and hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_PRESSURE_SOURCE_DIGEST_MISMATCH')
+    require(verify_pinned_added_dependencies(old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'CURRENT_PRESSURE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     changed={name for name in files if files[name]!=old_files[name]}
     require(changed=={'apps/worker/src/full-snapshot.ts'},'CURRENT_PRESSURE_PATCH_SCOPE_UNVERIFIED')
     # Existing identity, memory, source and preparation receipt gates still apply.
@@ -398,10 +404,11 @@ def partition_rehearsal_args(args,progress):
     return args
 
 def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
-    require(set(files)==PARTITION_FILES and set(old_files)==PIPELINE_BASE_FILES|PIPELINE_AUXILIARY_FILES and set(added_old_files)==set(PIPELINE_ADDED_DEPENDENCY_SHA256),'PIPELINE_SOURCE_MANIFEST_MISMATCH')
-    require({name:hashlib.sha256(added_old_files[name].encode()).hexdigest() for name in added_old_files}==PIPELINE_ADDED_DEPENDENCY_SHA256,'PIPELINE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
+    require(set(files)==PARTITION_FILES and set(old_files)==PIPELINE_BASE_FILES|PIPELINE_AUXILIARY_FILES and set(added_old_files)==set(PIPELINE_ADDED_DEPENDENCY_SHA256)|set(PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_SOURCE_MANIFEST_MISMATCH')
+    require({name:hashlib.sha256(added_old_files[name].encode()).hexdigest() for name in PIPELINE_ADDED_DEPENDENCY_SHA256}==PIPELINE_ADDED_DEPENDENCY_SHA256,'PIPELINE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
+    require(verify_pinned_added_dependencies(added_old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_PINNED_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     verified_base={**old_files,**added_old_files}
-    digest_base={name:verified_base[name] for name in PIPELINE_BASE_FILES|set(added_old_files)}
+    digest_base={name:verified_base[name] for name in PIPELINE_BASE_FILES|set(PIPELINE_ADDED_DEPENDENCY_SHA256)}
     require(hashlib.sha256(json.dumps(digest_base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
     changed={n for n in files if files[n]!=verified_base[n]}
     require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
@@ -409,6 +416,7 @@ def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
 def verify_publication_reserve_sources(old_files,files,old_digest):
     base={name:old_files[name] for name in PARTITION_DIGEST_FILES if name in old_files}
     require(set(old_files)==set(files) and set(base)==PARTITION_DIGEST_FILES and hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PUBLICATION_RESERVE_BASE_DIGEST_MISMATCH')
+    require(verify_pinned_added_dependencies(old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PUBLICATION_RESERVE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     changed={n for n in files if files[n]!=old_files[n]}
     # State: wait outside FIFO; connected: decode inside guarded apply, bounded
     # metadata retention; persistence/feed-store: awaited write/fsync telemetry.
@@ -424,6 +432,7 @@ def verify_checkpoint_repair_sources(old_files,files):
 def verify_checkpoint_buffer_sources(old_files,files,old_digest):
     base={name:old_files[name] for name in PARTITION_DIGEST_FILES if name in old_files}
     require(set(old_files)==set(files) and set(base)==PARTITION_DIGEST_FILES and hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CHECKPOINT_BUFFER_BASE_DIGEST_MISMATCH')
+    require(verify_pinned_added_dependencies(old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'CHECKPOINT_BUFFER_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     changed={name for name in files if files[name]!=old_files[name]}
     # connected: already tested partial-prefix retirement plus IO counters;
     # persistence: bounded writes, identical JSON/atomicity. No parser, schema,
@@ -433,6 +442,7 @@ def verify_checkpoint_buffer_sources(old_files,files,old_digest):
 def verify_transport_lifecycle_sources(old_files,files,old_digest):
     base={name:old_files[name] for name in PARTITION_DIGEST_FILES if name in old_files}
     require(set(old_files)==set(files) and set(base)==PARTITION_DIGEST_FILES and hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'TRANSPORT_LIFECYCLE_BASE_DIGEST_MISMATCH')
+    require(verify_pinned_added_dependencies(old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'TRANSPORT_LIFECYCLE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     changed={n for n in files if files[n]!=old_files[n]}
     # Actor lifetime/join, durable post-disconnect retirement and actor identity.
     # Persistence/parser/state formats and vendor requests are unchanged.
@@ -1501,7 +1511,7 @@ def upgrade_partitioned_unlocked(request):
                     verify_publication_reserve_sources(old_files,files,old_digest)
                 elif request.get('pipelineRepair'):
                     legacy_files={name:old_files[name] for name in PIPELINE_BASE_FILES|PIPELINE_AUXILIARY_FILES if name in old_files}
-                    added_files={name:old_files[name] for name in PIPELINE_ADDED_DEPENDENCY_SHA256 if name in old_files}
+                    added_files={name:old_files[name] for name in set(PIPELINE_ADDED_DEPENDENCY_SHA256)|set(PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256) if name in old_files}
                     verify_pipeline_sources(legacy_files,files,old_digest,added_files)
                 elif request.get('snapshotPressureRepair'):
                     require(request.get('livePersistenceRepair') is True and request.get('liveOomRepair') is not True,'PRESSURE_REPAIR_REQUIRES_VERIFIED_LIVE_WORKER')

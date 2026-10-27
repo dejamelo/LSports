@@ -153,6 +153,7 @@ class Upgrade(unittest.TestCase):
   for changed in ({'running':True},{'oomKilled':False},{'name':'/adl-homologation-api-1'},{'id':'b'*64},{'exitCode':1}):
    with self.assertRaises(Exception):NS['verify_live_oom_identity']({**worker,**changed},request)
   old={name:'original' for name in NS['PARTITION_FILES']};legacy={name:value for name,value in old.items() if name in NS['PARTITION_DIGEST_FILES'] and name!='apps/worker/src/timestamp-recovery.ts'};digest=hashlib.sha256(json.dumps(legacy,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  NS['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256']={'packages/feed-store/src/tenant-tickets.ts':hashlib.sha256(b'original').hexdigest()}
   new={**old,'apps/worker/src/state.ts':'bounded','apps/worker/src/timestamp-recovery.ts':'derived timestamp'}
   NS['verify_live_oom_sources'](old,new,digest)
   for candidate,source_hash in ((old,digest),({**new,'apps/worker/src/messages.ts':'unexpected'},digest),(new,'0'*64)):

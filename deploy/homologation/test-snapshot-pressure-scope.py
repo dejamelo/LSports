@@ -5,6 +5,7 @@ class PressureScope(unittest.TestCase):
  def test_exact_single_file_diff_and_original_receipt_digest_required(self):
   ns={'__name__':'test'}
   for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],ns)
+  ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256']={'packages/feed-store/src/tenant-tickets.ts':hashlib.sha256(b'original').hexdigest()}
   old={n:'original' for n in ns['PARTITION_FILES']};digest=hashlib.sha256(json.dumps({n:old[n] for n in ns['PARTITION_DIGEST_FILES']},sort_keys=True,separators=(',',':')).encode()).hexdigest();new={**old,'apps/worker/src/full-snapshot.ts':'pressure fix'}
   ns['verify_live_snapshot_pressure_sources'](old,new,digest)
   with self.assertRaisesRegex(RuntimeError,'CURRENT_PRESSURE_PATCH_SCOPE'):ns['verify_live_snapshot_pressure_sources'](old,{**new,'apps/worker/src/durable-ingress.mjs':'changed'},digest)
