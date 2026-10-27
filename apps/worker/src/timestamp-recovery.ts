@@ -6,7 +6,7 @@ import {join,dirname} from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import type {Lane,TimestampRecovery} from '@lsports/contracts';
-import {TradeState} from './state.js';
+import {TradeState,betVersionAt} from './state.js';
 import {restore,checkpoint} from './persistence.js';
 export interface RecoveryCandidate {lane:Lane;rowKey:string;marketId:number;selectionId:string;previousVersion:string;baselineVersion:string;snapshotReceivedAt:string;settlement?:{code:number;receivedAt:string;rawLastUpdate:string|number|null}}
 // A future snapshot version is quarantined, not converted to an assumed timezone.
@@ -17,7 +17,7 @@ export async function planTimestampRecovery(path:string,fixtureId:number,marketI
   if(!row.outright||Number(String(key).split(':').at(-1))!==fixtureId)continue;
   for(const bet of row.markets.get(String(marketId))?.bets||[]){
    const betKey=`${marketId}:${bet.id}`,trace=row.settlementAudit?.get(betKey),snapshot=trace?.lastSnapshot,amqp=mode==="settlements"?trace?.last42:trace?.last41;
-   const old=row.betAt.get(betKey),snapAt=Date.parse(snapshot?.versionAt||''),received=Date.parse(snapshot?.receivedAt||''),baseline=Date.parse(amqp?.versionAt||''),observed=Date.parse(amqp?.receivedAt||'');
+   const old=betVersionAt(row,marketId,bet),snapAt=Date.parse(snapshot?.versionAt||''),received=Date.parse(snapshot?.receivedAt||''),baseline=Date.parse(amqp?.versionAt||''),observed=Date.parse(amqp?.receivedAt||'');
    let reason='';
    if(row.timestampRecovery?.has(betKey))reason='already_prepared';
    else if(Number.isInteger(bet.settlement)&&bet.settlement!==0)reason='explicit_settlement_preserved';

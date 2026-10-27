@@ -6,13 +6,25 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import amqp from 'amqplib';
 import { createPublisher, readConnectedFeed } from '@lsports/feed-store';
-import { TradeState } from './state.js';
+import { TradeState, betVersionAt } from './state.js';
 import { checkpoint, restore, persistRegularCheckpoint, privateCheckpointFileAllowed, MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES } from './persistence.js';
 import { session } from './connected.js';
 import { createApp } from '../../api/src/app.js';
 import type { PackageConfig } from './config.js';
 
 const fixtureId = 20540377;
+
+test('restore compacts legacy betAt entries that exactly match LastUpdate', async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'adl-betat-compact-')),path=join(dir,'feed.json');
+  try{
+    const state=new TradeState(),version=Date.parse('2026-10-22T12:00:00.123Z');
+    state.apply('prematch',[{fixtureId:1,fixture:{status:1},markets:[{id:1,bets:[{id:'1',price:'2',lastUpdate:new Date(version)}]}]} as any],version);
+    const saved=checkpoint(state);(saved.regular[0] as any).betAt=[['1:1',version]];
+    await writeFile(path,JSON.stringify({...state.feed(),workerCheckpoint:saved}));
+    const restored=new TradeState();await restore(restored,path);const row=restored.rows.prematch.get(1)!;
+    assert.equal(row.betAt.size,0);assert.equal(betVersionAt(row,'1',row.markets.get('1')!.bets![0]),version);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
 
 test('bounded streamed restore accepts measured >2 GiB sidecars without relaxing record or memory guards',()=>{
  const measuredBytes=2_202_771_778;

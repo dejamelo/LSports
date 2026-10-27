@@ -128,6 +128,24 @@ const timestamp = (value: unknown, fallback: number) => {
   const n = value ? new Date(value as string).getTime() : NaN;
   return Number.isFinite(n) ? n : fallback;
 };
+/** Millisecond quote versions are already present on stored bets. Keep only
+ * fallback timestamps that cannot be reconstructed from LastUpdate. */
+export function betVersionAt(row:Row,marketId:string|number,bet:{id:string|number;lastUpdate?:unknown}):number|undefined{
+  const key=`${marketId}:${bet.id}`,saved=row.betAt.get(key);
+  if(saved!==undefined)return saved;
+  const fromBet=timestamp(bet.lastUpdate,NaN);
+  return Number.isFinite(fromBet)?fromBet:undefined;
+}
+export function compactBetAt(markets:Map<string,Market>,entries:Iterable<[string,number]>):Map<string,number>{
+  const lastUpdates=new Map<string,number>();
+  for(const [marketId,market] of markets)for(const bet of market.bets||[]){
+    const at=timestamp(bet.lastUpdate,NaN);
+    if(Number.isFinite(at))lastUpdates.set(`${marketId}:${bet.id}`,at);
+  }
+  const sparse=new Map<string,number>();
+  for(const [key,at] of entries)if(lastUpdates.get(key)!==at)sparse.set(key,at);
+  return sparse;
+}
 const defined = <T extends object>(value: T) =>
   Object.fromEntries(
     Object.entries(value).filter(([, v]) => v !== undefined),
@@ -343,10 +361,10 @@ export class TradeState {
           const betKey = `${key}:${bet.id}`;
           if(event.settlementInspection?.rejected.some(r=>`${r.marketId}:${r.selectionId}`===betKey))continue;
           const t = timestamp(bet.lastUpdate, at);
-          const previousAt = row.betAt.get(betKey) || 0;
+          const previousBetForOrder=bets.get(bet.id);
+          const previousAt = row.betAt.get(betKey) ?? (previousBetForOrder?betVersionAt(row,key,previousBetForOrder):0) ?? 0;
           const field = settlementFields.get(betKey);
           const order = field?.timestamp?.orderingKey || timestampOrder(bet.lastUpdate,t);
-          const previousBetForOrder=bets.get(bet.id);
           const savedOrder = preciseBetOrder(row,betKey,previousBetForOrder);
           const previousOrder = savedOrder && BigInt(savedOrder)/1000000n===BigInt(previousAt) ? savedOrder : (BigInt(previousAt)*1000000n).toString();
           const older = BigInt(order)<BigInt(previousOrder);
@@ -425,9 +443,10 @@ export class TradeState {
               row.quoteInvalidations?.delete(betKey);
               if(!event.marketRecovery||row.timestampRecovery?.has(betKey))(row.freshBets ||= new Set()).add(betKey);
             }
-            row.betAt.set(betKey, t);
-            // Millisecond order is exactly reconstructible from betAt. Keep all
-            // sub-millisecond ordering keys and every non-snapshot path unchanged.
+            // Persist only receive-time fallbacks. Normal quote versions are
+            // reconstructed from LastUpdate, avoiding millions of duplicate Map entries.
+            if(timestamp(storedBet.lastUpdate,NaN)===t)row.betAt.delete(betKey);
+            else row.betAt.set(betKey,t);
             setOrder(row,betKey,storedBet,order,t);
           } else {
             this.metrics[lane].staleUpdatesIgnored++;
@@ -525,7 +544,7 @@ export class TradeState {
     (base as any).ticketOutcomes=jsonItems(function*(){
       for(const lane of ['prematch','inplay'] as const)for(const [key,row] of captured.rows[lane])
         for(const market of row.markets.values())for(const bet of market.bets||[]){
-          const at=row.betAt.get(`${market.id}:${bet.id}`);if(!Number.isInteger(bet.settlement)||at===undefined)continue;
+          const at=betVersionAt(row,String(market.id),bet);if(!Number.isInteger(bet.settlement)||at===undefined)continue;
           yield {eventId:`${lane}:${key}`,marketId:`${lane}:${key}:${market.id}`,selectionId:`${lane}:${key}:${market.id}:${bet.id}`,settlement:bet.settlement!,updatedAt:new Date(at).toISOString()};}
     });
     return base;
@@ -541,7 +560,7 @@ export class TradeState {
       }
       for (const [key, row] of this.rows[lane]) for (const market of row.markets.values()) {
         for (const bet of market.bets || []) {
-          const at = row.betAt.get(`${market.id}:${bet.id}`);
+          const at = betVersionAt(row,String(market.id),bet);
           if (!Number.isInteger(bet.settlement) || at === undefined) continue;
           ticketOutcomes.push({eventId: `${lane}:${key}`, marketId: `${lane}:${key}:${market.id}`,
             selectionId: `${lane}:${key}:${market.id}:${bet.id}`, settlement: bet.settlement!, updatedAt: new Date(at).toISOString()});
@@ -627,7 +646,7 @@ export class TradeState {
             id: `${prefix}:${m.id}:${b.id}`,
             ...(() => {
               const trace=row.settlementAudit?.get(`${m.id}:${b.id}`);
-              const version=row.betAt.get(`${m.id}:${b.id}`);
+              const version=betVersionAt(row,String(m.id),b);
               const proof=[trace?.last40,trace?.last41,trace?.lastSnapshot].find(p=>p?.timestamp?.orderingSafe===true&&(p.timestamp.timezone==='explicit'||p.timestamp.contract==='lsports-217525-utc')&&Date.parse(p.versionAt)===version);
               return proof&&unavailableReasons.length===0?{priceVersionAt:proof.versionAt,priceOrderingSafe:true}:{};
             })(),

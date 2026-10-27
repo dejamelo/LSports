@@ -7,7 +7,7 @@ import {walkSnapshot} from './full-snapshot.js';
 import {jsonItems,writeJsonObject} from '@lsports/feed-store';
 import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
-import { TradeState, persistedBetOrders, restorePreciseBetOrders, type Row } from './state.js';
+import { TradeState, compactBetAt, persistedBetOrders, restorePreciseBetOrders, type Row } from './state.js';
 
 // The sidecar is parsed as a bounded stream, one <=32 MiB record at a time.
 // Keep a finite file cap while admitting the measured 2.20 GB production
@@ -174,6 +174,8 @@ export async function restore(state: TradeState, path: string, progress?:(sample
       const lane = entry.lane as Lane;
       const key = regular?entry.fixtureId:`outright:${(entry.outright as Record<string,unknown>).competitionId}:${entry.fixtureId}`;
       if (recovered.rows[lane].has(key)) throw new Error('Duplicate outright checkpoint identity');
+      const markets=new Map(entry.markets) as Map<string,Market>;
+      const betAt=compactBetAt(markets,entry.betAt as [string,number][]);
       const restoredRow:Row={
         deferredTimestampBets: entry.deferredTimestampBets === undefined ? undefined : new Map(entry.deferredTimestampBets as [string, unknown][]) as Row["deferredTimestampBets"],
         timestampRecovery: entry.timestampRecovery === undefined ? undefined : new Map(entry.timestampRecovery as [string, unknown][]) as Row["timestampRecovery"],
@@ -183,8 +185,8 @@ export async function restore(state: TradeState, path: string, progress?:(sample
         fixture: entry.fixture as unknown as Row["fixture"], outright: entry.outright as unknown as Row["outright"],
         livescore: entry.livescore as unknown as Row["livescore"], marketReceipt: entry.marketReceipt as unknown as Row["marketReceipt"],
         betOrder: entry.betOrder === undefined ? undefined : new Map(entry.betOrder as [string,string][]),
-        markets: new Map(entry.markets) as Map<string, Market>,
-        marketAt: new Map(entry.marketAt) as Map<string, number>, betAt: new Map(entry.betAt) as Map<string, number>,
+        markets,
+        marketAt: new Map(entry.marketAt) as Map<string, number>, betAt,
       };
       restorePreciseBetOrders(restoredRow);
       recovered.rows[lane].set(key, restoredRow);
