@@ -15,6 +15,28 @@ class Upgrade(unittest.TestCase):
    with self.assertRaises(Exception):NS['partition_heap_mib'](bad)
   with self.assertRaises(Exception):NS['partition_memory']({**progress,'v8HeapOomRepair':False})
 
+ def test_pipeline_reuses_verified_v8_compaction_receipt_without_raising_heap_or_container_limit(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   secure=Path(tmp);digest='a'*64;image='adl-worker-partitioned:'+digest[:24]
+   plan={'evidenceVerified':True,'v8HeapCompactionPreserve':True,'previousOldSpaceMiB':4608,'oldSpaceMiB':4608,'containerLimitUnchanged':True,'measuredRedundantTimestampBytes':319*1024*1024}
+   receipt={'image':image,'digest':digest,'oomRestoreVerified':True,'snapshotMemoryRepair':True,'v8HeapOomRepair':True,'memoryLimitBytes':6442450944,'heapBudgetPlan':plan}
+   path=secure/('partitioned-upgrade-'+digest[:24]+'.json');path.write_text(json.dumps(receipt));path.chmod(0o600)
+   old_secure,old_run=NS.get('SECURE'),NS['run']
+   def run(args,**kwargs):
+    if args[:3]==['docker','image','inspect']:
+     return json.dumps([{'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}}]).encode()
+    if args[:2]==['docker','run']:
+     return json.dumps({'heapLimitBytes':5*1024**3}).encode()
+    raise AssertionError(args[:2])
+   NS.update(SECURE=secure,run=run)
+   worker={'image':image,'mem_limit':6442450944,'environment':{'NODE_OPTIONS':'--max-old-space-size=4608'}}
+   try:
+    self.assertEqual(NS['existing_pipeline_heap_plan'](worker),plan)
+    receipt['heapBudgetPlan']={**plan,'measuredRedundantTimestampBytes':1};path.write_text(json.dumps(receipt));path.chmod(0o600)
+    with self.assertRaises(Exception):NS['existing_pipeline_heap_plan'](worker)
+   finally:
+    NS.update(SECURE=old_secure,run=old_run)
+
  def test_v8_oom_lock_archive_preserves_owner_bytes_only_for_exact_verified_container(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);directory=root/'feed';backup=root/'backup';directory.mkdir();backup.mkdir();lock=directory/'trade-feed.json.lock';lock.write_bytes(b'1234')
