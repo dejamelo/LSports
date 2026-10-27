@@ -417,12 +417,13 @@ def pipeline_load_metrics_valid(metrics,proof):
 def reuse_pipeline_load_proof(backup,proof_sha,proof):
     script=backup/('pipeline-load-proof-'+proof_sha[:16]+'.mjs')
     if not script.exists():return None
-    require(script.is_file() and not script.is_symlink() and script.stat().st_nlink==1 and script.stat().st_uid==os.geteuid() and script.stat().st_mode&0o077==0 and snapshot_file_hash(script)==proof_sha and script.read_text()==proof,'PIPELINE_LOAD_SAVED_PROOF_IDENTITY_MISMATCH')
+    backup_info=backup.lstat();require(backup.is_dir() and not backup.is_symlink() and backup_info.st_uid==os.geteuid() and backup_info.st_mode&0o077==0,'PIPELINE_LOAD_SAVED_PROOF_BACKUP_NOT_PRIVATE')
+    script_info=script.lstat();require(script.is_file() and not script.is_symlink() and script_info.st_nlink==1 and script_info.st_uid==os.geteuid() and script_info.st_mode&0o777 in (0o600,0o644) and snapshot_file_hash(script)==proof_sha and script.read_text()==proof,'PIPELINE_LOAD_SAVED_PROOF_IDENTITY_MISMATCH')
     candidates=[]
     for log in backup.glob('pipeline-load-*.private.log'):
         if log.is_symlink() or not log.is_file():continue
         info=log.stat()
-        if info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o077 or info.st_size>64*1024**2:continue
+        if info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o777 not in (0o600,0o644) or info.st_size>64*1024**2:continue
         raw=log.read_bytes();records=[]
         for line in raw.splitlines():
             try:record=json.loads(line)
