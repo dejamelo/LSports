@@ -70,7 +70,7 @@ export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'conne
   // completion, including local in-flight/heap deferrals. These failures leave
   // the blocked baseline in place and must not trigger another multi-GB publish.
   const snapshot=c.fullSnapshot;
-  return !!snapshot&&!snapshot.completedAt&&snapshot.stage!=='failed'&&Number.isFinite(Date.parse(snapshot.startedAt||''));
+  return !!snapshot&&!snapshot.completedAt&&Number.isFinite(Date.parse(snapshot.startedAt||''));
  });
 }
 export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=32768;
@@ -710,7 +710,7 @@ export async function session(
           // release the global projection gate so another lane's completed
           // snapshot can publish. Partial application still keeps the gate.
           if(rejectedEmptySnapshot&&(state.connections[lane].fullSnapshot?.appliedRows||0)===0&&state.connections[lane].fullSnapshot){
-            state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:'failed'}});
+            state.set(lane,{fullSnapshot:undefined});
           }
           // Invalid partition HTTP is not AMQP failure. Keep persist-before-ACK and
           // baseline false, without changing the independent InPlay recovery policy.
