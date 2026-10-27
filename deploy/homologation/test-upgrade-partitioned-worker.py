@@ -215,6 +215,7 @@ class Upgrade(unittest.TestCase):
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([images[args[3]]]).encode()
     if args[:2]==['docker','tag']:images[args[3]]=images['base'];return b''
+    if args[:2]==['docker','exec'] and any('readFileSync' in str(a) for a in args):return json.dumps(hashes).encode()
     if args[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in args):return json.dumps({'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000],'opened':not read_access_fails,'readBytes':0 if read_access_fails else 1,'code':'EACCES' if read_access_fails else None,'chain':[]}).encode()
     if args[:2]==['docker','run'] and readback_fails and any('verifyProjectionFile' in str(v) for v in args):raise subprocess.CalledProcessError(1,args)
     if args[:2]==['docker','run'] and any('projection-serialize-ok' in str(v) for v in args):
@@ -307,6 +308,7 @@ class Upgrade(unittest.TestCase):
    def run(args,**kw):
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':'sha256:'+'c'*64,'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':old_digest if args[3]=='prepared-image' else digest}}}]).encode()
+    if args[:2]==['docker','exec'] and any('readFileSync' in str(a) for a in args):return json.dumps(old_files).encode()
     if args[:2]==['docker','tag']:return b''
     if args[:2]==['docker','build']:return b''
     if args[:2]==['docker','run'] and any('readFileSync' in str(a) for a in args):return json.dumps(old_files).encode()

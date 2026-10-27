@@ -1415,7 +1415,12 @@ def upgrade_partitioned_unlocked(request):
                 require(memory_limit==6442450944 and actual_env.get('NODE_OPTIONS')==before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608','V8_HEAP_SETTING_CHANGED_NO_DEPLOYMENT')
                 inherited_heap_plan={'evidenceVerified':True,'v8HeapCompactionPreserve':True,'previousOldSpaceMiB':4608,'oldSpaceMiB':4608,'containerLimitUnchanged':True,'measuredRedundantTimestampBytes':319*1024*1024}
             probe="const fs=require('node:fs'),h=require('node:crypto');let result={};for(const name of "+json.dumps(sorted(files))+ "){const p='/app/'+name;result[name]=fs.existsSync(p)?h.createHash('sha256').update(fs.readFileSync(p)).digest('hex'):null;}console.log(JSON.stringify(result));"
-            hashes=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',original_image,'-e',probe]))
+            # While the old worker is live, read its immutable source directly
+            # so an 8 GiB probe container does not coexist with it. If the
+            # controlled stop already completed, use the bounded 128 MiB
+            # image-only probe instead.
+            source_command=(['docker','exec',workers[0]['id'],'node','-e',probe] if workers[0].get('running') and workers[0].get('id') else ['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',original_image,'-e',probe])
+            hashes=json.loads(run(source_command,timeout=30))
             if request.get('liveOomRepair') or request.get('livePersistenceRepair'):
                 identity_proof=verify_current_worker_identity(workers[0],request,original_image)
                 if identity_proof=='verified_v8_heap_exit':
