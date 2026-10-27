@@ -12,6 +12,24 @@ test('deferred public projection skips materialization after the private checkpo
  const order:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:durable');return 23;},()=>{order.push('projection:materialized');return {events:1};},true);
  assert.deepEqual(order,['checkpoint:durable']);assert.equal(result.checkpointResult,23);assert.equal('projection'in result,false);
 });
+test('durable inbox remains received but unprocessed while a full snapshot is validated',{timeout:20000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-snapshot-validation-gate-')),path=join(dir,'feed.json'),dbPath=path+'.prematch.inbox.sqlite',state=new TradeState(),abort=new AbortController();
+ let actor:any,metrics:any,entered!:()=>void,release!:()=>void;const snapshotEntered=new Promise<void>(r=>entered=r),validationGate=new Promise<void>(r=>release=r);
+ const save=coalescedPersistence(()=>publicationCaptureTurn(state,async stable=>{const{regular,...saved}=streamCheckpoint(stable);await persistRegularCheckpoint(path,stable);await createPublisher(path)(stable.projection(Date.now(),false),{...saved,regularExternal:true});}));
+ const api:any={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true}},async snapshot(){assert.fail('full recovery only');},async catalog(){return[];},snapshotFull:async(options:any)=>{
+  options.progress?.({stage:'validate',bytes:865000000,validatedRows:1400,appliedRows:0,lastProgressAt:new Date().toISOString(),httpStatus:200});entered();await validationGate;
+  options.progress?.({stage:'apply',bytes:865000000,validatedRows:41303,appliedRows:0,lastProgressAt:new Date().toISOString(),httpStatus:200});
+  await options.apply({fixtureId:900001,fixture:{status:1,sport:{name:'Football'}},markets:[{id:1,status:1,bets:[{id:'1',price:'2.0',status:1}]}]},Date.now());
+  options.progress?.({stage:'complete',bytes:865000000,validatedRows:41303,appliedRows:1,lastProgressAt:new Date().toISOString(),httpStatus:200});return{ids:new Set([900001]),rows:41303,bytes:865000000};
+ }};
+ const task=session(pkg,{packages:[pkg],snapshotUrl:'https://snapshot.invalid',customersUrl:'https://customers.invalid',recoveryMs:300000,staleMs:90000} as any,state,save,abort.signal,{connect:null as any,clientFactory:()=>api,durableConnect:async(p:any,db:string,onMetrics:any)=>actor=await connectDurableMq(p,db,m=>{metrics=m;onMetrics?.(m)},{offline:true,deferTransport:true}),checkpointBatchThreshold:8,checkpointBatchFlushMs:1000},dbPath);void task.catch(()=>{});
+ try{
+  await snapshotEntered;const rows=Array.from({length:8},(_,i)=>({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:`during-snapshot-${i}`,ServerTimestamp:Date.now()+i},Body:{Events:[{FixtureId:900001,Markets:[{Id:1,Status:1,Bets:[{Id:'1',Price:String(2+i/10),Status:1,IsChanged:1}]}]}]}})),properties:{headers:{MessageType:3}},fields:{}}));
+  actor.offline(rows);await until(()=>metrics?.received===8);assert.equal(metrics.processed,0,'snapshot validation must not race a second full-state checkpoint');assert.equal(metrics.checkpointed,0);
+  const inbox=openInbox(dbPath);assert.equal(inbox.stats().backlog,8,'all received rows remain durable and unacknowledged');inbox.close();
+  release();await until(()=>metrics?.checkpointed===8);const drained=openInbox(dbPath);assert.equal(drained.stats().backlog,0);drained.close();
+ }finally{release();abort.abort();await task.catch(()=>{});await actor?.close();await rm(dir,{recursive:true,force:true});}
+});
 test('snapshot application defers full public projection until the verified baseline is complete',()=>{
  const state=new TradeState();assert.equal(deferPublicProjectionDuringSnapshot(state),false);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);

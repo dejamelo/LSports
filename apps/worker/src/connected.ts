@@ -522,7 +522,16 @@ export async function session(
       processing=processing.then(async()=>{
         drainScheduled=false;
         if(snapshotApplicationActive)return; // raw reception/SQLite ACK continue in the separate actor
-        while(!closed&&durable&&stageDelivery&&pendingAcks.length+checkpointPending>=32768)await backgroundCommit;
+        while(!closed&&durable&&stageDelivery&&pendingAcks.length+checkpointPending>=32768){
+          // A full-snapshot validation keeps already received rows durable in
+          // SQLite. Do not spin on an intentionally deferred checkpoint when
+          // that bounded prefix reaches its limit; resume after the snapshot
+          // releases the gate.
+          if(snapshotApplicationActive){drainScheduled=false;return;}
+          const pending=backgroundCommit;
+          if(pending)await pending;
+          else {commitPending(true);if(backgroundCommit)await backgroundCommit;else {drainScheduled=false;return;}}
+        }
         if(closed)return;
         const messages=buffered.splice(0,durable&&stageDelivery?Math.min(4096,Math.max(1,32768-pendingAcks.length-checkpointPending)):durable?4096:100);
         for(const msg of messages){
@@ -664,6 +673,17 @@ export async function session(
                 if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,atUTC:new Date().toISOString()}));
               });})();processing=applied;await applied;
             };
+            // Snapshot validation and a multi-gigabyte private checkpoint both
+            // allocate against the same V8 heap. Keep the durable ingress actor
+            // receiving into SQLite, but stop local replay/checkpoint batches
+            // until the verified spool has finished. The rows remain unacked
+            // and recoverable; finally below releases the gate on success or
+            // recoverable failure.
+            if(durable){
+              snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);
+              await processing;
+              if(backgroundCommit)await backgroundCommit;
+            }
             const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply'){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
