@@ -393,6 +393,55 @@ def durable_ingress_proof_command(backup,image,check,name='durable-ingress-proof
 
 def pipeline_proof_revision(check):return hashlib.sha256(check.encode()).hexdigest()
 
+def pipeline_load_expected_messages(proof):
+    duration=re.search(r'duration=Number\(process\.env\.ADL_PIPELINE_DURATION_MS\|\|(\d+)\)',proof)
+    load=re.search(r'offlineLoad\(\{durationMs:duration,rate:(\d+),burst:(\d+),',proof)
+    require(duration is not None and load is not None,'PIPELINE_LOAD_TARGET_UNVERIFIED')
+    return int(duration.group(1))*int(load.group(1))//1000+int(load.group(2))
+
+def pipeline_load_expected_duration(proof):
+    match=re.search(r'duration=Number\(process\.env\.ADL_PIPELINE_DURATION_MS\|\|(\d+)\)',proof)
+    require(match is not None,'PIPELINE_LOAD_TARGET_UNVERIFIED')
+    return int(match.group(1))
+
+def pipeline_load_metrics_valid(metrics,proof):
+    expected=pipeline_load_expected_messages(proof)
+    return (metrics.get('snapshotRows',0)>0 and metrics.get('applied')==metrics.get('snapshotRows') and
+        metrics.get('preload',0)>=500000 and metrics.get('loadSent')==expected and metrics.get('received')==expected and
+        pipeline_load_expected_duration(proof)<=metrics.get('loadDurationMs',0)<=pipeline_load_expected_duration(proof)+max(10000,pipeline_load_expected_duration(proof)//100) and
+        metrics.get('processed',0)>metrics.get('received',0) and metrics.get('checkpointed')==metrics.get('processed') and
+        metrics.get('finalBacklog')==metrics.get('preload')+metrics.get('received')-metrics.get('checkpointed') and
+        metrics.get('finalBacklog')<metrics.get('preload') and metrics.get('readbackRows',0)>=metrics.get('snapshotRows') and
+        metrics.get('peakRSSBytes',0)<6*1024**3 and metrics.get('maxPersistMs',10**12)<180000)
+
+def reuse_pipeline_load_proof(backup,proof_sha,proof):
+    script=backup/('pipeline-load-proof-'+proof_sha[:16]+'.mjs')
+    if not script.exists():return None
+    require(script.is_file() and not script.is_symlink() and script.stat().st_nlink==1 and script.stat().st_uid==os.geteuid() and script.stat().st_mode&0o077==0 and snapshot_file_hash(script)==proof_sha and script.read_text()==proof,'PIPELINE_LOAD_SAVED_PROOF_IDENTITY_MISMATCH')
+    candidates=[]
+    for log in backup.glob('pipeline-load-*.private.log'):
+        if log.is_symlink() or not log.is_file():continue
+        info=log.stat()
+        if info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o077 or info.st_size>64*1024**2:continue
+        raw=log.read_bytes();records=[]
+        for line in raw.splitlines():
+            try:record=json.loads(line)
+            except ValueError:continue
+            if isinstance(record,dict) and record.get('operation')=='pipeline.offline.complete':records.append(record)
+        if b'pipeline-load-offline-ok' not in raw or b'inbox-capacity-offline-ok' not in raw or len(records)!=1:continue
+        record=records[0]
+        if record.get('scope')!='synthetic_snapshot_plus_real_durable_actor_and_session_not_AWS':continue
+        fields=('snapshotBytes','snapshotRows','applied','preload','received','acknowledged','processed','checkpointed','finalBacklog','writes','maxPersistMs','peakRSSBytes','maxEventLoopDelayMs','readbackRows')
+        metrics={key:record[key] for key in fields if type(record.get(key)) in (int,float)}
+        load=record.get('load') or {}
+        if isinstance(load,dict):
+            for key,value in (('loadSent',load.get('sent')),('loadDurationMs',load.get('durationMs'))):
+                if type(value) in (int,float):metrics[key]=value
+        if pipeline_load_metrics_valid(metrics,proof):candidates.append((info.st_mtime_ns,log.name,metrics))
+    if not candidates:return None
+    _,name,metrics=max(candidates)
+    return {'verified':True,'log':name,'proofSha256':proof_sha,'metrics':metrics}
+
 def durable_ingress_log_summary(backup):
     path=backup/'durable-ingress-test.private.log'
     if not path.exists():return {'present':False}
@@ -1449,6 +1498,11 @@ def upgrade_partitioned_unlocked(request):
             pipeline_proof_sha256=pipeline_proof_revision(PIPELINE_LOAD_PROOF)
             if progress.get('pipelineLoadProofSha256')!=pipeline_proof_sha256:
                 progress['pipelineLoadVerified']=False;progress['pipelineLoadProofSha256']=None;save(progress)
+            if progress.get('pipelineMemoryEightGiB') is True and not progress.get('pipelineLoadVerified'):
+                saved_proof=reuse_pipeline_load_proof(backup,pipeline_proof_sha256,PIPELINE_LOAD_PROOF)
+                if saved_proof:
+                    progress['pipelineLoadMetrics']=saved_proof['metrics'];progress['pipelineLoadVerified']=True;progress['pipelineLoadProofSha256']=pipeline_proof_sha256;progress['pipelineLoadProofReused']=saved_proof;save(progress)
+                    emit(operation='cutover.aws',stage='partitioned_upgrade.offline_pipeline_load',status='reused_verified_artifact',proofSha256=pipeline_proof_sha256,privateLog=saved_proof['log'],metrics=saved_proof['metrics'],workerStarted=False,posnetChanged=False)
         elif request.get('pipelineRepair'):
             require(progress.get('pipelineLoadVerified') is True,'PIPELINE_LOAD_PROOF_SOURCE_UNAVAILABLE')
         if request.get('pipelineRepair') and not progress.get('pipelineLoadVerified'):
@@ -1469,9 +1523,14 @@ def upgrade_partitioned_unlocked(request):
             for line in output.decode().splitlines():
                 try:r=json.loads(line)
                 except ValueError:continue
-                if r.get('operation')=='pipeline.offline.complete':progress['pipelineLoadMetrics']={k:v for k,v in r.items() if k in ('snapshotBytes','snapshotRows','applied','preload','received','acknowledged','processed','checkpointed','finalBacklog','writes','maxPersistMs','peakRSSBytes','maxEventLoopDelayMs','readbackRows') and type(v) in (int,float)}
+                if r.get('operation')=='pipeline.offline.complete':
+                    progress['pipelineLoadMetrics']={k:v for k,v in r.items() if k in ('snapshotBytes','snapshotRows','applied','preload','received','acknowledged','processed','checkpointed','finalBacklog','writes','maxPersistMs','peakRSSBytes','maxEventLoopDelayMs','readbackRows') and type(v) in (int,float)}
+                    load=r.get('load') or {}
+                    if isinstance(load,dict):
+                        if type(load.get('sent')) in (int,float):progress['pipelineLoadMetrics']['loadSent']=load['sent']
+                        if type(load.get('durationMs')) in (int,float):progress['pipelineLoadMetrics']['loadDurationMs']=load['durationMs']
             if progress.get('pipelineMemoryEightGiB') is True:
-                m=progress.get('pipelineLoadMetrics',{});require(m.get('snapshotRows',0)>0 and m.get('applied')==m.get('snapshotRows') and m.get('preload',0)>=500000 and m.get('received',0)>=30000 and m.get('processed',0)>m.get('received',0) and m.get('checkpointed')==m.get('processed') and m.get('finalBacklog')==m.get('preload')+m.get('received')-m.get('checkpointed') and m.get('finalBacklog')<m.get('preload') and m.get('readbackRows',0)>=m.get('snapshotRows') and m.get('peakRSSBytes',0)<6*1024**3 and m.get('maxPersistMs',10**12)<180000,'EIGHT_GIB_PIPELINE_ACCEPTANCE_METRICS_FAILED')
+                m=progress.get('pipelineLoadMetrics',{});require(pipeline_load_metrics_valid(m,PIPELINE_LOAD_PROOF),'EIGHT_GIB_PIPELINE_ACCEPTANCE_METRICS_FAILED')
             progress['pipelineLoadVerified']=True;progress['pipelineLoadProofSha256']=pipeline_proof_sha256;save(progress)
         if request.get('pipelineRepair'):require(progress.get('pipelineLoadVerified') is True,'PIPELINE_PROOF_REQUIRED_NO_STOP')
         if phase=='prepare':
