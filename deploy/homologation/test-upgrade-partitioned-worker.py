@@ -4,6 +4,29 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_v8_compaction_plan_preserves_existing_six_gib_container_and_heap(self):
+  progress={'memoryLimitBytes':6442450944,'snapshotMemoryRepair':True,'v8HeapOomRepair':True,'heapBudgetPlan':{'evidenceVerified':True,'v8HeapCompactionPreserve':True,'previousOldSpaceMiB':4608,'oldSpaceMiB':4608,'containerLimitUnchanged':True,'measuredRedundantTimestampBytes':319*1024*1024}}
+  self.assertEqual(NS['partition_memory'](progress),6442450944);self.assertEqual(NS['partition_heap_mib'](progress),4608)
+  for changed in ({'oldSpaceMiB':4096},{'containerLimitUnchanged':False},{'measuredRedundantTimestampBytes':1}):
+   bad={**progress,'heapBudgetPlan':{**progress['heapBudgetPlan'],**changed}}
+   with self.assertRaises(Exception):NS['partition_heap_mib'](bad)
+  with self.assertRaises(Exception):NS['partition_memory']({**progress,'v8HeapOomRepair':False})
+
+ def test_v8_heap_oom_repair_requires_exact_stopped_container_and_log_signature(self):
+  request={'snapshotMemoryRepair':True,'v8HeapOomRepair':True,'expectedOomPrefix':'05e3b610fa1b'}
+  worker={'oomKilled':False,'exitCode':134,'running':False,'name':'/adl-homologation-worker-1','id':'05e3b610fa1b'+'a'*52}
+  original=NS['subprocess'].run
+  try:
+   NS['subprocess'].run=lambda *a,**k:types.SimpleNamespace(returncode=0,stdout=b'Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory',stderr=b'')
+   NS['verify_live_v8_heap_oom_identity'](worker,request)
+   for changed in ({'running':True},{'oomKilled':True},{'name':'/adl-homologation-api-1'},{'id':'b'*64},{'exitCode':137}):
+    with self.assertRaises(Exception):NS['verify_live_v8_heap_oom_identity']({**worker,**changed},request)
+   NS['subprocess'].run=lambda *a,**k:types.SimpleNamespace(returncode=0,stdout=b'JavaScript heap out of memory',stderr=b'')
+   with self.assertRaises(Exception):NS['verify_live_v8_heap_oom_identity'](worker,request)
+   NS['subprocess'].run=lambda *a,**k:types.SimpleNamespace(returncode=1,stdout=b'',stderr=b'')
+   with self.assertRaises(Exception):NS['verify_live_v8_heap_oom_identity'](worker,request)
+  finally:NS['subprocess'].run=original
+
  def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
   request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
   worker={'oomKilled':True,'exitCode':137,'running':False,'name':'/adl-homologation-worker-1','id':'7f43cb2939c7'+'a'*52}
@@ -11,7 +34,7 @@ class Upgrade(unittest.TestCase):
   for changed in ({'running':True},{'oomKilled':False},{'name':'/adl-homologation-api-1'},{'id':'b'*64},{'exitCode':1}):
    with self.assertRaises(Exception):NS['verify_live_oom_identity']({**worker,**changed},request)
   old={name:'original' for name in NS['PARTITION_FILES']};digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-  new={**old,'apps/worker/src/state.ts':'bounded'}
+  new={**old,'apps/worker/src/state.ts':'bounded','apps/worker/src/timestamp-recovery.ts':'derived timestamp'}
   NS['verify_live_oom_sources'](old,new,digest)
   for candidate,source_hash in ((old,digest),({**new,'apps/worker/src/messages.ts':'unexpected'},digest),(new,'0'*64)):
    with self.assertRaises(Exception):NS['verify_live_oom_sources'](old,candidate,source_hash)

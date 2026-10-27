@@ -1,5 +1,5 @@
 """Prepare a verified derived worker image, then activate once; preserve migration and POSNET."""
-PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts'}
+PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts'}
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
 PIPELINE_BASE_FILES=PARTITION_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
 PROJECTION_RESUME_DRIVER_SHA256='b2f7cd58ee386c3855b9225088d112fef51a8b442bd0369848fab626fa0c8034'
@@ -68,6 +68,13 @@ def verify_projection_resume_artifacts(backup,progress,image_info,name):
 def verify_live_oom_identity(worker,request):
     require(request.get('snapshotMemoryRepair') and worker.get('oomKilled') is True and worker.get('exitCode')==137 and not worker.get('running') and worker.get('name')=='/adl-homologation-worker-1' and re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))) and str(worker.get('id','')).startswith(request['expectedOomPrefix']),'CURRENT_OOM_IDENTITY_UNVERIFIED')
 
+def verify_live_v8_heap_oom_identity(worker,request):
+    prefix=request.get('expectedOomPrefix','')
+    require(request.get('snapshotMemoryRepair') and request.get('v8HeapOomRepair') is True and worker.get('oomKilled') is False and worker.get('exitCode')==134 and not worker.get('running') and worker.get('name')=='/adl-homologation-worker-1' and re.fullmatch('[0-9a-f]{12,63}',str(prefix)) and str(worker.get('id','')).startswith(prefix),'CURRENT_V8_HEAP_OOM_IDENTITY_UNVERIFIED')
+    logs=subprocess.run(['docker','logs','--tail','100',worker['id']],capture_output=True,timeout=15,check=False)
+    require(logs.returncode==0,'CURRENT_V8_HEAP_OOM_LOG_READ_FAILED')
+    require(b'Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory' in logs.stdout+logs.stderr,'CURRENT_V8_HEAP_OOM_SIGNATURE_UNVERIFIED')
+
 def verify_live_persistence_identity(worker,request,image):
     expected=request.get('expectedLiveImage')
     checks={'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'workerRunning':worker.get('running') is True,'workerNotOomKilled':worker.get('oomKilled') is False,'workerNameMatches':worker.get('name')=='/adl-homologation-worker-1','expectedImageFormat':bool(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',str(expected))),'imageReferenceMatches':image==expected}
@@ -78,7 +85,7 @@ def verify_live_persistence_identity(worker,request,image):
 def verify_live_oom_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_OOM_SOURCE_DIGEST_MISMATCH')
     changed={name for name in files if files[name]!=old_files[name]}
-    require(changed and changed<= {'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts'},'CURRENT_OOM_PATCH_SCOPE_UNVERIFIED')
+    require(changed and changed<= {'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/feed-store/src/index.ts'},'CURRENT_OOM_PATCH_SCOPE_UNVERIFIED')
 
 def verify_live_snapshot_pressure_sources(old_files,files,old_digest):
     require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_PRESSURE_SOURCE_DIGEST_MISMATCH')
@@ -89,13 +96,16 @@ def verify_live_snapshot_pressure_sources(old_files,files,old_digest):
 
 def partition_memory(progress):
     value=progress.get('memoryLimitBytes',4294967296)
-    verified_six_gib=value==6442450944 and (progress.get('pipelineRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('snapshotPressureRepair') is True and progress.get('livePersistenceRepair') is True)
+    verified_six_gib=value==6442450944 and (progress.get('pipelineRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('snapshotPressureRepair') is True and progress.get('livePersistenceRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('v8HeapOomRepair') is True)
     require(value==4294967296 or verified_six_gib,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
     return value
 
 def partition_heap_mib(progress):
     plan=progress.get('heapBudgetPlan')
     if plan is None:return 2560
+    if plan.get('v8HeapCompactionPreserve') is True:
+        require(partition_memory(progress)==6442450944 and progress.get('snapshotMemoryRepair') is True and progress.get('v8HeapOomRepair') is True and plan.get('evidenceVerified') is True and plan.get('previousOldSpaceMiB')==4608 and plan.get('oldSpaceMiB')==4608 and plan.get('containerLimitUnchanged') is True and plan.get('measuredRedundantTimestampBytes')>=300*1024*1024,'V8_HEAP_COMPACTION_PLAN_UNVERIFIED')
+        return 4608
     if plan.get('measuredSnapshotRetry') is True:
         require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('previousOldSpaceMiB')==4096 and plan.get('oldSpaceMiB')==4608 and plan.get('containerLimitUnchanged') is True and plan.get('outsideOldSpaceBytes')==1610612736 and plan.get('guardBudgetBytes')==335544320 and re.fullmatch('[0-9a-f]{64}',str(plan.get('sourceTailSha256',''))),'MEASURED_SNAPSHOT_RETRY_PLAN_UNVERIFIED')
         return 4608
@@ -1116,7 +1126,7 @@ def upgrade_partitioned_unlocked(request):
             receipt_path,saved,files=resolve_prepared_upgrade(request,files);digest=saved['digest']
         meta=json.loads((SECURE/'deployment.json').read_bytes());base=partition_base(meta);before=model(base)
         require(control_status()==200,'API_NOT_HEALTHY')
-        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
+        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;v8_heap_preserve=request.get('snapshotMemoryRepair') is True and request.get('v8HeapOomRepair') is True;require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944 or v8_heap_preserve and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
         inherited_heap_plan=None
         if request.get('pipelineRepair'):
             require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and memory_limit==6442450944,'PIPELINE_REQUIRES_SIX_GIB_VERIFIED_IDENTITY')
@@ -1192,17 +1202,22 @@ def upgrade_partitioned_unlocked(request):
             image_info=json.loads(run(['docker','image','inspect',progress['image']]))[0]
             require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==digest,'UPGRADE_IMAGE_LABEL_MISMATCH')
         else:
-            require(phase=='prepare','UPGRADE_MUST_BE_PREPARED');workers=states('worker');require(len(workers)==1 and (workers[0]['running'] or request.get('snapshotMemoryRepair') and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137),'UPGRADE_REQUIRES_VERIFIED_RUNNING_OR_OOM_WORKER')
+            require(phase=='prepare','UPGRADE_MUST_BE_PREPARED');workers=states('worker');require(len(workers)==1,'UPGRADE_WORKER_COUNT_UNVERIFIED');known_stopped_oom=request.get('snapshotMemoryRepair') and not workers[0].get('running') and (workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137 or request.get('v8HeapOomRepair') is True and workers[0].get('oomKilled') is False and workers[0].get('exitCode')==134);require(workers[0]['running'] or known_stopped_oom,'UPGRADE_REQUIRES_VERIFIED_RUNNING_OR_OOM_WORKER')
             require(snapshot_host_memory()>=6*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT');require(shutil.disk_usage('/opt').free>=(4*1024**3 if request.get('pipelineRepair') else 1024**3),'UPGRADE_DISK_HEADROOM_INSUFFICIENT')
             original_image=before['services']['worker']['image'];base_info=json.loads(run(['docker','image','inspect',original_image]))[0]
             container=json.loads(run(['docker','inspect',workers[0]['id']]))[0];require(container['Image']==base_info['Id'],'UPGRADE_RUNNING_IMAGE_MISMATCH');require(snapshot_memory_bytes(container['HostConfig']['Memory'])==memory_limit,'UPGRADE_CONTAINER_MEMORY_LIMIT_MISMATCH')
             if inherited_heap_plan and inherited_heap_plan.get('preserveExisting') is True:
                 actual_env=dict(v.split('=',1) for v in container.get('Config',{}).get('Env',[]) if '=' in v)
                 require(actual_env.get('NODE_OPTIONS')==before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=3840','PIPELINE_ACTIVE_HEAP_SETTING_MISMATCH')
+            if request.get('v8HeapOomRepair'):
+                actual_env=dict(v.split('=',1) for v in container.get('Config',{}).get('Env',[]) if '=' in v)
+                require(memory_limit==6442450944 and actual_env.get('NODE_OPTIONS')==before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608','V8_HEAP_SETTING_CHANGED_NO_DEPLOYMENT')
+                inherited_heap_plan={'evidenceVerified':True,'v8HeapCompactionPreserve':True,'previousOldSpaceMiB':4608,'oldSpaceMiB':4608,'containerLimitUnchanged':True,'measuredRedundantTimestampBytes':319*1024*1024}
             probe="const fs=require('node:fs'),h=require('node:crypto');let result={};for(const name of "+json.dumps(sorted(files))+ "){const p='/app/'+name;result[name]=fs.existsSync(p)?h.createHash('sha256').update(fs.readFileSync(p)).digest('hex'):null;}console.log(JSON.stringify(result));"
             hashes=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',original_image,'-e',probe]))
             if request.get('liveOomRepair') or request.get('livePersistenceRepair'):
                 if request.get('livePersistenceRepair'):verify_live_persistence_identity(workers[0],request,original_image)
+                elif request.get('v8HeapOomRepair'):verify_live_v8_heap_oom_identity(workers[0],request)
                 else:verify_live_oom_identity(workers[0],request)
                 old_digest=(base_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch');require(re.fullmatch('[0-9a-f]{64}',str(old_digest)),'CURRENT_OOM_IMAGE_LABEL_UNVERIFIED')
                 old_receipt=SECURE/('partitioned-upgrade-'+old_digest[:24]+'.json');require(old_receipt.is_file() and not old_receipt.is_symlink() and old_receipt.stat().st_uid==os.geteuid() and old_receipt.stat().st_mode&0o077==0,'CURRENT_OOM_SOURCE_RECEIPT_MISSING')
@@ -1245,7 +1260,7 @@ def upgrade_partitioned_unlocked(request):
             check="""import{decodeMessage}from'/app/apps/worker/src/messages.ts';import{partitionedSnapshot,subscriptionInventory}from'/app/apps/worker/src/partitioned-snapshot.ts';await import('/app/apps/worker/src/connected.ts');const sdk=await import('trade360-nodejs-sdk');if(sdk.knownEntityKeys.get(38)!=='OutrightLeagueFixtureUpdate')throw Error();const body={Competition:{Id:1,Competitions:[{Id:2,Events:[{FixtureId:3,OutrightLeague:{FixtureName:'ISOLATED OFFLINE',Status:1,LastUpdate:'2026-10-19T06:00:00Z'}}]}]}};const decoded=decodeMessage(Buffer.from(JSON.stringify({Header:{Type:38,MsgGuid:'offline-38',ServerTimestamp:1792389601000},Body:body})),{});if(decoded.events[0]?.outright?.fixture?.fixtureName!=='ISOLATED OFFLINE')throw Error();if(subscriptionInventory({fixtures:[2,1]},{Body:{Fixtures:[2,1]}}).join(',')!=='1,2')throw Error();let rejected=false;try{subscriptionInventory({fixtures:['PRIVATE_OFFLINE']},{Body:{Fixtures:['PRIVATE_OFFLINE']}})}catch(e){rejected=e.diagnostic?.snapshotValidation?.code==='inventory_invalid_ids'}if(!rejected)throw Error();let applied=0;const p=await partitionedSnapshot({async inventory(){return[11,12]},async events(ids){return ids.map(fixtureId=>({fixtureId,fixture:{status:1}}))}},{assertOpen(){},async begin(){},async batch(rows){applied+=rows.length},async progress(){}},{batchSize:1});if(p.stage!=='complete'||applied!==2)throw Error();console.log('partitioned-offline-ok');"""
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',check],timeout=30)
             require(b'partitioned-offline-ok' in output,'UPGRADE_OFFLINE_TEST_FAILED')
-            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
+            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,'v8HeapOomRepair':request.get('v8HeapOomRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
         if request.get('measuredSnapshotApplyHeapRepair'):
             require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('snapshotMemoryRepair') is True,'MEASURED_HEAP_REQUEST_SCOPE_UNVERIFIED')
             plan=measured_snapshot_apply_heap_plan(progress,backup,states('worker'))

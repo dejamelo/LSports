@@ -8,10 +8,11 @@ export function persistenceExpectedImage(ledger,env=process.env){
  if(!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(image||'')||env.ADL_LIVE_OOM_REPAIR==='1')throw Error('EXPECTED_CURRENT_PERSISTENCE_IMAGE_REQUIRED');
  return image;
 }
-export function acceptedWorkerMemoryLimits({mode,snapshotMemoryRepair,pipelineRepair,livePersistenceRepair}){
+export function acceptedWorkerMemoryLimits({mode,snapshotMemoryRepair,pipelineRepair,livePersistenceRepair,v8HeapOomRepair}){
  if(mode==='--repair-snapshot')return ['2147483648','4294967296'];
  if(pipelineRepair)return ['6442450944'];
  if(snapshotMemoryRepair&&livePersistenceRepair)return ['4294967296','6442450944'];
+ if(snapshotMemoryRepair&&v8HeapOomRepair)return ['6442450944'];
  return ['4294967296'];
 }
 // Authorized protected recovery + resumable migration. No credentials are copied or printed.
@@ -27,7 +28,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(process.env.ADL_REPO_ROOT||path.resolve(here,'../..')),runtimeRef=process.env.ADL_RUNTIME_REF||'HEAD';
 export const resolveAuditEntrypoint=(repoRoot=root)=>path.resolve(repoRoot,'scripts/audit-aws-cutover.ts');
 const auditEntrypoint=resolveAuditEntrypoint();
-const partitionWorkerSourceNames=Object.freeze(['connected.ts','connection-closer.ts','diagnostics.ts','snapshot-capacity.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','durable-ingress.mjs','durable-ingress.d.mts']);
+const partitionWorkerSourceNames=Object.freeze(['connected.ts','connection-closer.ts','diagnostics.ts','snapshot-capacity.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','timestamp-recovery.ts','durable-ingress.mjs','durable-ingress.d.mts']);
 const partitionPackageSourceNames=Object.freeze(['packages/contracts/src/index.ts','packages/feed-store/src/index.ts']);
 const emit=value=>console.log(JSON.stringify({operation:'cutover.resumable',...value}));
 export async function step(ledger,name,save,action){
@@ -174,7 +175,7 @@ export async function run(args){
   }
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
   stage='remote_consumer_gate';const pre=await remote('preflight');
-  const acceptedMemory=acceptedWorkerMemoryLimits({mode:args[4],snapshotMemoryRepair,pipelineRepair:process.env.ADL_PIPELINE_REPAIR==='1',livePersistenceRepair:process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'});
+  const acceptedMemory=acceptedWorkerMemoryLimits({mode:args[4],snapshotMemoryRepair,pipelineRepair:process.env.ADL_PIPELINE_REPAIR==='1',livePersistenceRepair:process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1',v8HeapOomRepair:process.env.ADL_LIVE_V8_HEAP_OOM_REPAIR==='1'});
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!workerCapacityApproved(pre.workerModel,{repairSnapshot:args[4]==='--repair-snapshot'}))throw Error('REMOTE_API_OR_CAPACITY_UNVERIFIED');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
   if(['--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
@@ -278,6 +279,7 @@ export async function run(args){
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryRepair&&process.env.ADL_CHECKPOINT_REPAIR_BACKUP){const b=process.env.ADL_CHECKPOINT_REPAIR_BACKUP;if(!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(b)||process.env.ADL_RESUME_BACKUP)throw Error('DERIVED_REPAIR_BACKUP_UNVERIFIED');repairOptions.checkpointRepairBackup=b;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||''))throw Error('EXPECTED_CURRENT_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
+    if(snapshotMemoryRepair&&process.env.ADL_LIVE_V8_HEAP_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||'')||repairOptions.liveOomRepair)throw Error('EXPECTED_CURRENT_V8_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.v8HeapOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1'){const image=persistenceExpectedImage(ledger);repairOptions.livePersistenceRepair=true;repairOptions.expectedLiveImage=image;}
     if(process.env.ADL_STOPPED_RETENTION_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.checkpointRepairBackup||repairOptions.livePersistenceRepair||repairOptions.liveOomRepair||process.env.ADL_RESUME_BACKUP)throw Error('RETENTION_REPAIR_REQUIRES_STOPPED_PREPARATION');repairOptions.stoppedRetentionRepair=true;}
     if(process.env.ADL_PIPELINE_REPAIR==='1'){if((!repairOptions.livePersistenceRepair&&!repairOptions.stoppedRetentionRepair)||!snapshotMemoryRepair)throw Error('PIPELINE_REPAIR_REQUIRES_VERIFIED_IDENTITY');repairOptions.pipelineRepair=true;repairOptions.finalizeAfterRecovery=true;}

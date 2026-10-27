@@ -3,6 +3,7 @@ import {acceptedWorkerMemoryLimits} from './resumable-adl-cutover.mjs';
 test('six GiB preflight is accepted only for its protected live pipeline or snapshot-pressure repair',()=>{
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,livePersistenceRepair:true}),['4294967296','6442450944']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,livePersistenceRepair:false}),['4294967296']);
+ assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,livePersistenceRepair:false,v8HeapOomRepair:true}),['6442450944']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineRepair:true}),['6442450944']);
  assert.deepEqual(acceptedWorkerMemoryLimits({mode:'--repair-snapshot'}),['2147483648','4294967296']);
 });
