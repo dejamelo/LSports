@@ -180,7 +180,7 @@ class Upgrade(unittest.TestCase):
    root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();releases=root/'releases';release=releases/('a'*40);release.mkdir(parents=True);volume=root/'volume';volume.mkdir()
    evidence=backups/'adl-snapshot-shape-example';evidence.mkdir(mode=0o700);raw=json.dumps({'FixtureId':20563979,'Fixture':{'Status':1},'Markets':None}).encode();(evidence/'rejected-row.private.json').write_bytes(raw);(evidence/'rejected-row.private.json').chmod(0o600);(evidence/'report.json').write_text(json.dumps({'rawRowSha256':hashlib.sha256(raw).hexdigest(),'rawRowBytes':len(raw),'rejection':{'path':'Markets','actualType':'null'},'sdk':{'conversion':'succeeded','markets':{'type':'null'}}}));(evidence/'report.json').chmod(0o600)
    original=secure/'old.json';original.write_text('{}');meta={'release':str(release),'composeOverrides':[str(original)]};(secure/'deployment.json').write_text(json.dumps(meta))
-   (volume/'trade-feed.json').write_text('{"preserved":"checkpoint"}');journal=volume/'trade-feed.json.snapshot-aaaaaaaaaaaaaaaa.json';journal.write_text('{"nextAt":9999999999999,"due":{},"failures":{}}');journal_before=journal.read_bytes();regular=volume/'trade-feed.json.regular-checkpoint.json';regular.write_text('PRIVATE_REGULAR_PRESERVED');regular_before=regular.read_bytes()
+   (volume/'trade-feed.json').write_text('{"preserved":"checkpoint"}');(volume/'trade-feed.json.prematch.inbox.sqlite').write_bytes(b'prematch inbox');(volume/'trade-feed.json.inplay.inbox.sqlite').write_bytes(b'inplay inbox');journal=volume/'trade-feed.json.snapshot-aaaaaaaaaaaaaaaa.json';journal.write_text('{"nextAt":9999999999999,"due":{},"failures":{}}');journal_before=journal.read_bytes();regular=volume/'trade-feed.json.regular-checkpoint.json';regular.write_text('PRIVATE_REGULAR_PRESERVED');regular_before=regular.read_bytes()
    handoff={'audit':{'status':'ok','workerLockAbsent':True,'matchingWorkerProcesses':0}};d=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();migration=secure/('cutover-'+d+'.json');migration.write_text(json.dumps({'digest':d,'startRequestedAtUTC':'2026-01-01T00:00:00Z','notBeforeUTC':'2026-01-01T00:00:00Z','journals':['preserved']}))
    files={path:'export const isolated=true;' for path in NS['PARTITION_FILES']};hashes={path:None for path in files};digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();image='adl-worker-partitioned:'+digest[:24]
    images={'base':{'Id':'sha256:'+('b'*64),'Config':{'User':'node','Labels':{}}}};running=not oom;selected='base';calls=[]
@@ -198,7 +198,7 @@ class Upgrade(unittest.TestCase):
     if args[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in args):return json.dumps({'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000],'opened':not read_access_fails,'readBytes':0 if read_access_fails else 1,'code':'EACCES' if read_access_fails else None,'chain':[]}).encode()
     if args[:2]==['docker','run'] and readback_fails and any('verifyProjectionFile' in str(v) for v in args):raise subprocess.CalledProcessError(1,args)
     if args[:2]==['docker','run'] and any('projection-serialize-ok' in str(v) for v in args):
-     target=next(v for v in args if 'target=/output' in str(v));folder=Path(target.split('source=')[1].split(',target=')[0]);(folder/'receipt.json').write_text('{}');return b'projection-serialize-ok'
+     target=next(v for v in args if 'target=/output' in str(v));folder=Path(target.split('source=')[1].split(',target=')[0]);(folder/'receipt.json').write_text('{}');mount=next(v for v in args if 'target=/recovery' in str(v));inputs=Path(mount.split('source=')[1].split(',target=')[0]);files=list(inputs.iterdir());removed=sum(p.stat().st_size for p in files);[p.unlink() for p in files];record={'operation':'offline.rehearsal_inputs_consumed','removedFiles':len(files),'removedBytes':removed,'stage':'checkpoint_and_snapshot_fully_consumed_before_serialization'};return (json.dumps(record)+'\nprojection-serialize-ok').encode()
     if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok throughput-offline-ok spool-memory-offline-ok snapshot-throughput-offline-ok planned-distribution-stop-ok durable-ingress-offline-ok snapshot-memory-offline-ok oom-checkpoint-restore-ok' if '--input-type=module' in args or any(str(a).endswith('-proof.mjs') for a in args) else json.dumps(hashes).encode()
     if args[:2]==['docker','build']:images[image]={'Id':'sha256:'+('c'*64),'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':digest}}};return b''
     if args[:2]==['docker','inspect']:
@@ -254,7 +254,7 @@ class Upgrade(unittest.TestCase):
      rehearsal_calls=[c for c in calls if c[:2]==['docker','run'] and any('projection-serialize-ok' in str(v) for v in c)]
      self.assertEqual(len(rehearsal_calls),1)
      read_calls=[c for c in calls if c[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in c)]
-     self.assertEqual(len(read_calls),2*readback_attempts)
+     self.assertEqual(len(read_calls),2)
      prefix=rehearsal_calls[0][:rehearsal_calls[0].index('--max-old-space-size=2560')]
      out_index=next(i for i,v in enumerate(prefix) if 'target=/output' in v)
      self.assertEqual(prefix[out_index-1],'--mount');del prefix[out_index-1:out_index+1]
@@ -263,8 +263,8 @@ class Upgrade(unittest.TestCase):
      self.assertEqual(len(readbacks),readback_attempts);self.assertTrue(any('target=/output,readonly' in str(v) for v in readbacks[0]))
      self.assertFalse(any('const s=new TradeState' in str(v) for v in readbacks[0]))
      self.assertEqual(read_calls[-1][read_calls[-1].index('--user')+1],'node')
-     self.assertTrue(any('rehearsal-'+digest[:24]+',target=/recovery,readonly' in str(v) for v in rehearsal_calls[0]))
-     self.assertEqual((Path(json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_bytes())['backup'])/('rehearsal-'+digest[:24])/'trade-feed.json').read_bytes(),(volume/'trade-feed.json').read_bytes())
+     self.assertTrue(any('rehearsal-'+digest[:24]+',target=/recovery' in str(v) for v in rehearsal_calls[0]))
+     backup_path=Path(json.loads((secure/('partitioned-upgrade-'+digest[:24]+'.json')).read_bytes())['backup']);self.assertEqual((backup_path/'trade-feed.json').read_bytes(),(volume/'trade-feed.json').read_bytes());self.assertFalse((backup_path/('rehearsal-'+digest[:24])/'trade-feed.json').exists())
      code,verified=invoke('activate',verify_only=True);self.assertEqual(code,0,verified);self.assertTrue(verified['offlineRestoreVerified'])
     self.assertEqual(len([c for c in calls if 'up' in c]),1);self.assertEqual(len([c for c in calls if c[:2]==['docker','build']]),1)
     self.assertTrue(all(c[-1]=='worker' and '--no-deps' in c and '--pull' in c for c in calls if 'up' in c))

@@ -3,6 +3,28 @@ from pathlib import Path
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('proof',Path(__file__).with_name('test-pre-exit-recovery.py'));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class OfflineDisk(unittest.TestCase):
+ def test_staged_preflight_counts_copy_phases_before_writing(self):
+  ns=m.load();events=[];ns.update(emit=lambda **r:events.append(r))
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);active=root/'active';backup=root/'backup';active.mkdir();backup.mkdir()
+   for name,size in [('trade-feed.json',100),('trade-feed.json.regular-checkpoint.json',200),('trade-feed.json.prematch.inbox.sqlite',30),('trade-feed.json.inplay.inbox.sqlite',40)]:
+    p=active/name;p.write_bytes(b'x'*size)
+   spool=active/'.full-snapshot-abc'/'response.private.json';spool.parent.mkdir();spool.write_bytes(b's'*50)
+   with patch.object(ns['shutil'],'disk_usage',return_value=type('Usage',(),{'free':20*1024**3})()):
+    ns['staged_recovery_disk_preflight'](active,backup,{},'a'*64,spool)
+   row=events[-1];self.assertEqual(row['status'],'verified');self.assertEqual(row['backupCopyBytes'],370)
+   self.assertEqual(row['rehearsalCopyBytes'],350);self.assertEqual(row['outputReserveBytes'],600)
+   self.assertEqual(row['phasedPeakAfterBackupBytes'],600);self.assertEqual(row['explicitExecutionMarginBytes'],2*1024**3)
+   self.assertEqual(row['requiredFreeBeforeAnyCopyBytes'],970+6*1024**3)
+   self.assertEqual([p.name for p in backup.iterdir()],[])
+ def test_staged_preflight_blocks_before_any_copy_if_total_peak_does_not_fit(self):
+  ns=m.load();events=[];ns.update(emit=lambda **r:events.append(r))
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);active=root/'active';backup=root/'backup';active.mkdir();backup.mkdir()
+   for name,size in [('trade-feed.json',100),('trade-feed.json.regular-checkpoint.json',200),('trade-feed.json.prematch.inbox.sqlite',30),('trade-feed.json.inplay.inbox.sqlite',40)]: (active/name).write_bytes(b'x'*size)
+   with patch.object(ns['shutil'],'disk_usage',return_value=type('Usage',(),{'free':5*1024**3})()):
+    with self.assertRaisesRegex(RuntimeError,'STAGED_RECOVERY_DISK_HEADROOM_INSUFFICIENT_NO_COPY'):ns['staged_recovery_disk_preflight'](active,backup,{},'a'*64,None)
+   self.assertEqual([p.name for p in backup.iterdir()],[]);self.assertEqual(events[-1]['status'],'blocked')
  def exercise(self,verified=False,receipt=False):
   ns=m.load();events=[];ns.update(emit=lambda **r:events.append(r),oom_restore_log_summary=lambda _: {'signals':['disk_full']},run=lambda cmd:b'' if cmd[:2]==['docker','ps'] else b'{"filesystems":[]}' if cmd[0]=='findmnt' else b'{"blockdevices":[]}')
   with tempfile.TemporaryDirectory() as tmp:

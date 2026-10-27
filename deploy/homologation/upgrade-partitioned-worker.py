@@ -738,17 +738,20 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     input_bytes=sum(src.stat().st_size for src,dst,sha in sources)
     missing=sum(src.stat().st_size for src,dst,sha in sources if not dst.exists())
     partial_bytes=partial.stat().st_size if partial.is_file() and not partial.is_symlink() else 0
+    failed_output_bytes=partial_bytes
     # Incomplete output is a lower bound, not the required final output size.
     if progress.get('v8HeapOomRepair') is True:
         public=backup/'trade-feed.json';regular=backup/'trade-feed.json.regular-checkpoint.json'
         require(public.is_file() and not public.is_symlink() and regular.is_file() and not regular.is_symlink(),'MEASURED_REHEARSAL_OUTPUT_BASELINE_MISSING')
         measured_peak=public.stat().st_size+regular.stat().st_size
         output_reserve=max(measured_peak*2,partial_bytes*2)
-        budget_basis='two times measured public projection plus private checkpoint bytes, preserving equal growth reserve; exact current source copy plus 4 GiB safety and activation reserve'
+        budget_basis='phased peak: exact restore inputs are unlinked from the isolated rehearsal copy after restore/snapshot consumption and before serialization; output reserve is two times measured public plus private checkpoint bytes with an equal growth reserve; 4 GiB safety/activation reserve plus 2 GiB explicit execution margin'
     else:
         output_reserve=max(input_bytes*8,partial_bytes*2)
         budget_basis='conservative planning reserve, not measured complete serialization peak'
-    required=missing+output_reserve+4*1024**3
+    safety_reserve=4*1024**3
+    execution_margin=2*1024**3 if progress.get('v8HeapOomRepair') is True else 0
+    required=max(missing,output_reserve)+safety_reserve+execution_margin
     removed=[];preserved_partial=None;prior=oom_restore_log_summary(backup)
     if partial_bytes and not progress.get('projectionSerializationVerified') and not receipt.exists() and not receipt.is_symlink() and 'disk_full' in prior.get('signals',[]):
         require(partial.is_file() and not partial.is_symlink() and partial.stat().st_nlink==1,'REHEARSAL_PARTIAL_OUTPUT_UNVERIFIED')
@@ -797,11 +800,33 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     # EBS is provisioned in whole GiB; ext4 capacity is smaller than its device.
     minimum=(physical_gib+gib) if physical_gib is not None else None
     target=max(64,((minimum+3)//4)*4) if minimum is not None else None
-    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'minimumFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'currentEbsGiB':physical_gib,'minimumEbsGiB':minimum,'suggestedEbsGiB':target,'ebsGrowthGiB':target-physical_gib if target is not None else None,'estimatedEbsGrowthUSDPerMonth':round((target-physical_gib)*0.08,2) if target is not None else None,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':budget_basis,'removed':removed,'preservedPartial':preserved_partial,'copies':copies}
+    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':failed_output_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'phasedPeakBytes':max(missing,output_reserve),'safetyAndActivationReserveBytes':safety_reserve,'executionMarginBytes':execution_margin,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'minimumFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'currentEbsGiB':physical_gib,'minimumEbsGiB':minimum,'suggestedEbsGiB':target,'ebsGrowthGiB':target-physical_gib if target is not None else None,'estimatedEbsGrowthUSDPerMonth':round((target-physical_gib)*0.08,2) if target is not None else None,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':budget_basis,'removed':removed,'preservedPartial':preserved_partial,'copies':copies}
     report_path=write_recovery_attempt_report(backup/'offline-rehearsal-disk-plan.json',json.dumps(report).encode())
     report['reportFile']=str(report_path)
     emit(operation='cutover.aws',stage='partitioned_upgrade.offline_disk',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
     require(short==0,'OFFLINE_REHEARSAL_DISK_EXPANSION_REQUIRED_NO_START')
+
+def staged_recovery_disk_preflight(directory,backup,progress,digest,spool):
+    """Budget all future copies before the first new recovery copy is written."""
+    recovery=pre_stop_copy_files(directory)
+    journals=[p for p in directory.glob('trade-feed.json.snapshot-*.json') if re.fullmatch(r'trade-feed\.json\.snapshot-[0-9a-f]{16}\.json',p.name)]
+    backup_sources=[*recovery,*journals]
+    backup_missing=sum(p.stat().st_size for p in backup_sources if not (backup/p.name).exists())
+    rehearsal_name=progress.get('rehearsalDirectory') or 'rehearsal-'+digest[:24]
+    require(re.fullmatch(r'rehearsal-[0-9a-f]{24}',rehearsal_name),'REHEARSAL_DIRECTORY_NAME_UNVERIFIED')
+    rehearsal=backup/rehearsal_name
+    checkpoint_sources=[directory/'trade-feed.json',directory/'trade-feed.json.regular-checkpoint.json']
+    rehearsal_sources=[(p,rehearsal/p.name) for p in checkpoint_sources]
+    if spool:rehearsal_sources.append((spool,rehearsal/'selected.response.private.json'))
+    rehearsal_missing=sum(src.stat().st_size for src,dst in rehearsal_sources if not dst.exists())
+    public=directory/'trade-feed.json';regular=directory/'trade-feed.json.regular-checkpoint.json'
+    output_reserve=2*(public.stat().st_size+regular.stat().st_size)
+    safety=4*1024**3;margin=2*1024**3
+    required=backup_missing+max(rehearsal_missing,output_reserve)+safety+margin
+    free=shutil.disk_usage(backup).free;short=max(0,required-free)
+    report={'destination':str(backup),'freeBytes':free,'backupCopyBytes':backup_missing,'rehearsalCopyBytes':rehearsal_missing,'measuredOutputBaselineBytes':public.stat().st_size+regular.stat().st_size,'outputReserveBytes':output_reserve,'phasedPeakAfterBackupBytes':max(rehearsal_missing,output_reserve),'safetyAndActivationReserveBytes':safety,'explicitExecutionMarginBytes':margin,'requiredFreeBeforeAnyCopyBytes':required,'missingBytes':short,'additionalGiB':(short+1024**3-1)//1024**3,'copySet':[p.name for p in backup_sources],'rehearsalSet':[dst.name for src,dst in rehearsal_sources],'spoolBytes':spool.stat().st_size if spool else 0,'basis':'backup copy first; rehearsal input copy next; rehearsal inputs are hash-verified before restore and removed only after checkpoint+snapshot consumption; output phase follows; 4 GiB safety/activation reserve plus explicit 2 GiB margin'}
+    emit(operation='cutover.aws',stage='partitioned_upgrade.staged_recovery_preflight',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
+    require(short==0,'STAGED_RECOVERY_DISK_HEADROOM_INSUFFICIENT_NO_COPY')
 
 def pre_stop_copy_files(directory):
     checkpoint=directory/'trade-feed.json';regular=directory/'trade-feed.json.regular-checkpoint.json'
@@ -1588,8 +1613,14 @@ def upgrade_partitioned_unlocked(request):
         mounts=[m for m in api_info['Mounts'] if m['Destination']=='/app/.runtime/feed'];require(len(mounts)==1 and mounts[0]['Type']=='volume' and not mounts[0]['RW'],'FEED_VOLUME_UNVERIFIED')
         vol=json.loads(run(['docker','volume','inspect',mounts[0]['Name']]))[0];require((vol.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','VOLUME_PROJECT_UNVERIFIED');directory=Path(vol['Mountpoint'])
         if not request.get('snapshotMemoryRepair'):require(not (directory/'trade-feed.json.lock').exists() and not list(directory.glob('trade-feed.json*.reclaim')) and not list(directory.glob('trade-feed.json.snapshot-*.lock')),'UPGRADE_LOCK_PRESENT_PRESERVED')
+        if progress['phase']=='stopped' and request.get('snapshotMemoryRepair') and not progress.get('oomRestoreVerified'):
+            preflight_candidates=[p for p in directory.glob('.full-snapshot-*/response.private.json') if p.is_file() and not p.is_symlink() and not p.parent.is_symlink() and re.fullmatch(r'\.full-snapshot-[A-Za-z0-9_-]{1,80}',p.parent.name) and 0<p.stat().st_size<=2*1024**3]
+            preflight_spool=max(preflight_candidates,key=lambda p:p.stat().st_mtime) if preflight_candidates else None
+            staged_recovery_disk_preflight(directory,backup,progress,digest,preflight_spool)
         if progress['phase']=='stopped':
-            for source in [directory/'trade-feed.json',directory/'trade-feed.json.regular-checkpoint.json',*directory.glob('trade-feed.json.snapshot-*.json'),*directory.glob('trade-feed.json.*.inbox.sqlite*'),*directory.glob('trade-feed.json*.tmp')]:
+            recovery_files=pre_stop_copy_files(directory)
+            scheduler_journals=[p for p in directory.glob('trade-feed.json.snapshot-*.json') if re.fullmatch(r'trade-feed\.json\.snapshot-[0-9a-f]{16}\.json',p.name)]
+            for source in [*recovery_files,*scheduler_journals]:
                 if not source.exists():continue
                 require(source.is_file() and not source.is_symlink(),'PERSISTENCE_SOURCE_UNVERIFIED');target=backup/source.name
                 if not target.exists():
@@ -1632,42 +1663,49 @@ def upgrade_partitioned_unlocked(request):
                     require(isinstance(rehearsal_name,str) and re.fullmatch('rehearsal-[0-9a-f]{24}',rehearsal_name),'REHEARSAL_DIRECTORY_NAME_UNVERIFIED')
                     rehearsal=backup/rehearsal_name;require(not rehearsal.is_symlink(),'REHEARSAL_DIRECTORY_UNVERIFIED');rehearsal.mkdir(mode=0o700,exist_ok=True)
                     progress['rehearsalDirectory']=rehearsal_name;save(progress)
-                    sources=[(backup/name,rehearsal/name,sha) for name,sha in progress.get('dataBackupHashes',{}).items()]
-                    if spool:sources.append((spool,rehearsal/spool.relative_to(directory),spool_hash))
-                    missing=sum(src.stat().st_size for src,dst,sha in sources if not dst.exists())
-                    offline_rehearsal_disk_plan(backup,sources,progress,digest)
-                    for src,dst,sha in sources:
-                        require(src.is_file() and not src.is_symlink() and snapshot_file_hash(src)==sha,'REHEARSAL_SOURCE_HASH_MISMATCH')
-                        dst.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
-                        if not dst.exists():
-                            shutil.copyfile(src,dst);os.chmod(dst,0o600)
-                            with dst.open('rb') as fd:os.fsync(fd.fileno())
-                        if dst.is_symlink():
-                            link=os.readlink(dst)
-                            emit(operation='cutover.aws',stage='partitioned_upgrade.oom_read_access.link',status='blocked',reason='REHEARSAL_COPY_SYMLINK_PRESERVED_NO_START',path='/recovery/'+str(dst.relative_to(rehearsal)),symlink=True,target=link if link.startswith('/recovery/') and '..' not in link else 'outside_rehearsal_not_followed',targetSha256=hashlib.sha256(link.encode()).hexdigest(),workerStarted=False)
-                        require(dst.is_file() and not dst.is_symlink() and snapshot_file_hash(dst)==sha,'REHEARSAL_COPY_HASH_MISMATCH')
-                    prior_diagnostic=oom_restore_log_summary(backup)
-                    emit(operation='cutover.aws',stage='partitioned_upgrade.oom_restore.permissions.before',status='collected',previousDiagnostic=prior_diagnostic,workerStarted=False,posnetChanged=False)
+                    # Only the checkpoint pair and preserved snapshot spool are inputs to
+                    # this restore run. Inbox DB/WAL/SHM and scheduler journals remain in
+                    # the immutable backup and active volume; duplicating them in a
+                    # disposable rehearsal tree does not strengthen this projection proof.
+                    needed={'trade-feed.json','trade-feed.json.regular-checkpoint.json'}
+                    sources=[(backup/name,rehearsal/name,sha) for name,sha in progress.get('dataBackupHashes',{}).items() if name in needed]
+                    require({src.name for src,dst,sha in sources}==needed,'REHEARSAL_CHECKPOINT_COPY_SET_INCOMPLETE')
+                    if spool:sources.append((spool,rehearsal/'selected.response.private.json',spool_hash))
                     user=before['services']['worker'].get('user') or image_info.get('Config',{}).get('User')
                     require(user=='node' or isinstance(user,str) and re.fullmatch(r'[1-9][0-9]{0,9}(?::[1-9][0-9]{0,9})?',user),'REHEARSAL_RUNTIME_USER_UNVERIFIED')
-                    common=['docker','run','--rm','--network','none','--memory','4g','--cpus','2','--read-only','--user',user,'--mount','type=bind,source='+str(rehearsal)+',target=/recovery,readonly','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image_info['Id']]
+                    common=['docker','run','--rm','--network','none','--memory','4g','--cpus','2','--read-only','--user',user,'--mount','type=bind,source='+str(rehearsal)+',target=/recovery','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image_info['Id']]
                     common=partition_rehearsal_args(common,progress)
-                    stage='partitioned_upgrade.oom_read_access'
-                    access=json.loads(run(common+['-e',REHEARSAL_ACCESS_PROBE],timeout=30))
-                    emit(operation='cutover.aws',stage=stage+'.before',status='collected',access=access,workerStarted=False,posnetChanged=False)
-                    require(type(access.get('uid')) is int and access['uid']>0 and type(access.get('gid')) is int and access['gid']>0,'REHEARSAL_NONROOT_IDENTITY_UNVERIFIED')
-                    if access.get('opened') is not True:
-                        require(access.get('code') in ('EACCES','EPERM') and not access.get('linkDetected'),'REHEARSAL_PATH_UNSAFE_OR_MISSING_NO_START')
-                    permissions=rehearsal_copy_permissions(backup,rehearsal,sources,access)
-                    emit(operation='cutover.aws',stage=stage+'.copy_permissions',status='verified',permissions=permissions,workerStarted=False,posnetChanged=False)
-                    access=json.loads(run(common+['-e',REHEARSAL_ACCESS_PROBE],timeout=30))
-                    emit(operation='cutover.aws',stage=stage,status='verified' if access.get('opened') is True else 'blocked',reason='REHEARSAL_READ_ACCESS_VERIFIED' if access.get('opened') is True else 'REHEARSAL_READ_ACCESS_NOT_VERIFIED_NO_START',access=access,user=user,imageId=image_info['Id'],mount={'source':str(rehearsal),'target':'/recovery','readOnly':True},workerStarted=False,posnetChanged=False)
-                    require(access.get('opened') is True and access.get('readBytes')==1 and not access.get('linkDetected'),'REHEARSAL_READ_ACCESS_NOT_VERIFIED_NO_START')
+                    if not progress.get('projectionSerializationVerified'):
+                        missing=sum(src.stat().st_size for src,dst,sha in sources if not dst.exists())
+                        offline_rehearsal_disk_plan(backup,sources,progress,digest)
+                        for src,dst,sha in sources:
+                            require(src.is_file() and not src.is_symlink() and snapshot_file_hash(src)==sha,'REHEARSAL_SOURCE_HASH_MISMATCH')
+                            dst.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+                            if not dst.exists():
+                                shutil.copyfile(src,dst);os.chmod(dst,0o600)
+                                with dst.open('rb') as fd:os.fsync(fd.fileno())
+                            if dst.is_symlink():
+                                link=os.readlink(dst)
+                                emit(operation='cutover.aws',stage='partitioned_upgrade.oom_read_access.link',status='blocked',reason='REHEARSAL_COPY_SYMLINK_PRESERVED_NO_START',path='/recovery/'+str(dst.relative_to(rehearsal)),symlink=True,target=link if link.startswith('/recovery/') and '..' not in link else 'outside_rehearsal_not_followed',targetSha256=hashlib.sha256(link.encode()).hexdigest(),workerStarted=False)
+                            require(dst.is_file() and not dst.is_symlink() and snapshot_file_hash(dst)==sha,'REHEARSAL_COPY_HASH_MISMATCH')
+                        prior_diagnostic=oom_restore_log_summary(backup)
+                        emit(operation='cutover.aws',stage='partitioned_upgrade.oom_restore.permissions.before',status='collected',previousDiagnostic=prior_diagnostic,workerStarted=False,posnetChanged=False)
+                        stage='partitioned_upgrade.oom_read_access'
+                        access=json.loads(run(common+['-e',REHEARSAL_ACCESS_PROBE],timeout=30))
+                        emit(operation='cutover.aws',stage=stage+'.before',status='collected',access=access,workerStarted=False,posnetChanged=False)
+                        require(type(access.get('uid')) is int and access['uid']>0 and type(access.get('gid')) is int and access['gid']>0,'REHEARSAL_NONROOT_IDENTITY_UNVERIFIED')
+                        if access.get('opened') is not True:
+                            require(access.get('code') in ('EACCES','EPERM') and not access.get('linkDetected'),'REHEARSAL_PATH_UNSAFE_OR_MISSING_NO_START')
+                        permissions=rehearsal_copy_permissions(backup,rehearsal,sources,access)
+                        emit(operation='cutover.aws',stage=stage+'.copy_permissions',status='verified',permissions=permissions,workerStarted=False,posnetChanged=False)
+                        access=json.loads(run(common+['-e',REHEARSAL_ACCESS_PROBE],timeout=30))
+                        emit(operation='cutover.aws',stage=stage,status='verified' if access.get('opened') is True else 'blocked',reason='REHEARSAL_READ_ACCESS_VERIFIED' if access.get('opened') is True else 'REHEARSAL_READ_ACCESS_NOT_VERIFIED_NO_START',access=access,user=user,imageId=image_info['Id'],mount={'source':str(rehearsal),'target':'/recovery','readOnly':False,'purpose':'unlink only hash-verified consumed rehearsal inputs before output serialization'},workerStarted=False,posnetChanged=False)
+                        require(access.get('opened') is True and access.get('readBytes')==1 and not access.get('linkDetected'),'REHEARSAL_READ_ACCESS_NOT_VERIFIED_NO_START')
                     previous_log=backup/'oom-restore.private.log'
                     archived_log=backup/('oom-restore-before-'+digest[:24]+'.private.log')
                     if previous_log.exists() and not archived_log.exists():shutil.copyfile(previous_log,archived_log);os.chmod(archived_log,0o600)
-                    spool_path='/recovery/'+str(spool.relative_to(directory)) if spool else None
-                    code="import{restore,persistRegularCheckpoint,checkpoint,streamCheckpoint}from'/app/apps/worker/src/persistence.ts';import{TradeState}from'/app/apps/worker/src/state.ts';import{walkSnapshot,convertSnapshotRow,fullSnapshotMemory}from'/app/apps/worker/src/full-snapshot.ts';import{writeJsonObject}from'/app/packages/feed-store/src/index.ts';import{open,writeFile}from'node:fs/promises';import{getHeapStatistics}from'node:v8';const started=Date.now();let phase='checkpoint.scan',heapPeak=0,lastRows=0;const sizes=()=>{const n={stateRows:0,markets:0,bets:0,betAt:0,betOrder:0,snapshotBets:0,freshBets:0,settlementAudit:0,timestampRecovery:0};if(typeof s!=='undefined')for(const lane of ['prematch','inplay'])for(const row of s.rows[lane].values()){n.stateRows++;n.markets+=row.markets.size;for(const market of row.markets.values())n.bets+=market.bets?.length||0;for(const key of ['betAt','betOrder','snapshotBets','freshBets','settlementAudit','timestampRecovery'])n[key]+=row[key]?.size||0;}return n};let s;const sample=(stage=phase,rows=lastRows)=>{phase=stage;lastRows=rows;const m=process.memoryUsage();heapPeak=Math.max(heapPeak,m.heapUsed);console.log(JSON.stringify({operation:'offline.memory',stage,rows,elapsedMs:Date.now()-started,heapUsedBytes:m.heapUsed,heapLimitBytes:getHeapStatistics().heap_size_limit,rssBytes:m.rss,maxRSSBytes:process.resourceUsage().maxRSS*1024,sampledHeapPeakBytes:heapPeak,externalBytes:m.external,arrayBufferBytes:m.arrayBuffers,heapTotalBytes:m.heapTotal,indexCounts:sizes()}))};const timer=setInterval(()=>sample(),5000);timer.unref();sample();s=new TradeState();const r=await restore(s,'/recovery/trade-feed.json',p=>sample(p.stage,p.rows));sample('checkpoint.complete',r.rows);let sourceSnapshotRehearsed=false,rows=0,applied=0;const spool="+json.dumps(spool_path)+";if(spool){sample('snapshot.validate',0);const ids=new Set();await walkSnapshot(spool,async raw=>{fullSnapshotMemory();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId))throw Error('duplicate fixture');ids.add(row.fixtureId);rows++;if(rows%1000===0)sample('snapshot.validate',rows);if(rows>50000)throw Error('fixture count limit')});sample('snapshot.apply',0);s.beginPartitionedSnapshot('prematch');await walkSnapshot(spool,async raw=>{fullSnapshotMemory();s.apply('prematch',[{...convertSnapshotRow(raw),marketRecovery:true}],Date.now(),{source:'snapshot',receivedAt:Date.now()});if(++applied%1000===0)sample('snapshot.apply',applied)});sample('snapshot.finalize',applied);s.finishPartitionedSnapshot('prematch',ids);}fullSnapshotMemory();sample('checkpoint.serialize',applied);await persistRegularCheckpoint('/output/projection.json',s);const{createHash}=await import('node:crypto');const{createReadStream}=await import('node:fs');const privateHash=createHash('sha256');for await(const chunk of createReadStream('/output/projection.json.regular-checkpoint.json'))privateHash.update(chunk);const privateCheckpointSha256=privateHash.digest('hex');sample('projection.build',applied);const feed=s.projection(Date.now(),false),out=await open('/output/projection.json','w',0o600);let receipt;sample('projection.serialize',applied);try{receipt=await writeJsonObject(out,{...feed,workerCheckpoint:{...streamCheckpoint(s),regularExternal:true}},s.availabilityBlocks());await out.sync()}finally{await out.close()}await writeFile('/output/receipt.json',JSON.stringify({...receipt,rows:feed.coverage.prematch.rowsPublished+feed.coverage.inplay.rowsPublished,stateRows:s.rows.prematch.size+s.rows.inplay.size,privateCheckpointSha256}),{mode:0o600});sourceSnapshotRehearsed=!!spool;sample('complete',r.rows);clearInterval(timer);console.log(JSON.stringify({operation:'offline.restore',rows:r.rows,sourceSnapshotRehearsed,snapshotRows:rows,rssBytes:process.memoryUsage().rss}));console.log('projection-serialize-ok');"
+                    spool_path='/recovery/selected.response.private.json' if spool else None
+                    code="import{restore,persistRegularCheckpoint,checkpoint,streamCheckpoint}from'/app/apps/worker/src/persistence.ts';import{TradeState}from'/app/apps/worker/src/state.ts';import{walkSnapshot,convertSnapshotRow,fullSnapshotMemory}from'/app/apps/worker/src/full-snapshot.ts';import{writeJsonObject}from'/app/packages/feed-store/src/index.ts';import{open,writeFile,unlink,lstat}from'node:fs/promises';import{getHeapStatistics}from'node:v8';const started=Date.now();let phase='checkpoint.scan',heapPeak=0,lastRows=0;const sizes=()=>{const n={stateRows:0,markets:0,bets:0,betAt:0,betOrder:0,snapshotBets:0,freshBets:0,settlementAudit:0,timestampRecovery:0};if(typeof s!=='undefined')for(const lane of ['prematch','inplay'])for(const row of s.rows[lane].values()){n.stateRows++;n.markets+=row.markets.size;for(const market of row.markets.values())n.bets+=market.bets?.length||0;for(const key of ['betAt','betOrder','snapshotBets','freshBets','settlementAudit','timestampRecovery'])n[key]+=row[key]?.size||0;}return n};let s;const sample=(stage=phase,rows=lastRows)=>{phase=stage;lastRows=rows;const m=process.memoryUsage();heapPeak=Math.max(heapPeak,m.heapUsed);console.log(JSON.stringify({operation:'offline.memory',stage,rows,elapsedMs:Date.now()-started,heapUsedBytes:m.heapUsed,heapLimitBytes:getHeapStatistics().heap_size_limit,rssBytes:m.rss,maxRSSBytes:process.resourceUsage().maxRSS*1024,sampledHeapPeakBytes:heapPeak,externalBytes:m.external,arrayBufferBytes:m.arrayBuffers,heapTotalBytes:m.heapTotal,indexCounts:sizes()}))};const timer=setInterval(()=>sample(),5000);timer.unref();sample();s=new TradeState();const r=await restore(s,'/recovery/trade-feed.json',p=>sample(p.stage,p.rows));sample('checkpoint.complete',r.rows);let sourceSnapshotRehearsed=false,rows=0,applied=0;const spool="+json.dumps(spool_path)+";if(spool){sample('snapshot.validate',0);const ids=new Set();await walkSnapshot(spool,async raw=>{fullSnapshotMemory();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId))throw Error('duplicate fixture');ids.add(row.fixtureId);rows++;if(rows%1000===0)sample('snapshot.validate',rows);if(rows>50000)throw Error('fixture count limit')});sample('snapshot.apply',0);s.beginPartitionedSnapshot('prematch');await walkSnapshot(spool,async raw=>{fullSnapshotMemory();s.apply('prematch',[{...convertSnapshotRow(raw),marketRecovery:true}],Date.now(),{source:'snapshot',receivedAt:Date.now()});if(++applied%1000===0)sample('snapshot.apply',applied)});sample('snapshot.finalize',applied);s.finishPartitionedSnapshot('prematch',ids);}const cleanupNames=['trade-feed.json','trade-feed.json.regular-checkpoint.json',...(spool?['selected.response.private.json']:[])];let cleanupBytes=0;for(const name of cleanupNames){const path='/recovery/'+name,info=await lstat(path);if(info.isSymbolicLink()||!info.isFile())throw Error('REHEARSAL_CONSUMED_INPUT_IDENTITY');cleanupBytes+=info.size;}for(const name of cleanupNames)await unlink('/recovery/'+name);console.log(JSON.stringify({operation:'offline.rehearsal_inputs_consumed',removedFiles:cleanupNames.length,removedBytes:cleanupBytes,stage:'checkpoint_and_snapshot_fully_consumed_before_serialization'}));fullSnapshotMemory();sample('checkpoint.serialize',applied);await persistRegularCheckpoint('/output/projection.json',s);const{createHash}=await import('node:crypto');const{createReadStream}=await import('node:fs');const privateHash=createHash('sha256');for await(const chunk of createReadStream('/output/projection.json.regular-checkpoint.json'))privateHash.update(chunk);const privateCheckpointSha256=privateHash.digest('hex');sample('projection.build',applied);const feed=s.projection(Date.now(),false),out=await open('/output/projection.json','w',0o600);let receipt;sample('projection.serialize',applied);try{receipt=await writeJsonObject(out,{...feed,workerCheckpoint:{...streamCheckpoint(s),regularExternal:true}},s.availabilityBlocks());await out.sync()}finally{await out.close()}await writeFile('/output/receipt.json',JSON.stringify({...receipt,rows:feed.coverage.prematch.rowsPublished+feed.coverage.inplay.rowsPublished,stateRows:s.rows.prematch.size+s.rows.inplay.size,privateCheckpointSha256}),{mode:0o600});sourceSnapshotRehearsed=!!spool;sample('complete',r.rows);clearInterval(timer);console.log(JSON.stringify({operation:'offline.restore',rows:r.rows,sourceSnapshotRehearsed,snapshotRows:rows,rssBytes:process.memoryUsage().rss}));console.log('projection-serialize-ok');"
                     stage='partitioned_upgrade.oom_restore'
                     emit(operation='cutover.aws',stage='partitioned_upgrade.oom_restore',status='running',readOnly=True,workerStarted=False,posnetChanged=False)
                     # Fresh attempt log: historical EACCES must not diagnose this run.
@@ -1679,8 +1717,16 @@ def upgrade_partitioned_unlocked(request):
                     rehearsal_command=common[:-1]+['--mount','type=bind,source='+str(projection_output)+',target=/output',common[-1]]
                     output=b''
                     if not progress.get('projectionSerializationVerified'):
+                        expected_consumed=sum(dst.stat().st_size for src,dst,sha in sources)
                         output=streamed_rehearsal_run(rehearsal_command+['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx','--input-type=module','-e',code],timeout=OOM_REHEARSAL_TIMEOUT_SECONDS,log=backup/attempt)
                         require(b'projection-serialize-ok' in output,'OOM_CHECKPOINT_RESTORE_FAILED_ORIGINALS_PRESERVED')
+                        consumed=[]
+                        for line in output.decode(errors='replace').splitlines():
+                            try:record=json.loads(line)
+                            except ValueError:continue
+                            if record.get('operation')=='offline.rehearsal_inputs_consumed':consumed.append(record)
+                        require(len(consumed)==1 and consumed[0].get('stage')=='checkpoint_and_snapshot_fully_consumed_before_serialization' and consumed[0].get('removedBytes')==expected_consumed and consumed[0].get('removedFiles')==len(sources),'REHEARSAL_INPUT_RECLAMATION_NOT_VERIFIED')
+                        progress['rehearsalInputsReclaimed']={'files':consumed[0]['removedFiles'],'bytes':consumed[0]['removedBytes'],'phase':'after_checkpoint_and_snapshot_consumed_before_serialization'}
                         progress['projectionReceiptHash']=snapshot_file_hash(projection_output/'receipt.json');progress['projectionSerializationVerified']=True;progress['rehearsalMemory']=rehearsal_heap_evidence(output);save(progress)
                     require(snapshot_file_hash(projection_output/'receipt.json')==progress.get('projectionReceiptHash'),'PROJECTION_RECEIPT_CHANGED_NO_START')
                     # The first container has exited; source state cannot compete with readback.
@@ -1695,6 +1741,12 @@ def upgrade_partitioned_unlocked(request):
                     for line in readback_output.decode().splitlines():
                         record=json.loads(line) if line.startswith('{') else {}
                         if record.get('operation')=='offline.memory_budget':progress['projectionReadbackBudget']={key:record[key] for key in ('budgetBytes','headroomBytes','memory','allowed')}
+                    for name,sha in progress.get('dataBackupHashes',{}).items():
+                        saved=backup/name
+                        require(saved.is_file() and not saved.is_symlink() and snapshot_file_hash(saved)==sha,'RECOVERY_BACKUP_CHANGED_DURING_REHEARSAL')
+                        if not name.endswith('.inbox.sqlite-shm'):
+                            original=directory/name
+                            require(original.is_file() and not original.is_symlink() and snapshot_file_hash(original)==sha,'ACTIVE_SOURCE_CHANGED_DURING_REHEARSAL')
                     if spool:require(snapshot_file_hash(spool)==spool_hash,'PRESERVED_SPOOL_CHANGED_DURING_REHEARSAL')
                     progress['projectionReadbackVerified']=True;progress['oomRestoreVerified']=True;progress['rehearsalCopyVerified']=True;progress['preservedSpoolRehearsed']=spool is not None;save(progress)
             if not (backup/'migration.before.json').exists():private(backup/'migration.before.json',migration_receipt.read_bytes())
