@@ -5,6 +5,7 @@ test('six GiB preflight is accepted only for its protected live pipeline or snap
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,livePersistenceRepair:false}),['4294967296']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,livePersistenceRepair:false,v8HeapOomRepair:true}),['6442450944']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineRepair:true}),['6442450944']);
+ assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineRepair:true,pipelineMemoryEightGiB:true}),['6442450944','8589934592']);
  assert.deepEqual(acceptedWorkerMemoryLimits({mode:'--repair-snapshot'}),['2147483648','4294967296']);
 });
 test('health action bypasses readiness requirement without bypassing root gate',()=>{const s=fs.readFileSync(new URL('./execute-adl-cutover-aws.py',import.meta.url),'utf8');assert(s.indexOf("require(os.geteuid()==0")<s.indexOf("if action=='api_health'"));assert(s.indexOf("if action=='api_health'")<s.indexOf("'API_NOT_HEALTHY'"));});

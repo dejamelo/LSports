@@ -1,13 +1,13 @@
 """Worker-specific actual kernel reclaim; no credits of estimated cache as free memory."""
 import os,json,re,time,errno,subprocess,datetime
 from pathlib import Path
-MiB=1024**2;TARGET=1920*MiB
+MiB=1024**2;TARGET=1920*MiB;VERIFIED_LIMITS=(6144*MiB,8192*MiB)
 
 def require(ok,reason):
     if not ok:raise RuntimeError(reason)
 
 def plan(current,limit,stat):
-    require(limit==6144*MiB,'CACHE_POLICY_REQUIRES_VERIFIED_SIX_GIB')
+    require(limit in VERIFIED_LIMITS,'CACHE_POLICY_LIMIT_UNVERIFIED')
     clean=max(0,min(stat.get('file',0),stat.get('inactive_file',0))-stat.get('file_dirty',0)-stat.get('file_writeback',0)-stat.get('shmem',0))
     deficit=max(0,TARGET-max(0,limit-current))
     return min(deficit,clean//2,512*MiB)
@@ -20,12 +20,12 @@ def once(target='adl-homologation-worker-1'):
     p=subprocess.run(['docker','inspect',target],capture_output=True,timeout=10)
     if p.returncode:return {'status':'worker_absent_no_action'}
     c=json.loads(p.stdout)[0];labels=c['Config'].get('Labels') or {}
-    require(labels.get('com.docker.compose.project')=='adl-homologation' and labels.get('com.docker.compose.service')=='worker' or labels.get('eu.adl.recovery.cache-policy')=='six-gib-verified','CACHE_POLICY_CONTAINER_IDENTITY_UNVERIFIED')
+    require(labels.get('com.docker.compose.project')=='adl-homologation' and labels.get('com.docker.compose.service')=='worker' or labels.get('eu.adl.recovery.cache-policy') in ('six-gib-verified','bounded-reclaim-verified'),'CACHE_POLICY_CONTAINER_IDENTITY_UNVERIFIED')
     if not c['State']['Running']:return {'status':'worker_stopped_no_action'}
-    require(c['HostConfig']['Memory']==6144*MiB,'CACHE_POLICY_DOCKER_LIMIT_CHANGED')
+    require(c['HostConfig']['Memory'] in VERIFIED_LIMITS,'CACHE_POLICY_DOCKER_LIMIT_CHANGED')
     raw=Path('/proc/'+str(c['State']['Pid'])+'/cgroup').read_text();m=re.search(r'^0::(/[^\n]*)$',raw,re.M);require(m is not None,'CACHE_POLICY_CGROUP_UNVERIFIED')
     root=Path('/sys/fs/cgroup');path=(root/m[1].lstrip('/')).resolve();require(root in path.parents and c['Id'][:12] in str(path),'CACHE_POLICY_CGROUP_IDENTITY_UNVERIFIED')
-    high=(path/'memory.high').read_text().strip();require(high in ('max',str(6144*MiB)),'CACHE_POLICY_DISTINCT_MEMORY_HIGH')
+    limit=c['HostConfig']['Memory'];high=(path/'memory.high').read_text().strip();require(high in ('max',str(limit)),'CACHE_POLICY_DISTINCT_MEMORY_HIGH')
     before=sample(path);amount=plan(before['current'],before['max'],before['stat'])
     row={'atUTC':datetime.datetime.now(datetime.timezone.utc).isoformat(),'containerId':c['Id'],'beforeCurrentBytes':before['current'],'requestedReclaimBytes':amount,'targetActualHeadroomBytes':TARGET,'workerRestarted':False}
     if not amount:return {**row,'status':'headroom_sufficient_or_no_clean_cache_no_action'}
@@ -43,7 +43,7 @@ def main():
     failures=0
     while True:
         try:
-            targets=['adl-homologation-worker-1'];other=subprocess.run(['docker','ps','-q','--filter','label=eu.adl.recovery.cache-policy=six-gib-verified'],capture_output=True,timeout=10,check=True);targets+=other.stdout.decode().split();require(len(targets)<=5,'CACHE_POLICY_TARGET_COUNT_LIMIT');rows=[]
+            targets=['adl-homologation-worker-1'];other=subprocess.run(['docker','ps','-q','--filter','label=eu.adl.recovery.cache-policy=six-gib-verified'],capture_output=True,timeout=10,check=True);other8=subprocess.run(['docker','ps','-q','--filter','label=eu.adl.recovery.cache-policy=bounded-reclaim-verified'],capture_output=True,timeout=10,check=True);targets+=other.stdout.decode().split()+other8.stdout.decode().split();targets=list(dict.fromkeys(targets));require(len(targets)<=5,'CACHE_POLICY_TARGET_COUNT_LIMIT');rows=[]
             for target in targets:
                 try:rows.append(once(target))
                 except (FileNotFoundError,ProcessLookupError):rows.append({'status':'target_disappeared_no_action'})

@@ -28,7 +28,7 @@ class Scope(unittest.TestCase):
   for missing in ({'livePersistenceRepair':False},{'snapshotPressureRepair':False},{'snapshotMemoryRepair':False}):
    with self.assertRaises(RuntimeError):ns['partition_memory']({**pressure,**missing})
   args=ns['partition_rehearsal_args'](['docker','run','--rm','--memory','4g','--entrypoint','node','image'],p)
-  self.assertEqual(args[args.index('--memory')+1],'6g');self.assertEqual(args[args.index('--memory-swap')+1],'6g');self.assertIn('eu.adl.recovery.cache-policy=six-gib-verified',args)
+  self.assertEqual(args[args.index('--memory')+1],'6g');self.assertEqual(args[args.index('--memory-swap')+1],'6g');self.assertIn('eu.adl.recovery.cache-policy=bounded-reclaim-verified',args)
  def test_unrelated_source_changes_and_wrong_digest_are_rejected(self):
   old={p:'old' for p in ns['PIPELINE_BASE_FILES']}
   dep='apps/worker/src/snapshot-capacity.ts';added={dep:'installed-dependency'};base_hash=hashlib.sha256(added[dep].encode()).hexdigest();pinned=ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep];ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep]=base_hash
