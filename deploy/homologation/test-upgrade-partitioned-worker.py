@@ -26,6 +26,14 @@ class Upgrade(unittest.TestCase):
   for field in ('pipelineRepair','snapshotMemoryRepair','livePersistenceRepair'):
    with self.assertRaises(Exception):NS['candidate_memory']({**p,field:False})
 
+ def test_expected_profile_uses_docker_compose_normalized_eight_gib_limit(self):
+  p={'image':'adl-worker-partitioned:'+'a'*24,'memoryLimitBytes':6442450944,'pipelineMemoryEightGiB':True,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True,'v8HeapOomRepair':True,'heapBudgetPlan':{'evidenceVerified':True,'v8HeapCompactionPreserve':True,'previousOldSpaceMiB':4608,'oldSpaceMiB':4608,'containerLimitUnchanged':True,'measuredRedundantTimestampBytes':319*1024*1024}}
+  saved={'services':{'api':{'image':'api-unchanged'},'worker':{'image':'old-image','mem_limit':'6442450944','environment':{'NODE_OPTIONS':'--max-old-space-size=4608','LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT':'false'}}},'networks':{'preserved':{}},'volumes':{'preserved':{}}}
+  expected=NS['expected_partitioned_model'](saved,p,True)
+  self.assertEqual(expected['services']['worker']['mem_limit'],'8589934592')
+  simulated_compose={'services':{'api':{'image':'api-unchanged'},'worker':{'image':p['image'],'mem_limit':str(8*1024**3),'environment':{**saved['services']['worker']['environment'],'LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT':'true','LSPORTS_INPLAY_STREAMED_SNAPSHOT':'true','NODE_OPTIONS':'--max-old-space-size=4608'}}},'networks':{'preserved':{}},'volumes':{'preserved':{}}}
+  self.assertEqual(expected,simulated_compose)
+
  def test_pipeline_reuses_verified_v8_compaction_receipt_without_raising_heap_or_container_limit(self):
   with tempfile.TemporaryDirectory() as tmp:
    secure=Path(tmp);digest='a'*64;image='adl-worker-partitioned:'+digest[:24]

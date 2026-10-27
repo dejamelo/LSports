@@ -130,6 +130,17 @@ def candidate_memory(progress):
         return 8192*1024**2
     return partition_memory(progress)
 
+def expected_partitioned_model(saved_model,progress,snapshot_memory_repair):
+    expected=copy.deepcopy(saved_model)
+    worker=expected['services']['worker']
+    worker['image']=progress['image']
+    worker['mem_limit']=str(candidate_memory(progress))
+    worker['environment']['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT']='true'
+    worker['environment']['LSPORTS_INPLAY_STREAMED_SNAPSHOT']='true'
+    if snapshot_memory_repair:
+        worker['environment']['NODE_OPTIONS']='--max-old-space-size='+str(partition_heap_mib(progress))
+    return expected
+
 def partition_heap_mib(progress):
     plan=progress.get('heapBudgetPlan')
     if plan is None:return 2560
@@ -1550,9 +1561,7 @@ def upgrade_partitioned_unlocked(request):
         handoff=request['handoff'];audit=handoff['audit'];require(audit['status']=='ok' and audit['workerLockAbsent'] and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(request['freshAuditAt'].endswith('Z') and -5<=time.time()-datetime.datetime.fromisoformat(request['freshAuditAt'].replace('Z','+00:00')).timestamp()<60,'MAC_REAUDIT_EXPIRED')
         digest_handoff=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();migration_receipt=SECURE/('cutover-'+digest_handoff+'.json');migration=json.loads(migration_receipt.read_bytes());require(migration.get('startRequestedAtUTC'),'MIGRATION_NOT_COMPLETE')
-        saved_model=json.loads((backup/'model.before.private.json').read_bytes());expected=copy.deepcopy(saved_model);expected['services']['worker']['image']=progress['image'];expected['services']['worker']['environment']['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT']='true';expected['services']['worker']['environment']['LSPORTS_INPLAY_STREAMED_SNAPSHOT']='true'
-        if progress.get('pipelineMemoryEightGiB') is True:expected['services']['worker']['mem_limit']='8g'
-        if request.get('snapshotMemoryRepair'):expected['services']['worker']['environment']['NODE_OPTIONS']='--max-old-space-size='+str(partition_heap_mib(progress))
+        saved_model=json.loads((backup/'model.before.private.json').read_bytes());expected=expected_partitioned_model(saved_model,progress,request.get('snapshotMemoryRepair') is True)
         rollback_expected=copy.deepcopy(saved_model) if progress.get('pipelineMemoryEightGiB') is True else copy.deepcopy(expected)
         if progress.get('pipelineMemoryEightGiB') is not True:rollback_expected['services']['worker']['image']=progress['baseImage']
         current=model(partition_base(meta));require(current==saved_model or current==expected or phase=='rollback' and current==rollback_expected,'DEPLOYMENT_CHANGED_SINCE_UPGRADE_PREPARE')
