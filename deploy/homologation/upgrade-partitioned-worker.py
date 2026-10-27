@@ -1299,7 +1299,7 @@ def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None
 def resumed_stop_budget(progress):
     previous=progress.get('shutdownObservation',{}).get('samples',[])
     if progress.get('pipelineRepair') is True:
-        measured=max((s.get('lastCompletedPersistence',{}).get('lastDurationMs',0) for s in previous if isinstance(s,dict)),default=0)
+        measured=max(((s.get('lastCompletedPersistence') or {}).get('lastDurationMs',0) for s in previous if isinstance(s,dict)),default=0)
         # A graceful stop can complete one persist and immediately begin another
         # final pass. If that second pass is already observable, budget its measured
         # remaining stage time instead of timing out against only the prior cycle.
