@@ -894,6 +894,15 @@ def reuse_pre_exit_restore(progress,backup,directory,image_info,save):
     emit(operation='cutover.aws',stage='partitioned_upgrade.recovery_proof_reuse',status='verified',rows=proof['stateRows'],inboxCount=2,freeDiskBytes=free,requiredFreeBytes=4*1024**3,newDataCopies=0,newProjectionWrites=0,backupsRemoved=0,workerStarted=False,posnetChanged=False)
     return True
 
+def offline_rehearsal_disk_reserve(input_bytes,partial_bytes,public_bytes,regular_bytes,progress):
+    measured_pipeline=(progress.get('pipelineRepair') is True and progress.get('pipelineLoadVerified') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True)
+    if progress.get('v8HeapOomRepair') is True or measured_pipeline:
+        require(public_bytes>0 and regular_bytes>0,'MEASURED_REHEARSAL_OUTPUT_BASELINE_MISSING')
+        measured_peak=public_bytes+regular_bytes
+        output=max(measured_peak*2,partial_bytes*2)
+        return output,2*1024**3,'phased peak: exact restore inputs are unlinked from the isolated rehearsal copy after restore/snapshot consumption and before serialization; output reserve is two times measured public plus private checkpoint bytes with an equal growth reserve; 4 GiB safety/activation reserve plus 2 GiB explicit execution margin'
+    return max(input_bytes*8,partial_bytes*2),0,'conservative planning reserve, not measured complete serialization peak'
+
 def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     output=backup/('projection-rehearsal-'+digest[:24])
     require(not output.is_symlink(),'REHEARSAL_OUTPUT_PATH_UNSAFE')
@@ -903,17 +912,13 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     partial_bytes=partial.stat().st_size if partial.is_file() and not partial.is_symlink() else 0
     failed_output_bytes=partial_bytes
     # Incomplete output is a lower bound, not the required final output size.
-    if progress.get('v8HeapOomRepair') is True:
+    measured_pipeline=(progress.get('pipelineRepair') is True and progress.get('pipelineLoadVerified') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True)
+    if progress.get('v8HeapOomRepair') is True or measured_pipeline:
         public=backup/'trade-feed.json';regular=backup/'trade-feed.json.regular-checkpoint.json'
         require(public.is_file() and not public.is_symlink() and regular.is_file() and not regular.is_symlink(),'MEASURED_REHEARSAL_OUTPUT_BASELINE_MISSING')
-        measured_peak=public.stat().st_size+regular.stat().st_size
-        output_reserve=max(measured_peak*2,partial_bytes*2)
-        budget_basis='phased peak: exact restore inputs are unlinked from the isolated rehearsal copy after restore/snapshot consumption and before serialization; output reserve is two times measured public plus private checkpoint bytes with an equal growth reserve; 4 GiB safety/activation reserve plus 2 GiB explicit execution margin'
-    else:
-        output_reserve=max(input_bytes*8,partial_bytes*2)
-        budget_basis='conservative planning reserve, not measured complete serialization peak'
+        output_reserve,execution_margin,budget_basis=offline_rehearsal_disk_reserve(input_bytes,partial_bytes,public.stat().st_size,regular.stat().st_size,progress)
+    else:output_reserve,execution_margin,budget_basis=offline_rehearsal_disk_reserve(input_bytes,partial_bytes,0,0,progress)
     safety_reserve=4*1024**3
-    execution_margin=2*1024**3 if progress.get('v8HeapOomRepair') is True else 0
     required=max(missing,output_reserve)+safety_reserve+execution_margin
     removed=[];preserved_partial=None;prior=oom_restore_log_summary(backup)
     if partial_bytes and not progress.get('projectionSerializationVerified') and not receipt.exists() and not receipt.is_symlink() and 'disk_full' in prior.get('signals',[]):
