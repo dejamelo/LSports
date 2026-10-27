@@ -549,8 +549,10 @@ def preserved_rehearsal_report(expected_backup,expected_log=None):
 
 def archive_oom_locks(directory,backup,progress,workers):
     verified_oom=progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is True and workers[0].get('exitCode')==137
+    verified_v8_oom=progress.get('v8HeapOomRepair') is True and progress.get('oomContainerId') and len(workers)==1 and workers[0]['id']==progress['oomContainerId'] and not workers[0]['running'] and workers[0].get('oomKilled') is False and workers[0].get('exitCode')==134
+    if verified_v8_oom:verify_live_v8_heap_oom_identity(workers[0],{'snapshotMemoryRepair':True,'v8HeapOomRepair':True,'expectedOomPrefix':progress.get('expectedOomPrefix')})
     verified_exit=progress.get('verifiedExitContainerId') and len(workers)==1 and workers[0]['id']==progress['verifiedExitContainerId'] and not workers[0]['running'] and progress.get('preExitProof',{}).get('verified') is True and progress.get('verifiedExitSignal',{}).get('status') in ('docker_accepted','exit_observed_after_intent')
-    require(verified_oom or verified_exit,'OOM_OR_VERIFIED_EXIT_LOCK_OWNER_NOT_CONFIRMED')
+    require(verified_oom or verified_v8_oom or verified_exit,'OOM_OR_VERIFIED_EXIT_LOCK_OWNER_NOT_CONFIRMED')
     # Verify no other running container can write this feed volume, not merely its Compose service label.
     ids=run(['docker','ps','-q']).decode().split()
     for item in json.loads(run(['docker','inspect',*ids])) if ids else []:
@@ -1208,6 +1210,9 @@ def upgrade_partitioned_unlocked(request):
             save(progress)
         if receipt_path.exists():
             require(receipt_path.is_file() and not receipt_path.is_symlink(),'UPGRADE_RECEIPT_UNVERIFIED');progress=json.loads(receipt_path.read_bytes());require(progress['digest']==digest,'UPGRADE_DIGEST_MISMATCH');backup=Path(progress['backup'])
+            if request.get('v8HeapOomRepair'):
+                require(re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))) is not None,'EXPECTED_CURRENT_V8_OOM_PREFIX_REQUIRED')
+                progress['v8HeapOomRepair']=True;progress['expectedOomPrefix']=request['expectedOomPrefix'];save(progress)
             if request.get('preservedHeapBudgetRepair'):
                 progress=inherit_pressure_heap_plan(progress,request,before['services']['worker']);save(progress)
             image_info=json.loads(run(['docker','image','inspect',progress['image']]))[0]
@@ -1271,7 +1276,7 @@ def upgrade_partitioned_unlocked(request):
             check="""import{decodeMessage}from'/app/apps/worker/src/messages.ts';import{partitionedSnapshot,subscriptionInventory}from'/app/apps/worker/src/partitioned-snapshot.ts';await import('/app/apps/worker/src/connected.ts');const sdk=await import('trade360-nodejs-sdk');if(sdk.knownEntityKeys.get(38)!=='OutrightLeagueFixtureUpdate')throw Error();const body={Competition:{Id:1,Competitions:[{Id:2,Events:[{FixtureId:3,OutrightLeague:{FixtureName:'ISOLATED OFFLINE',Status:1,LastUpdate:'2026-10-19T06:00:00Z'}}]}]}};const decoded=decodeMessage(Buffer.from(JSON.stringify({Header:{Type:38,MsgGuid:'offline-38',ServerTimestamp:1792389601000},Body:body})),{});if(decoded.events[0]?.outright?.fixture?.fixtureName!=='ISOLATED OFFLINE')throw Error();if(subscriptionInventory({fixtures:[2,1]},{Body:{Fixtures:[2,1]}}).join(',')!=='1,2')throw Error();let rejected=false;try{subscriptionInventory({fixtures:['PRIVATE_OFFLINE']},{Body:{Fixtures:['PRIVATE_OFFLINE']}})}catch(e){rejected=e.diagnostic?.snapshotValidation?.code==='inventory_invalid_ids'}if(!rejected)throw Error();let applied=0;const p=await partitionedSnapshot({async inventory(){return[11,12]},async events(ids){return ids.map(fixtureId=>({fixtureId,fixture:{status:1}}))}},{assertOpen(){},async begin(){},async batch(rows){applied+=rows.length},async progress(){}},{batchSize:1});if(p.stage!=='complete'||applied!==2)throw Error();console.log('partitioned-offline-ok');"""
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',check],timeout=30)
             require(b'partitioned-offline-ok' in output,'UPGRADE_OFFLINE_TEST_FAILED')
-            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,'v8HeapOomRepair':request.get('v8HeapOomRepair') is True,**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
+            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,'v8HeapOomRepair':request.get('v8HeapOomRepair') is True,**({'expectedOomPrefix':request.get('expectedOomPrefix')} if request.get('v8HeapOomRepair') else {}),**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
         if request.get('measuredSnapshotApplyHeapRepair'):
             require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('snapshotMemoryRepair') is True,'MEASURED_HEAP_REQUEST_SCOPE_UNVERIFIED')
             plan=measured_snapshot_apply_heap_plan(progress,backup,states('worker'))

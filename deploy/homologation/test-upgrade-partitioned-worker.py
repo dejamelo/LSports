@@ -12,6 +12,20 @@ class Upgrade(unittest.TestCase):
    with self.assertRaises(Exception):NS['partition_heap_mib'](bad)
   with self.assertRaises(Exception):NS['partition_memory']({**progress,'v8HeapOomRepair':False})
 
+ def test_v8_oom_lock_archive_preserves_owner_bytes_only_for_exact_verified_container(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);directory=root/'feed';backup=root/'backup';directory.mkdir();backup.mkdir();lock=directory/'trade-feed.json.lock';lock.write_bytes(b'1234')
+   worker={'id':'05e3b610fa1b'+'a'*52,'name':'/adl-homologation-worker-1','running':False,'exitCode':134,'oomKilled':False};progress={'oomContainerId':worker['id'],'v8HeapOomRepair':True,'expectedOomPrefix':'05e3b610fa1b'}
+   old_run,old_states,old_subprocess=NS['run'],NS['states'],NS['subprocess'].run
+   try:
+    NS['run']=lambda *a,**k:b'';NS['states']=lambda service:[worker]
+    NS['subprocess'].run=lambda *a,**k:types.SimpleNamespace(returncode=0,stdout=b'Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory',stderr=b'')
+    NS['archive_oom_locks'](directory,backup,progress,[worker])
+   finally:NS['run'],NS['states'],NS['subprocess'].run=old_run,old_states,old_subprocess
+   self.assertFalse(lock.exists());self.assertEqual((backup/'oom-preserved-trade-feed.json.lock').read_bytes(),b'1234');self.assertEqual((backup/'oom-archived-trade-feed.json.lock').read_bytes(),b'1234')
+   bad={**worker,'id':'f'*64}
+   with self.assertRaises(Exception):NS['archive_oom_locks'](directory,backup,progress,[bad])
+
  def test_v8_heap_oom_repair_requires_exact_stopped_container_and_log_signature(self):
   request={'snapshotMemoryRepair':True,'v8HeapOomRepair':True,'expectedOomPrefix':'05e3b610fa1b'}
   worker={'oomKilled':False,'exitCode':134,'running':False,'name':'/adl-homologation-worker-1','id':'05e3b610fa1b'+'a'*52}
@@ -26,6 +40,8 @@ class Upgrade(unittest.TestCase):
    NS['subprocess'].run=lambda *a,**k:types.SimpleNamespace(returncode=1,stdout=b'',stderr=b'')
    with self.assertRaises(Exception):NS['verify_live_v8_heap_oom_identity'](worker,request)
   finally:NS['subprocess'].run=original
+  NS['verify_stopped_upgrade_worker']({**worker,'exitCode':0},{'snapshotMemoryRepair':True},'blocked')
+  with self.assertRaises(Exception):NS['verify_stopped_upgrade_worker']({**worker,'exitCode':137},{'snapshotMemoryRepair':True,'expectedOomPrefix':request['expectedOomPrefix']},'blocked')
 
  def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
   request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
