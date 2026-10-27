@@ -5,8 +5,9 @@ class PublicationScope(unittest.TestCase):
  def test_only_reviewed_six_files_with_verified_parent_digest(self):
   pinned={'packages/feed-store/src/tenant-tickets.ts':hashlib.sha256(b'old').hexdigest()}
   ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256']=pinned
+  self.assertEqual(ns['PUBLICATION_BASE_DIGEST_FILES'],ns['PARTITION_FILES']-{'packages/feed-store/src/tenant-tickets.ts'})
   old={p:'old' for p in ns['PARTITION_FILES']}
-  digest=hashlib.sha256(json.dumps({p:old[p] for p in ns['PARTITION_DIGEST_FILES']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  digest=hashlib.sha256(json.dumps({p:old[p] for p in ns['PUBLICATION_BASE_DIGEST_FILES']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
   candidate={**old,**{p:'reviewed' for p in ('apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts')}}
   ns['verify_publication_reserve_sources'](old,candidate,digest)
   for value,sha in ((old,digest),(candidate,'0'*64),({**candidate,'apps/worker/src/durable-ingress.mjs':'other'},digest),({**candidate,'packages/contracts/src/index.ts':'format-change'},digest)):

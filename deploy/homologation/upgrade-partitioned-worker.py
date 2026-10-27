@@ -1,6 +1,7 @@
 """Prepare a verified derived worker image, then activate once; preserve migration and POSNET."""
 PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'}
 PARTITION_DIGEST_FILES=PARTITION_FILES-{'packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'}
+PUBLICATION_BASE_DIGEST_FILES=PARTITION_FILES-{'packages/feed-store/src/tenant-tickets.ts'}
 PIPELINE_AUXILIARY_FILES={'packages/feed-store/src/operation-risk.ts'}
 OOM_REHEARSAL_TIMEOUT_SECONDS=1200
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
@@ -414,8 +415,10 @@ def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
     require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
 
 def verify_publication_reserve_sources(old_files,files,old_digest):
-    base={name:old_files[name] for name in PARTITION_DIGEST_FILES if name in old_files}
-    require(set(old_files)==set(files) and set(base)==PARTITION_DIGEST_FILES and hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PUBLICATION_RESERVE_BASE_DIGEST_MISMATCH')
+    # The installed image label covers the historical full source set. The
+    # later-added tenant ticket dependency is pinned independently below.
+    base={name:old_files[name] for name in PUBLICATION_BASE_DIGEST_FILES if name in old_files}
+    require(set(old_files)==set(files) and set(base)==PUBLICATION_BASE_DIGEST_FILES and hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PUBLICATION_RESERVE_BASE_DIGEST_MISMATCH')
     require(verify_pinned_added_dependencies(old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PUBLICATION_RESERVE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     changed={n for n in files if files[n]!=old_files[n]}
     # State: wait outside FIFO; connected: decode inside guarded apply, bounded
