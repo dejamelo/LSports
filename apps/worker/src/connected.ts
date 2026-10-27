@@ -82,6 +82,14 @@ export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkp
 // still advances before ACK; the verified snapshot triggers the next publish.
 export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'connections'>){
  return Object.values(state.connections).some(c=>{
+  // A durable session enters recovery before it creates the fullSnapshot
+  // record. While its mandatory baseline is still missing, the startup feed
+  // already published by runConnected is the blocked public baseline. Keep it
+  // stable during session setup and backlog drain: rebuilding millions of
+  // recovered selections before the snapshot gate can take minutes and stall
+  // both inbox lanes. The private checkpoint still advances before ACK.
+  const recoveringWithoutBaseline=!!c.session&&Number.isFinite(Date.parse(c.session.startedAt||''))&&c.recoveryProgress?.regularSnapshotReady===false;
+  if(recoveringWithoutBaseline)return true;
   // `startedAt` is set before the initial save and before waiting_http. That
   // interval can last minutes; gate publication from then through successful
   // completion, including local in-flight/heap deferrals. These failures leave

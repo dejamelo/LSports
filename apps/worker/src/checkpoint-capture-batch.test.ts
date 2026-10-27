@@ -50,6 +50,9 @@ test('durable inbox remains received but unprocessed while a full snapshot is va
 });
 test('snapshot application defers full public projection until the verified baseline is complete',()=>{
  const state=new TradeState();assert.equal(deferPublicProjectionDuringSnapshot(state),false);
+ const recoveryAt=new Date().toISOString();state.set('prematch',{phase:'recovering',session:{id:'isolated-recovery',startedAt:recoveryAt},recoveryProgress:{stage:'snapshot',startedAt:recoveryAt,regularSnapshotReady:false}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),true,'a reconnect before its first snapshot must keep the already-blocked public baseline while the durable backlog drains');
+ state.set('prematch',{session:undefined,recoveryProgress:undefined,phase:'starting'});
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
  state.set('prematch',{lastSnapshotErrorAt:new Date().toISOString()});assert.equal(deferPublicProjectionDuringSnapshot(state),true);

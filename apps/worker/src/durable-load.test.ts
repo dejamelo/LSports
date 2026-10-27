@@ -18,6 +18,9 @@ test('bounded dense snapshot with sustained ingress, configured burst and option
  const tasks:Promise<unknown>[]=[];
  const api:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true,consumers:['one'],numberMessagesInQueue:0,messagesPerSecond:69};},async snapshot(){throw Error('spool required');},async catalog(){return[];},async snapshotFull(sink){const result=await fullSnapshot({url,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,...sink,progress:p=>{snapshotStages.add(p.stage);sink.progress?.(p);}});snapshotDone=true;return result;}};
  try{
+  // Match runConnected(): write one blocked startup baseline before a lane
+  // enters recovery and defers redundant projections until its snapshot.
+  await save();
   const task=session(pkg,config,state,save,abort.signal,{connect:null as any,clientFactory:()=>api,durableConnect:async(p,db,onMetrics)=>{transport=await connectDurableMq(p,db,m=>{onMetrics?.(m);latest=m;peakBacklog=Math.max(peakBacklog,m.backlog);maxRss=Math.max(maxRss,m.rssBytes);maxIngressLag=Math.max(maxIngressLag,m.ingressMaxEventLoopDelayMs);samples.push({at:Date.now(),received:m.received,acknowledged:m.acknowledged,processed:m.processed,backlog:m.backlog,age:m.oldestAgeMs,processingBacklog:m.processingBacklog,processingAge:m.oldestProcessingAgeMs,checkpointed:m.checkpointed});},{offline:true});load=transport.offlineLoad({message:template,rate:69,durationMs:duration,burst,burstAtMs:Number(process.env.ADL_LOAD_BURST_AT_MS||duration/2)});return transport;},checkpointBatchFlushMs:Number(process.env.ADL_LOAD_CHECKPOINT_FLUSH_MS||PREMATCH_CHECKPOINT_BATCH_FLUSH_MS)},inbox);
   tasks.push(task);void task.catch(()=>{});
   while(!load)await sleep(10);const generation=await load;const deadline=Date.now()+360000;
