@@ -4,10 +4,19 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
-import { session } from "./connected.js";
+import { safeErrorFrames, session } from "./connected.js";
 import { TradeState, quoteConfirmed } from "./state.js";
 import type { PackageConfig } from "./config.js";
 import { clients } from "./provider.js";
+test("persistence diagnostics expose only safe source locations",()=>{
+  const error=new TypeError("secret payload and /private/path");
+  error.stack="TypeError: secret payload and /private/path\n    at canonical (/app/packages/feed-store/src/tickets.ts:44:2)\n    at Object.reconcile (/app/packages/feed-store/src/operation-tickets.ts:286:5)";
+  const frames=safeErrorFrames(error);
+  assert.deepEqual(frames,[{file:"tickets.ts",line:44,column:2},{file:"operation-tickets.ts",line:286,column:5}]);
+  assert.doesNotMatch(JSON.stringify(frames),/secret|private|payload|\/app/);
+  const noStack=new Error("no stack");noStack.stack="";
+  assert.deepEqual(safeErrorFrames(noStack),[]);
+});
 test("worker consumes while snapshot is pending, preserves newer deltas, persists before ack and gates on shutdown", async () => {
   const state = new TradeState();
   const abort = new AbortController();

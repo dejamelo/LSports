@@ -37,6 +37,22 @@ const transportEnd=(reason:"connection_closed"|"channel_closed"|"consumer_cancel
 });
 const durableSnapshotApplicationActive=new WeakMap<TradeState,Set<string>>();
 
+// Report only source frame locations when a publication fails. Error messages
+// and raw stacks may contain supplier payloads or local paths.
+export function safeErrorFrames(error:unknown){
+  if(!(error instanceof Error)||typeof error.stack!=='string')return [] as {file:string;line:number;column:number}[];
+  const frames:{file:string;line:number;column:number}[]=[];
+  for(const frame of error.stack.split('\n').slice(1,9)){
+    const match=frame.match(/(?:\(|at )?(?:file:\/\/)?[^()\n]*?([^/()\s]+\.m?js|[^/()\s]+\.tsx?):(\d+):(\d+)\)?$/);
+    if(!match)continue;
+    const file=match[1];
+    if(!/^[A-Za-z0-9_.-]{1,96}$/.test(file))continue;
+    frames.push({file,line:Number(match[2]),column:Number(match[3])});
+    if(frames.length>=4)break;
+  }
+  return frames;
+}
+
 // Join only a not-yet-started save. Joining an active write could ACK changes
 // made after its capture; every caller must await a capture after its request.
 // Let the bounded inbox batch already waiting on a completed publication finish
@@ -203,8 +219,9 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         const deferProjection=deferPublicProjectionDuringSnapshot(stable);
         const durable=await checkpointBeforeProjection(
           ()=>persistRegularCheckpoint(path,stable,markStage),
-          ()=>{const feed=stable.projection(Date.now(),false);markStage('projection.reconcile');const capturedBlocks=state.availabilityBlocks();
-            tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
+          ()=>{markStage('projection.build');const feed=stable.projection(Date.now(),false);markStage('projection.availability');const capturedBlocks=state.availabilityBlocks();
+            if(tenantTickets){markStage('projection.tenant_tickets_reconcile');tenantTickets.reconcile(feed);}
+            markStage('projection.ticket_reconcile');ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
             return {feed,capturedBlocks};},
           deferProjection,
           markStage,
@@ -229,7 +246,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           const rawName=error instanceof Error?error.name:typeof error;
           const errorType=/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(rawName)?rawName:'other';
           const memory=process.memoryUsage();
-          console.error(JSON.stringify({operation:'file.persist.failure',publicationId,stage:activeStage,stageElapsedMs:Math.max(0,Math.ceil(performance.now()-activeStageStarted)),elapsedMs:Math.max(0,Math.ceil(performance.now()-started)),errorType,...(typeof code==='string'&&allowedCodes.has(code)?{errorCode:code}:{}),rssBytes:memory.rss,heapUsedBytes:memory.heapUsed,externalBytes:memory.external,arrayBuffersBytes:memory.arrayBuffers}));
+          console.error(JSON.stringify({operation:'file.persist.failure',publicationId,stage:activeStage,stageElapsedMs:Math.max(0,Math.ceil(performance.now()-activeStageStarted)),elapsedMs:Math.max(0,Math.ceil(performance.now()-started)),errorType,...(typeof code==='string'&&allowedCodes.has(code)?{errorCode:code}:{}),errorFrames:safeErrorFrames(error),rssBytes:memory.rss,heapUsedBytes:memory.heapUsed,externalBytes:memory.external,arrayBuffersBytes:memory.arrayBuffers}));
           throw error;
         }
     }),publicationId));
