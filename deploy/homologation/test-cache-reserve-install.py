@@ -24,7 +24,7 @@ class Install(unittest.TestCase):
     self.assertFalse(any(args[:2]==['systemctl','enable'] for args in calls))
     if unknown:self.assertEqual(unit.read_text(),'unrelated original unit')
    else:
-    ns['install_cache_reserve']();self.assertTrue(any(r.get('stage')=='cache_policy_installed' for r in emitted));self.assertTrue(any(c[:2]==['systemctl','enable'] for c in calls));self.assertFalse(any(c[0]=='docker' for c in calls));self.assertIn('Restart=no',unit.read_text())
+    ns['install_cache_reserve']();self.assertTrue(any(r.get('stage')=='cache_policy_installed' for r in emitted));self.assertTrue(any(c[:2]==['systemctl','enable'] for c in calls));self.assertTrue(any(c[0]=='systemd-analyze' and c[2].endswith('.service') for c in calls));self.assertFalse(any(c[0]=='docker' for c in calls));self.assertIn('Restart=no',unit.read_text())
  def test_actual_reclaim_required_before_enable(self):self.run_case()
  def test_unsupported_kernel_stops_before_deployment(self):self.run_case(unsupported=True)
  def test_unknown_policy_is_never_overwritten(self):self.run_case(unknown=True)

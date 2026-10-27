@@ -15,7 +15,7 @@ def install_cache_reserve():
         previous[path]=old;changed=True
     backup=Path(tempfile.mkdtemp(prefix='adl-cache-reserve-',dir=BACKUPS));os.chmod(backup,0o700)
     private(backup/'installation.json',json.dumps({'unit':str(unit),'script':str(script),'unitExisted':unit.exists(),'scriptExisted':script.exists(),'previousScriptSha256':hashlib.sha256(previous[script]).hexdigest() if script in previous and previous[script] is not None else None,'previousUnitSha256':hashlib.sha256(previous[unit]).hexdigest() if unit in previous and previous[unit] is not None else None,'policySha256':hashlib.sha256(CACHE_RESERVE_SOURCE.encode()).hexdigest(),'rollback':'restore the exact files in this backup and restart only adl-worker-cache-reserve.service','workerRestarted':False}).encode())
-    staged_script=backup/'worker-cache-reserve.next.py';staged_unit=backup/'adl-worker-cache-reserve.service.next';private(staged_script,CACHE_RESERVE_SOURCE.encode());private(staged_unit,content)
+    staged_script=backup/'worker-cache-reserve.next.py';staged_unit=backup/'adl-worker-cache-reserve.next.service';private(staged_script,CACHE_RESERVE_SOURCE.encode());private(staged_unit,content)
     run(['systemd-analyze','verify',str(staged_unit)],timeout=20,log=backup/'unit-verify.private.log')
     policy_hash=hashlib.sha256(CACHE_RESERVE_SOURCE.encode()).hexdigest()
     verified_before=False
