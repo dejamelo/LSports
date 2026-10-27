@@ -14,6 +14,9 @@ class Upgrade(unittest.TestCase):
    bad={**progress,'heapBudgetPlan':{**progress['heapBudgetPlan'],**changed}}
    with self.assertRaises(Exception):NS['partition_heap_mib'](bad)
   with self.assertRaises(Exception):NS['partition_memory']({**progress,'v8HeapOomRepair':False})
+  inherited={**progress,'pipelineRepair':True,'v8HeapOomRepair':False,'inheritedV8HeapCompactionPlan':True}
+  self.assertEqual(NS['partition_memory'](inherited),6442450944);self.assertEqual(NS['partition_heap_mib'](inherited),4608)
+  with self.assertRaises(Exception):NS['partition_heap_mib']({**inherited,'inheritedV8HeapCompactionPlan':False})
 
  def test_pipeline_reuses_verified_v8_compaction_receipt_without_raising_heap_or_container_limit(self):
   with tempfile.TemporaryDirectory() as tmp:
