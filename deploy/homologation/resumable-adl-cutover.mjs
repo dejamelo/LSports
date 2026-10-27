@@ -49,7 +49,7 @@ export async function command(bin,args,input,timeout=180000,raw=false,quiet=fals
   child.stdout.on('data',chunk=>{bytes+=chunk.length;if(bytes>4*1024*1024){child.kill('SIGTERM');return;}if(raw){all+=chunk;return;}buffer+=chunk;const lines=buffer.split('\n');buffer=lines.pop();lines.forEach(parse);});
   child.stderr.on('data',chunk=>{if(stderr.length<65536)stderr+=chunk;});child.stdin.on('error',()=>{});child.stdin.end(input);
   child.on('error',error=>{failed=true;clearTimeout(timer);const detail=sanitizedHelperExit({...context,spawnCode:error.code,rows,stderr});console.log(JSON.stringify(detail));reject(Object.assign(Error(detail.reason),{helperExit:detail}));});
-  child.on('close',(code,signal)=>{clearTimeout(timer);if(failed)return;if(!raw)parse(buffer);if(code!==0||bytes>4*1024*1024){
+  child.on('close',(code,signal)=>{clearTimeout(timer);if(failed)return;if(!raw)parse(buffer);if(code!==0&&!(context.allowExitCodes||[]).includes(code)||bytes>4*1024*1024){
    const detail=sanitizedHelperExit({...context,code,signal,stderr,rows});console.log(JSON.stringify(detail));reject(Object.assign(Error(detail.reason),{helperExit:detail}));
   }else resolve(raw?all:rows);});
  });
@@ -186,7 +186,7 @@ export async function run(args){
    stage='validation_resume_gate';
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
    if(!['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
-   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);
+   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair?[2]:[]});
    const mac=rows.find(r=>r.operation==='cutover.audit');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
    if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:snapshotMemoryRepair}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
@@ -320,7 +320,7 @@ export async function run(args){
     if(fullMode&&prepared.offlineFullRecoveryVerified!==true)throw Error('FULL_RECOVERY_OFFLINE_UNVERIFIED');
     if(distributionMode&&prepared.offlinePropagationVerified!==true)throw Error('DISTRIBUTION_PROPAGATION_TEST_UNVERIFIED');
     ledger.steps[throughputMode?'throughput_image':nullableMode?'nullable_markets_image':supplierMode?'supplier_order_image':fullMode?'full_image':distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
-    const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);const fresh=freshRows.find(r=>r.operation==='cutover.audit');
+    const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair?[2]:[]});const fresh=freshRows.find(r=>r.operation==='cutover.audit');
     if(!macAuditProvesStopped(fresh,{allowMissingCheckpoint:snapshotMemoryRepair}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     if(['--supplier-order-rollback','--nullable-markets-rollback','--recovery-throughput-rollback'].includes(args[4])){const result=await remote('upgrade_partitioned',{phase:'rollback',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});ledger.steps[throughputMode?'throughput_rollback':nullableMode?'nullable_markets_rollback':'supplier_order_rollback']={status:'ok',result};await save();return;}
     let activationAudit=fresh;
@@ -328,8 +328,8 @@ export async function run(args){
      const verified=await remote('upgrade_partitioned',{phase:'activate',verifyOnly:true,files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});
      if(verified.offlineRestoreVerified!==true)throw Error('OOM_PERSISTED_DATA_NOT_VERIFIED_NO_START');
      ledger.steps.snapshot_memory_data={status:'ok',result:verified};await save();
-     const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);activationAudit=rows.find(r=>r.operation==='cutover.audit');
-     if(activationAudit?.status!=='ok'||activationAudit.matchingWorkerProcesses!==0||activationAudit.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+     const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair?[2]:[]});activationAudit=rows.find(r=>r.operation==='cutover.audit');
+     if(!macAuditProvesStopped(activationAudit,{allowMissingCheckpoint:snapshotMemoryRepair}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     }
     const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:activationAudit.capturedAt,...repairOptions});
     ledger.steps[throughputMode?'throughput_upgrade':nullableMode?'nullable_markets_upgrade':supplierMode?'supplier_order_upgrade':fullMode?'full_upgrade':distributionMode?'distribution_upgrade':'partitioned_upgrade']={status:'ok',at:new Date().toISOString(),result:activated};await save();
