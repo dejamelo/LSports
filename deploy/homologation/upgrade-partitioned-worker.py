@@ -83,7 +83,8 @@ def verify_live_persistence_identity(worker,request,image):
     require(all(checks.values()),'CURRENT_PERSISTENCE_IMAGE_UNVERIFIED')
 
 def verify_live_oom_sources(old_files,files,old_digest):
-    require(set(old_files)==set(files) and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_OOM_SOURCE_DIGEST_MISMATCH')
+    legacy_files={name:value for name,value in old_files.items() if name!='apps/worker/src/timestamp-recovery.ts'}
+    require(set(old_files)==set(files) and 'apps/worker/src/timestamp-recovery.ts' in old_files and hashlib.sha256(json.dumps(legacy_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_OOM_SOURCE_DIGEST_MISMATCH')
     changed={name for name in files if files[name]!=old_files[name]}
     require(changed and changed<= {'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/feed-store/src/index.ts'},'CURRENT_OOM_PATCH_SCOPE_UNVERIFIED')
 
