@@ -17,7 +17,7 @@ class PublicationScope(unittest.TestCase):
   old={p:'old' for p in ns['PIPELINE_BASE_FILES']|ns['PIPELINE_AUXILIARY_FILES']}
   added={'apps/worker/src/snapshot-capacity.ts':Path('apps/worker/src/snapshot-capacity.ts').read_text(),'packages/feed-store/src/tenant-tickets.ts':'old'}
   self.assertEqual(hashlib.sha256(added['apps/worker/src/snapshot-capacity.ts'].encode()).hexdigest(),ns['PIPELINE_ADDED_DEPENDENCY_SHA256']['apps/worker/src/snapshot-capacity.ts'])
-  base={**old,**added};digest=hashlib.sha256(json.dumps({p:base[p] for p in ns['PIPELINE_BASE_FILES']|set(ns['PIPELINE_ADDED_DEPENDENCY_SHA256'])},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  base={**old,**added};digest=hashlib.sha256(json.dumps({p:base[p] for p in ns['PARTITION_FILES']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
   files={p:base[p] if p in base else 'old' for p in ns['PARTITION_FILES']}
   files['packages/feed-store/src/tenant-tickets.ts']='reviewed tenant dependency'
   ns['verify_pipeline_sources'](old,files,digest,added)

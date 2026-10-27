@@ -409,7 +409,10 @@ def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
     require({name:hashlib.sha256(added_old_files[name].encode()).hexdigest() for name in PIPELINE_ADDED_DEPENDENCY_SHA256}==PIPELINE_ADDED_DEPENDENCY_SHA256,'PIPELINE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     require(verify_pinned_added_dependencies(added_old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_PINNED_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     verified_base={**old_files,**added_old_files}
-    digest_base={name:verified_base[name] for name in PIPELINE_BASE_FILES|set(PIPELINE_ADDED_DEPENDENCY_SHA256)}
+    # Installed derived images carry the digest of the complete partition file
+    # set. Verify that same identity before applying the per-dependency pins;
+    # hashing only the historical core subset rejects every full-set image.
+    digest_base={name:verified_base[name] for name in PARTITION_FILES}
     require(hashlib.sha256(json.dumps(digest_base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
     changed={n for n in files if files[n]!=verified_base[n]}
     require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
