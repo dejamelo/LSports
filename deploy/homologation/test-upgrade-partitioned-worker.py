@@ -4,6 +4,9 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_measured_restore_serialization_window_includes_return_readback(self):
+  self.assertEqual(NS['OOM_REHEARSAL_TIMEOUT_SECONDS'],1200)
+
  def test_v8_compaction_plan_preserves_existing_six_gib_container_and_heap(self):
   progress={'memoryLimitBytes':6442450944,'snapshotMemoryRepair':True,'v8HeapOomRepair':True,'heapBudgetPlan':{'evidenceVerified':True,'v8HeapCompactionPreserve':True,'previousOldSpaceMiB':4608,'oldSpaceMiB':4608,'containerLimitUnchanged':True,'measuredRedundantTimestampBytes':319*1024*1024}}
   self.assertEqual(NS['partition_memory'](progress),6442450944);self.assertEqual(NS['partition_heap_mib'](progress),4608)

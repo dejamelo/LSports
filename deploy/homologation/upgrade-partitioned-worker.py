@@ -1,5 +1,6 @@
 """Prepare a verified derived worker image, then activate once; preserve migration and POSNET."""
 PARTITION_FILES={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts'}
+OOM_REHEARSAL_TIMEOUT_SECONDS=1200
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
 PIPELINE_BASE_FILES=PARTITION_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
 PROJECTION_RESUME_DRIVER_SHA256='b2f7cd58ee386c3855b9225088d112fef51a8b442bd0369848fab626fa0c8034'
@@ -729,7 +730,7 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
         output_reserve=max(input_bytes*8,partial_bytes*2)
         budget_basis='conservative planning reserve, not measured complete serialization peak'
     required=missing+output_reserve+4*1024**3
-    removed=[];prior=oom_restore_log_summary(backup)
+    removed=[];preserved_partial=None;prior=oom_restore_log_summary(backup)
     if partial_bytes and not progress.get('projectionSerializationVerified') and not receipt.exists() and not receipt.is_symlink() and 'disk_full' in prior.get('signals',[]):
         require(partial.is_file() and not partial.is_symlink() and partial.stat().st_nlink==1,'REHEARSAL_PARTIAL_OUTPUT_UNVERIFIED')
         ids=run(['docker','ps','-aq']).decode().split()
@@ -738,6 +739,20 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
         require(not any(output.resolve()==m or output.resolve() in m.parents or m in output.resolve().parents for m in mounts),'REHEARSAL_PARTIAL_OUTPUT_MOUNTED_NO_CLEANUP')
         removed.append({'path':str(partial),'logicalBytes':partial_bytes,'allocatedBytes':partial.stat().st_blocks*512,'reason':'incomplete_output_without_receipt_after_disk_full'})
         partial.unlink()
+        partial_bytes=0
+    elif partial_bytes and not progress.get('projectionSerializationVerified') and not receipt.exists() and not receipt.is_symlink():
+        require(partial.is_file() and not partial.is_symlink() and partial.stat().st_nlink==1,'REHEARSAL_PARTIAL_OUTPUT_UNVERIFIED')
+        ids=run(['docker','ps','-aq']).decode().split();containers=json.loads(run(['docker','inspect',*ids])) if ids else []
+        mounts=[Path(m['Source']).resolve() for c in containers for m in c.get('Mounts',[]) if m.get('Source')]
+        require(not any(output.resolve()==m or output.resolve() in m.parents or m in output.resolve().parents for m in mounts),'REHEARSAL_PARTIAL_OUTPUT_MOUNTED_NO_ARCHIVE')
+        digest_partial=snapshot_file_hash(partial);archive=output/('projection.incomplete-'+digest_partial[:16]+'.private')
+        if archive.exists():require(archive.is_file() and not archive.is_symlink() and snapshot_file_hash(archive)==digest_partial,'REHEARSAL_PARTIAL_ARCHIVE_CHANGED')
+        else:os.rename(partial,archive)
+        fd=os.open(output,os.O_RDONLY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        preserved_partial={'path':str(archive),'bytes':partial_bytes,'sha256':digest_partial,'reason':'incomplete_output_preserved_after_measured_timeout'}
+        partial_bytes=0
     usage=shutil.disk_usage(backup);short=max(0,required-usage.free)
     filesystem=json.loads(run(['findmnt','--json','--target',str(backup),'--output','SOURCE,TARGET,FSTYPE,SIZE,AVAIL','--bytes']))
     block_devices=json.loads(run(['lsblk','--json','--bytes','--output','NAME,SIZE,TYPE,PKNAME,SERIAL,MOUNTPOINTS']))
@@ -763,7 +778,7 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     # EBS is provisioned in whole GiB; ext4 capacity is smaller than its device.
     minimum=(physical_gib+gib) if physical_gib is not None else None
     target=max(64,((minimum+3)//4)*4) if minimum is not None else None
-    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'minimumFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'currentEbsGiB':physical_gib,'minimumEbsGiB':minimum,'suggestedEbsGiB':target,'ebsGrowthGiB':target-physical_gib if target is not None else None,'estimatedEbsGrowthUSDPerMonth':round((target-physical_gib)*0.08,2) if target is not None else None,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':budget_basis,'removed':removed,'copies':copies}
+    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'minimumFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'currentEbsGiB':physical_gib,'minimumEbsGiB':minimum,'suggestedEbsGiB':target,'ebsGrowthGiB':target-physical_gib if target is not None else None,'estimatedEbsGrowthUSDPerMonth':round((target-physical_gib)*0.08,2) if target is not None else None,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':budget_basis,'removed':removed,'preservedPartial':preserved_partial,'copies':copies}
     report_path=write_recovery_attempt_report(backup/'offline-rehearsal-disk-plan.json',json.dumps(report).encode())
     report['reportFile']=str(report_path)
     emit(operation='cutover.aws',stage='partitioned_upgrade.offline_disk',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
@@ -1638,7 +1653,7 @@ def upgrade_partitioned_unlocked(request):
                     rehearsal_command=common[:-1]+['--mount','type=bind,source='+str(projection_output)+',target=/output',common[-1]]
                     output=b''
                     if not progress.get('projectionSerializationVerified'):
-                        output=streamed_rehearsal_run(rehearsal_command+['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx','--input-type=module','-e',code],timeout=780,log=backup/attempt)
+                        output=streamed_rehearsal_run(rehearsal_command+['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx','--input-type=module','-e',code],timeout=OOM_REHEARSAL_TIMEOUT_SECONDS,log=backup/attempt)
                         require(b'projection-serialize-ok' in output,'OOM_CHECKPOINT_RESTORE_FAILED_ORIGINALS_PRESERVED')
                         progress['projectionReceiptHash']=snapshot_file_hash(projection_output/'receipt.json');progress['projectionSerializationVerified']=True;progress['rehearsalMemory']=rehearsal_heap_evidence(output);save(progress)
                     require(snapshot_file_hash(projection_output/'receipt.json')==progress.get('projectionReceiptHash'),'PROJECTION_RECEIPT_CHANGED_NO_START')
@@ -1647,7 +1662,7 @@ def upgrade_partitioned_unlocked(request):
                     readback_code="import{verifyProjectionFile}from'/app/apps/worker/src/full-snapshot.ts';import{snapshotCapacity}from'/app/apps/worker/src/snapshot-capacity.ts';import{getHeapStatistics}from'node:v8';import{readFile}from'node:fs/promises';console.log(JSON.stringify({operation:'offline.memory',stage:'projection.readback',heapUsedBytes:process.memoryUsage().heapUsed,heapLimitBytes:getHeapStatistics().heap_size_limit,maxRSSBytes:process.resourceUsage().maxRSS*1024}));const capacity=snapshotCapacity({...process.env,LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB:'32'},undefined,'prematch');console.log(JSON.stringify({operation:'offline.memory_budget',stage:'projection.readback',...capacity}));const expected=JSON.parse(await readFile('/output/receipt.json','utf8'));const result=await verifyProjectionFile('/output/projection.json',expected);const{restore}=await import('/app/apps/worker/src/persistence.ts');const{TradeState}=await import('/app/apps/worker/src/state.ts');const{createHash}=await import('node:crypto');const{createReadStream}=await import('node:fs');const hash=createHash('sha256');for await(const chunk of createReadStream('/output/projection.json.regular-checkpoint.json'))hash.update(chunk);if(hash.digest('hex')!==expected.privateCheckpointSha256)throw Error('PRIVATE_CHECKPOINT_HASH_MISMATCH');const restored=new TradeState();const privateReadback=await restore(restored,'/output/projection.json');if(privateReadback.source!=='checkpoint'||privateReadback.rows!==expected.stateRows)throw Error('PRIVATE_CHECKPOINT_READBACK_MISMATCH');console.log(JSON.stringify({operation:'offline.private_readback',rows:privateReadback.rows,verified:true}));console.log(JSON.stringify({operation:'offline.projection_readback',...result,rssBytes:process.memoryUsage().rss,maxRSSBytes:process.resourceUsage().maxRSS*1024}));console.log(JSON.stringify({operation:'offline.memory',stage:'projection.readback',heapUsedBytes:process.memoryUsage().heapUsed,heapLimitBytes:getHeapStatistics().heap_size_limit,rssBytes:process.memoryUsage().rss,maxRSSBytes:process.resourceUsage().maxRSS*1024}));console.log('oom-checkpoint-restore-ok');"
                     readback_command=common[:-1]+['--mount','type=bind,source='+str(projection_output)+',target=/output,readonly',common[-1]]
                     readback_log=backup/('oom-restore-attempt-'+os.urandom(8).hex()+'.private.log');private(readback_log,b'');progress['projectionReadbackLog']=readback_log.name;save(progress);pointer=backup/('oom-restore.latest.'+os.urandom(8).hex()+'.tmp');private(pointer,json.dumps({'name':readback_log.name}).encode());durable_replace(pointer,backup/'oom-restore.latest.json')
-                    readback_output=streamed_rehearsal_run(readback_command+['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx','--input-type=module','-e',readback_code],timeout=780,log=readback_log)
+                    readback_output=streamed_rehearsal_run(readback_command+['--max-old-space-size='+str(partition_heap_mib(progress)),'--import','tsx','--input-type=module','-e',readback_code],timeout=OOM_REHEARSAL_TIMEOUT_SECONDS,log=readback_log)
                     require(b'oom-checkpoint-restore-ok' in readback_output,'PROJECTION_READBACK_FAILED_NO_START')
                     output+=readback_output
                     progress['projectionReadbackMemory']=rehearsal_heap_evidence(readback_output)
