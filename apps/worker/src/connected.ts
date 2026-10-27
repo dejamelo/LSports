@@ -53,8 +53,9 @@ export async function publicationCaptureTurn<T>(state:TradeState,persist:(stable
 }
 // Keep the materialized public event graph out of memory during the private
 // checkpoint write. The same immutable captured rows feed both durable files.
-export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkpoint:()=>Promise<TCheckpoint>,project:()=>TProjection,deferProjection=false){
+export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkpoint:()=>Promise<TCheckpoint>,project:()=>TProjection,deferProjection=false,onStage?:(stage:string)=>void){
  const checkpointResult=await checkpoint();
+ onStage?.(deferProjection?'checkpoint.projection_deferred':'projection.build');
  if(deferProjection)return{checkpointResult};
  return {checkpointResult,projection:project()};
 }
@@ -191,17 +192,22 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0,lastCompletedPublication=0,lastPersistedMutationGeneration=-1,loopWindowStart=Date.now();
     const save = coalescedPersistence(publicationId=>publicationCaptureTurn(state,stable=>operation("file.persist", "local", async () => {
-        const memoryStage=(stage:string)=>{state.setPublicationPhase(stage);const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',publicationId,stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
+        let activeStage='capture',activeStageStarted=performance.now();
+        const markStage=(stage:string)=>{activeStage=stage;activeStageStarted=performance.now();state.setPublicationPhase(stage);};
+        const memoryStage=(stage:string)=>{markStage(stage);const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',publicationId,stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
+        const started=performance.now();
+        try{
         memoryStage('capture');
-        const started=performance.now();const {regular,...saved}=streamCheckpoint(stable);
+        const {regular,...saved}=streamCheckpoint(stable);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();memoryStage('regular_checkpoint');
         const deferProjection=deferPublicProjectionDuringSnapshot(stable);
         const durable=await checkpointBeforeProjection(
-          ()=>persistRegularCheckpoint(path,stable,phase=>state.setPublicationPhase(phase)),
-          ()=>{const feed=stable.projection(Date.now(),false),capturedBlocks=state.availabilityBlocks();
+          ()=>persistRegularCheckpoint(path,stable,markStage),
+          ()=>{const feed=stable.projection(Date.now(),false);markStage('projection.reconcile');const capturedBlocks=state.availabilityBlocks();
             tenantTickets?.reconcile(feed);ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
             return {feed,capturedBlocks};},
           deferProjection,
+          markStage,
         );
         const checkpointIo=durable.checkpointResult;
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
@@ -217,6 +223,15 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         const metric={publicationId,checkpointIo,projectionIo:projectionMetrics,writes:++writes,publicProjectionDeferredForSnapshot:deferProjection,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:deferProjection?0:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
+        }catch(error){
+          const code=(error as NodeJS.ErrnoException)?.code;
+          const allowedCodes=new Set(['EACCES','EBADF','EBUSY','EDQUOT','EEXIST','EFBIG','EIO','EINVAL','EMFILE','ENFILE','ENOMEM','ENOSPC','ENOTDIR','EPERM','EROFS','ETXTBSY']);
+          const rawName=error instanceof Error?error.name:typeof error;
+          const errorType=/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(rawName)?rawName:'other';
+          const memory=process.memoryUsage();
+          console.error(JSON.stringify({operation:'file.persist.failure',publicationId,stage:activeStage,stageElapsedMs:Math.max(0,Math.ceil(performance.now()-activeStageStarted)),elapsedMs:Math.max(0,Math.ceil(performance.now()-started)),errorType,...(typeof code==='string'&&allowedCodes.has(code)?{errorCode:code}:{}),rssBytes:memory.rss,heapUsedBytes:memory.heapUsed,externalBytes:memory.external,arrayBuffersBytes:memory.arrayBuffers}));
+          throw error;
+        }
     }),publicationId));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;

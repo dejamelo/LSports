@@ -23,12 +23,12 @@ test('mutation generation excludes persistence telemetry and freezes at publicat
 });
 async function until(check:()=>boolean){const end=Date.now()+15000;while(!check()){if(Date.now()>end)throw Error('isolated test deadline');await sleep(5);}}
 test('private checkpoint completes before the full public projection is materialized',async()=>{
- const order:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:start');await sleep(10);order.push('checkpoint:durable');return 22;},()=>{assert.equal(order.at(-1),'checkpoint:durable');order.push('projection:materialized');return {events:1};});
- assert.deepEqual(order,['checkpoint:start','checkpoint:durable','projection:materialized']);assert.equal(result.checkpointResult,22);assert.deepEqual(result.projection,{events:1});
+ const order:string[]=[],stages:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:start');await sleep(10);order.push('checkpoint:durable');return 22;},()=>{assert.equal(order.at(-1),'checkpoint:durable');order.push('projection:materialized');return {events:1};},false,stage=>stages.push(stage));
+ assert.deepEqual(order,['checkpoint:start','checkpoint:durable','projection:materialized']);assert.deepEqual(stages,['projection.build']);assert.equal(result.checkpointResult,22);assert.deepEqual(result.projection,{events:1});
 });
 test('deferred public projection skips materialization after the private checkpoint',async()=>{
- const order:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:durable');return 23;},()=>{order.push('projection:materialized');return {events:1};},true);
- assert.deepEqual(order,['checkpoint:durable']);assert.equal(result.checkpointResult,23);assert.equal('projection'in result,false);
+ const order:string[]=[],stages:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:durable');return 23;},()=>{order.push('projection:materialized');return {events:1};},true,stage=>stages.push(stage));
+ assert.deepEqual(order,['checkpoint:durable']);assert.deepEqual(stages,['checkpoint.projection_deferred']);assert.equal(result.checkpointResult,23);assert.equal('projection'in result,false);
 });
 test('durable inbox remains received but unprocessed while a full snapshot is validated',{timeout:20000},async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-snapshot-validation-gate-')),path=join(dir,'feed.json'),dbPath=path+'.prematch.inbox.sqlite',state=new TradeState(),abort=new AbortController();
