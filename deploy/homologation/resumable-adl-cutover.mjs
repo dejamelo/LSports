@@ -33,7 +33,7 @@ const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(proces
 export const resolveAuditEntrypoint=(repoRoot=root)=>path.resolve(repoRoot,'scripts/audit-aws-cutover.ts');
 const auditEntrypoint=resolveAuditEntrypoint();
 const partitionWorkerSourceNames=Object.freeze(['connected.ts','connection-closer.ts','diagnostics.ts','snapshot-capacity.ts','provider.ts','snapshot-scheduler.ts','state.ts','messages.ts','league-fixtures.ts','partitioned-snapshot.ts','full-snapshot.ts','persistence.ts','timestamp-recovery.ts','durable-ingress.mjs','durable-ingress.d.mts']);
-const partitionPackageSourceNames=Object.freeze(['packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts']);
+const partitionPackageSourceNames=Object.freeze(['packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts']);
 const emit=value=>console.log(JSON.stringify({operation:'cutover.resumable',...value}));
 export async function step(ledger,name,save,action){
  if(ledger.steps[name]?.status==='ok'){emit({stage:name,status:'reused'});return ledger.steps[name].result;}
