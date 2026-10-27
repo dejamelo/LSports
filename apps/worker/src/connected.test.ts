@@ -848,6 +848,18 @@ test('empty InPlay snapshot is deferred without marking recovery ready',{timeout
  assert.equal(observed,true);
 });
 
+test('a zero-row failed snapshot releases the projection gate after the other lane completes',async()=>{
+ const {deferPublicProjectionDuringSnapshot}=await import('./connected.js');
+ const state=new TradeState(),startedAt=new Date().toISOString();
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'complete',completedAt:new Date().toISOString(),rows:1}});
+ state.set('inplay',{fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'waiting_http'}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),true,'active snapshot must hold the global projection gate');
+ state.set('inplay',{fullSnapshot:{...state.connections.inplay.fullSnapshot!,stage:'failed'}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),false,'an empty failed snapshot must not hold the completed lane stale');
+ state.set('inplay',{fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'apply',appliedRows:1}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),true,'partially applied snapshot must keep the global projection gate');
+});
+
 test('durable inbox checkpoint is deferred only during full snapshot application',async()=>{
  const {inboxCheckpointDeferredDuringSnapshot,setDurableSnapshotApplicationActive}=await import('./connected.js');
  assert.equal(inboxCheckpointDeferredDuringSnapshot(true),true);

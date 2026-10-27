@@ -70,7 +70,7 @@ export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'conne
   // completion, including local in-flight/heap deferrals. These failures leave
   // the blocked baseline in place and must not trigger another multi-GB publish.
   const snapshot=c.fullSnapshot;
-  return !!snapshot&&!snapshot.completedAt&&Number.isFinite(Date.parse(snapshot.startedAt||''));
+  return !!snapshot&&!snapshot.completedAt&&snapshot.stage!=='failed'&&Number.isFinite(Date.parse(snapshot.startedAt||''));
  });
 }
 export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=32768;
@@ -706,6 +706,12 @@ export async function session(
           const rejectedPartition=!!(api.snapshotFull||lane==='prematch'&&api.snapshotPartitioned)&&(api.snapshotFull?diagnostic.operation==='snapshot.events':(['invalid_response','sdk_error'].includes(diagnostic.category)||diagnostic.reason==='response_size_limit'));
           const rejectedEmptySnapshot=diagnostic.operation==='snapshot.events'&&diagnostic.category==='invalid_response'&&diagnostic.reason==='invalid_snapshot'&&diagnostic.snapshotValidation?.code==='full_document_invalid'&&diagnostic.snapshotValidation.sdkCount===0;
           if (diagnostic.category !== "rate_limited" && diagnostic.reason !== "memory_budget_exceeded" && !rejectedPartition && !rejectedEmptySnapshot) throw error;
+          // An empty/invalid document applied no rows. Keep its diagnostic, but
+          // release the global projection gate so another lane's completed
+          // snapshot can publish. Partial application still keeps the gate.
+          if(rejectedEmptySnapshot&&(state.connections[lane].fullSnapshot?.appliedRows||0)===0&&state.connections[lane].fullSnapshot){
+            state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:'failed'}});
+          }
           // Invalid partition HTTP is not AMQP failure. Keep persist-before-ACK and
           // baseline false, without changing the independent InPlay recovery policy.
           const localDeferral=diagnostic.deferred===true&&['local_in_flight','local_host_cooldown','local_operation_cooldown'].includes(diagnostic.rateLimitSource||'');
