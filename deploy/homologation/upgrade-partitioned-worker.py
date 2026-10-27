@@ -199,8 +199,12 @@ def existing_pipeline_heap_plan(worker):
         old=json.loads(path.read_bytes());require(old.get('image')==image and isinstance(old.get('digest'),str) and old['digest'][:24]==image.split(':')[1] and old.get('oomRestoreVerified') is True,'PIPELINE_HEAP_RESTORE_RECEIPT_UNVERIFIED')
         found=json.loads(run(['docker','image','inspect',image]))[0]
         require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
+        workers=states('worker');require(len(workers)==1 and workers[0].get('running') is True,'PIPELINE_LIVE_WORKER_HEAP_PROBE_IDENTITY_UNVERIFIED')
+        live=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
+        live_env=dict(item.split('=',1) for item in live.get('Config',{}).get('Env',[]) if '=' in item)
+        require(live.get('Image')==found.get('Id') and live.get('HostConfig',{}).get('Memory')==8589934592 and live_env.get('NODE_OPTIONS')==options,'PIPELINE_LIVE_WORKER_HEAP_PROBE_CONFIGURATION_UNVERIFIED')
         probe="const s=require('node:v8').getHeapStatistics();console.log(JSON.stringify({heapLimitBytes:s.heap_size_limit}))"
-        measured=json.loads(run(['docker','run','--rm','--network','none','--memory','8g','--read-only','-e','NODE_OPTIONS='+options,'--entrypoint','node',image,'-e',probe]))
+        measured=json.loads(run(['docker','exec',workers[0]['id'],'node','-e',probe],timeout=30))
         limit=measured.get('heapLimitBytes')
         require(type(limit) is int and 4608*1024**2<=limit<=8589934592-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
         return {'evidenceVerified':True,'oldSpaceMiB':4608,'previousOldSpaceMiB':4608,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':limit}
