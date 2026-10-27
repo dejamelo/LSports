@@ -76,6 +76,29 @@ def verify_live_v8_heap_oom_identity(worker,request):
     require(logs.returncode==0,'CURRENT_V8_HEAP_OOM_LOG_READ_FAILED')
     require(b'Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory' in logs.stdout+logs.stderr,'CURRENT_V8_HEAP_OOM_SIGNATURE_UNVERIFIED')
 
+def verify_live_persistence_failure_identity(worker,request,image):
+    """Accept only the exact, logged checkpoint-write failure as a stopped source."""
+    require(request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and request.get('pipelineRepair') is True,'CURRENT_PERSISTENCE_FAILURE_REPAIR_SCOPE_UNVERIFIED')
+    require(worker.get('running') is False and worker.get('oomKilled') is False and worker.get('exitCode')==1 and worker.get('name')=='/adl-homologation-worker-1','CURRENT_PERSISTENCE_FAILURE_CONTAINER_UNVERIFIED')
+    expected=request.get('expectedLiveImage')
+    require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',str(expected or '')) and image==expected,'CURRENT_PERSISTENCE_FAILURE_IMAGE_UNVERIFIED')
+    inspected=json.loads(run(['docker','inspect',worker['id']]))[0]
+    require(inspected.get('Config',{}).get('Image')==expected and inspected.get('State',{}).get('ExitCode')==1 and inspected.get('State',{}).get('OOMKilled') is False and inspected.get('State',{}).get('Error','')=='','CURRENT_PERSISTENCE_FAILURE_STATE_UNVERIFIED')
+    image_id=json.loads(run(['docker','image','inspect',expected]))[0].get('Id')
+    require(inspected.get('Image')==image_id,'CURRENT_PERSISTENCE_FAILURE_IMAGE_ID_MISMATCH')
+    logs=subprocess.run(['docker','logs','--tail','400',worker['id']],capture_output=True,timeout=20,check=False)
+    require(logs.returncode==0,'CURRENT_PERSISTENCE_FAILURE_LOG_READ_FAILED')
+    records=[]
+    for line in (logs.stdout+logs.stderr).splitlines():
+        try:record=json.loads(line)
+        except ValueError:continue
+        if isinstance(record,dict):records.append(record)
+    restored=any(r.get('operation')=='file.restore' and r.get('status')=='ok' and r.get('source')=='checkpoint' and r.get('rows')==44094 for r in records)
+    waits=[r for r in records if r.get('operation')=='file.persist' and r.get('status')=='waiting' and r.get('publicationStage')=='regular_checkpoint.write' and type(r.get('elapsedMs')) is int and r['elapsedMs']>=20000]
+    failed=any(r.get('operation')=='file.persist' and r.get('status')=='error' and r.get('protocol')=='local' and r.get('category')=='unexpected' and r.get('reason')=='unknown_exception' and type(r.get('elapsedMs')) is int and r['elapsedMs']>=90000 for r in records)
+    shutdown=any(r.get('operation')=='worker.shutdown' and r.get('status')=='error' and r.get('lock')=='released' for r in records)
+    require(restored and waits and failed and shutdown,'CURRENT_PERSISTENCE_FAILURE_SIGNATURE_UNVERIFIED')
+
 def verify_stopped_upgrade_worker(worker,request,reason,verify_identity=True,expected_container_id=None):
     if worker.get('running') is True or worker.get('running') is False and worker.get('exitCode')==0 and worker.get('oomKilled') is False:return
     if request.get('snapshotMemoryRepair') and worker.get('oomKilled') is True and worker.get('exitCode')==137:
@@ -83,6 +106,13 @@ def verify_stopped_upgrade_worker(worker,request,reason,verify_identity=True,exp
         return
     if request.get('v8HeapOomRepair') and worker.get('oomKilled') is False and worker.get('exitCode')==134 and worker.get('running') is False:
         if verify_identity:verify_live_v8_heap_oom_identity(worker,request)
+        return
+    if request.get('livePersistenceRepair') and worker.get('oomKilled') is False and worker.get('exitCode')==1 and worker.get('running') is False:
+        if expected_container_id is not None:require(worker.get('id')==expected_container_id,'CURRENT_PERSISTENCE_FAILURE_CONTAINER_CHANGED')
+        if verify_identity:
+            image=request.get('expectedLiveImage')
+            require(isinstance(image,str),'CURRENT_PERSISTENCE_FAILURE_IMAGE_UNVERIFIED')
+            verify_live_persistence_failure_identity(worker,request,image)
         return
     require(False,reason)
 
@@ -100,6 +130,9 @@ def verify_current_worker_identity(worker,request,image):
         verify_live_v8_heap_oom_identity(worker,request)
         return 'verified_v8_heap_exit'
     if request.get('livePersistenceRepair'):
+        if worker.get('running') is False and worker.get('exitCode')==1:
+            verify_live_persistence_failure_identity(worker,request,image)
+            return 'verified_persistence_failure_exit'
         verify_live_persistence_identity(worker,request,image)
         return 'verified_live_persistence'
     verify_live_oom_identity(worker,request)
@@ -1676,7 +1709,9 @@ def upgrade_partitioned_unlocked(request):
             require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');verify_stopped_upgrade_worker(worker_states[0],request,'OLD_WORKER_EXIT_REQUIRES_REVIEW',True,progress.get('oomContainerId'));pre_stop_floor=pre_stop_memory_floor_gib(worker_states[0]['running'],progress.get('pipelineMemoryEightGiB') is True);require(snapshot_host_memory()>=pre_stop_floor*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
             old_container=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0];
             if request.get('snapshotMemoryRepair') and not worker_states[0]['running']:
-                require(old_container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'OOM_RESTART_POLICY_UNSAFE');progress['oomContainerId']=worker_states[0]['id'];save(progress)
+                require(old_container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'OOM_RESTART_POLICY_UNSAFE')
+                if worker_states[0].get('oomKilled') is True and worker_states[0].get('exitCode')==137 or request.get('v8HeapOomRepair') and worker_states[0].get('oomKilled') is False and worker_states[0].get('exitCode')==134:
+                    progress['oomContainerId']=worker_states[0]['id'];save(progress)
             require(old_container['Image']==progress['baseImageId'] and snapshot_memory_bytes(old_container['HostConfig']['Memory'])==partition_memory(progress),'OLD_WORKER_IDENTITY_CHANGED_BEFORE_STOP')
             if worker_states[0]['running'] and request.get('snapshotMemoryRepair'):
                 stage='partitioned_upgrade.pre_stop_disk'

@@ -118,6 +118,34 @@ class Upgrade(unittest.TestCase):
   finally:
    NS.update(old)
 
+ def test_stopped_persistence_failure_requires_exact_checkpoint_write_failure_evidence(self):
+  image='adl-worker-partitioned:'+'a'*24;image_id='sha256:'+'b'*64;cid='c'*64
+  worker={'id':cid,'name':'/adl-homologation-worker-1','running':False,'exitCode':1,'oomKilled':False}
+  request={'snapshotMemoryRepair':True,'livePersistenceRepair':True,'pipelineRepair':True,'expectedLiveImage':image}
+  records=[
+   {'operation':'file.restore','status':'ok','source':'checkpoint','rows':44094},
+   {'operation':'file.persist','status':'waiting','publicationStage':'regular_checkpoint.write','elapsedMs':20024},
+   {'operation':'file.persist','status':'error','protocol':'local','category':'unexpected','reason':'unknown_exception','elapsedMs':94301},
+   {'operation':'worker.shutdown','status':'error','lock':'released'},
+  ]
+  inspected={'Config':{'Image':image},'State':{'ExitCode':1,'OOMKilled':False,'Error':''},'Image':image_id}
+  old_run,old_subprocess=NS['run'],NS['subprocess'].run
+  def run(args,**kwargs):
+   if args[:2]==['docker','inspect']:return json.dumps([inspected]).encode()
+   if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':image_id}]).encode()
+   raise AssertionError(args[:3])
+  try:
+   NS['run']=run;NS['subprocess'].run=lambda *a,**k:types.SimpleNamespace(returncode=0,stdout=('\n'.join(json.dumps(row) for row in records)).encode(),stderr=b'')
+   NS['verify_stopped_upgrade_worker'](worker,request,'blocked',True)
+   self.assertEqual(NS['verify_current_worker_identity'](worker,request,image),'verified_persistence_failure_exit')
+   for changed_worker in ({'exitCode':1,'oomKilled':True},{'name':'/adl-homologation-api-1'}):
+    with self.assertRaises(Exception):NS['verify_stopped_upgrade_worker']({**worker,**changed_worker},request,'blocked',True)
+   for changed_records in (records[:1],records[:-1],[*records[:-2],{**records[-2],'elapsedMs':1000},records[-1]]):
+    NS['subprocess'].run=lambda *a,rows=changed_records,**k:types.SimpleNamespace(returncode=0,stdout=('\n'.join(json.dumps(row) for row in rows)).encode(),stderr=b'')
+    with self.assertRaises(Exception):NS['verify_live_persistence_failure_identity'](worker,request,image)
+  finally:
+   NS['run'],NS['subprocess'].run=old_run,old_subprocess
+
  def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
   request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
   worker={'oomKilled':True,'exitCode':137,'running':False,'name':'/adl-homologation-worker-1','id':'7f43cb2939c7'+'a'*52}
