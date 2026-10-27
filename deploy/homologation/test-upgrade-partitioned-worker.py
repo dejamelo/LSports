@@ -4,6 +4,13 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_pipeline_dependency_pin_matches_current_source_manifest(self):
+  path=HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts'
+  digest=hashlib.sha256(path.read_bytes()).hexdigest()
+  source_ns={'__name__':'tested_upgrade_manifest'}
+  exec((HERE/'upgrade-partitioned-worker.py').read_text().split("if __name__=='__main__':")[0],source_ns)
+  self.assertEqual(source_ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256'][str(path.relative_to(HERE.parent.parent))],digest)
+
  def test_measured_restore_serialization_window_includes_return_readback(self):
   self.assertEqual(NS['OOM_REHEARSAL_TIMEOUT_SECONDS'],1200)
 
