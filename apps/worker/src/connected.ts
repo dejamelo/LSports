@@ -100,14 +100,17 @@ export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,
  // the heap reserve needed by snapshot batches. The normal save after snapshot
  // completion (or error) advances the checkpoint without risking the inbox.
  if(snapshotApplicationActive)return false;
-  const active=Object.values(state.connections).flatMap(c=>{
+ const active=Object.values(state.connections).flatMap(c=>{
   const snapshot=c.fullSnapshot;
   const errorAt=Date.parse(c.lastSnapshotErrorAt||'');
   return snapshot&&!snapshot.completedAt&&(!c.lastSnapshotErrorAt||!Number.isFinite(errorAt)||errorAt<Date.parse(snapshot.startedAt))?[snapshot]:[];
  });
  const waiting=active.some(snapshot=>snapshot.stage!=='apply');
- const applying=active.some(snapshot=>snapshot.stage==='apply');
- return !waiting&&(!applying||now-lastCompletedAt>=60000);
+ // This is a heartbeat, not a publication request on every 5s timer tick.
+ // A full private checkpoint is multi-gigabyte; unconditional true while no
+ // snapshot is active kept the FIFO writer permanently occupied, repeatedly
+ // consuming the copy-on-write heap reserve and delaying durable inbox ACKs.
+ return !waiting&&now-lastCompletedAt>=60000;
 }
 export function setDurableSnapshotApplicationActive(state:TradeState,active:boolean,lane='default'){
  let lanes=durableSnapshotApplicationActive.get(state);
@@ -182,13 +185,15 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         );
         const checkpointIo=durable.checkpointResult;
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
+        let projectionIo:Awaited<ReturnType<typeof publish>>|undefined;
         if(!deferProjection){
           const {feed,capturedBlocks}=durable.projection!;
           const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
-          memoryStage('projection');await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
+          memoryStage('projection');projectionIo=await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
         }else memoryStage('snapshot_projection_deferred');
         lastCompletedPublication=Date.now();
-        const metric={publicationId,checkpointIo,writes:++writes,publicProjectionDeferredForSnapshot:deferProjection,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:deferProjection?0:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
+        const projectionMetrics=projectionIo&&{bytes:projectionIo.bytes,serializeMs:projectionIo.serializeMs,writeAwaitMs:projectionIo.writeAwaitMs,fsyncAwaitMs:projectionIo.fsyncAwaitMs,closeAwaitMs:projectionIo.closeAwaitMs,renameAwaitMs:projectionIo.renameAwaitMs,directorySyncAwaitMs:projectionIo.directorySyncAwaitMs,totalWallMs:projectionIo.totalWallMs,otherWallMs:projectionIo.otherWallMs};
+        const metric={publicationId,checkpointIo,projectionIo:projectionMetrics,writes:++writes,publicProjectionDeferredForSnapshot:deferProjection,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:deferProjection?0:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
     }),publicationId));

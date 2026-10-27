@@ -72,9 +72,10 @@ export function checkpointWriteBuffer(file:Pick<Awaited<ReturnType<typeof open>>
 // Lazy map arrays keep their order and JSON schema. The private writer needs
 // neither the public event hash nor recursive primitive-token inspection.
 export async function writePrivateCheckpointRecord(file:Pick<Awaited<ReturnType<typeof open>>,'writeFile'>,record:Record<string,unknown>){
- let size=0,parts:string[]=[],pending=0;
- const flush=async()=>{if(!pending)return;const text=parts.join('');parts=[];pending=0;await file.writeFile(text);};
- const add=async(text:string)=>{const bytes=Buffer.byteLength(text);size+=bytes;if(size>32*1024**2)throw Error('checkpoint_record_limit');if(pending+bytes>65536)await flush();if(bytes>65536){await file.writeFile(text);return;}parts.push(text);pending+=bytes;};
+ let size=0,parts:string[]=[],pending=0,writeAwaitMs=0;const began=performance.now();
+ const write=async(text:string)=>{const at=performance.now();try{await file.writeFile(text);}finally{writeAwaitMs+=performance.now()-at;}};
+ const flush=async()=>{if(!pending)return;const text=parts.join('');parts=[];pending=0;await write(text);};
+ const add=async(text:string)=>{const bytes=Buffer.byteLength(text);size+=bytes;if(size>32*1024**2)throw Error('checkpoint_record_limit');if(pending+bytes>65536)await flush();if(bytes>65536){await write(text);return;}parts.push(text);pending+=bytes;};
  await add('{');let first=true;
  for(const [key,value] of Object.entries(record)){
   if(value===undefined)continue;
@@ -85,7 +86,7 @@ export async function writePrivateCheckpointRecord(file:Pick<Awaited<ReturnType<
    await add(']');
   }else await add(JSON.stringify(value)??'null');
  }
- await add('}');await flush();
+ await add('}');await flush();return {serializeMs:Math.max(0,performance.now()-began-writeAwaitMs),writeAwaitMs};
 }
 
 // Stable private sidecar may be ahead of the public feed after a crash; replay remains
@@ -94,7 +95,7 @@ export async function persistRegularCheckpoint(path:string,regular:ReturnType<ty
   const began=performance.now();let fsyncAwaitMs=0,closeAwaitMs=0,renameAwaitMs=0,directorySyncAwaitMs=0;
   await mkdir(dirname(path),{recursive:true});const target=path+'.regular-checkpoint.json',temp=target+'.'+process.pid+'.tmp';
   observe?.('regular_checkpoint.open');const file=await open(temp,'w',0o600);
-  const output=checkpointWriteBuffer(file,observe);const writer=output as unknown as typeof file;try{
+  const output=checkpointWriteBuffer(file,observe);const writer=output as unknown as typeof file;let serializeMs=0;try{
     if(regular instanceof TradeState){
       await writer.writeFile('{"version":1,"regular":[');let first=true;
       // Freeze only row identities/references, not their market/bet maps. A live
@@ -102,16 +103,16 @@ export async function persistRegularCheckpoint(path:string,regular:ReturnType<ty
       const captured=(['prematch','inplay'] as const).flatMap(lane=>[...regular.rows[lane]].filter(([,row])=>!row.outright).map(([key,row])=>({lane,key,row})));
       for(const {lane,key,row} of captured){
         if(!first)await writer.writeFile(',');first=false;
-        await writePrivateCheckpointRecord(writer,streamedRow(lane,key,row));
+        serializeMs+=(await writePrivateCheckpointRecord(writer,streamedRow(lane,key,row))).serializeMs;
       }
       await writer.writeFile(']}');
-    }else await writeJsonObject(writer,{version:1,regular});
+    }else {const encoded=await writeJsonObject(writer,{version:1,regular});serializeMs+=encoded.serializeMs;}
     await output.flush();observe?.('regular_checkpoint.fsync');let at=performance.now();await file.sync();fsyncAwaitMs=performance.now()-at;
   }finally{const at=performance.now();await file.close();closeAwaitMs=performance.now()-at;}
   observe?.('regular_checkpoint.rename');let at=performance.now();await rename(temp,target);renameAwaitMs=performance.now()-at;
   const directory=await open(dirname(path),'r');try{observe?.('regular_checkpoint.directory_fsync');at=performance.now();await directory.sync();directorySyncAwaitMs=performance.now()-at;}finally{await directory.close();}
   const totalWallMs=performance.now()-began;
-  return {...output.stats,fsyncAwaitMs,closeAwaitMs,renameAwaitMs,directorySyncAwaitMs,totalWallMs,otherWallMs:Math.max(0,totalWallMs-output.stats.writeAwaitMs-fsyncAwaitMs-closeAwaitMs-renameAwaitMs-directorySyncAwaitMs)};
+  return {...output.stats,serializeMs,fsyncAwaitMs,closeAwaitMs,renameAwaitMs,directorySyncAwaitMs,totalWallMs,otherWallMs:Math.max(0,totalWallMs-output.stats.writeAwaitMs-serializeMs-fsyncAwaitMs-closeAwaitMs-renameAwaitMs-directorySyncAwaitMs)};
 }
 
 // Read directly: API freshness protection must not prevent recovery after downtime.

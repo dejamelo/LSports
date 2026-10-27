@@ -823,12 +823,14 @@ test('captured checkpoint retains market versions and settlements while live sta
 
 test('heartbeat skips full-state writes during durable snapshot apply and resumes after it',async()=>{
  const {heartbeatPublicationDue}=await import('./connected.js');const state=new TradeState();
+ assert.equal(heartbeatPublicationDue(state,1000,59999),false,'do not queue a multi-GB checkpoint on every timer tick');
+ assert.equal(heartbeatPublicationDue(state,1000,61000),true,'publish after the intended one-minute heartbeat interval');
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z'}});
  assert.equal(heartbeatPublicationDue(state,1000,61000),false);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z',stage:'apply'}});
  assert.equal(heartbeatPublicationDue(state,1000,61000,true),false);
  assert.equal(heartbeatPublicationDue(state,1000,61000,false),true);
- state.set('prematch',{lastSnapshotErrorAt:'2026-10-22T20:01:00Z'});assert.equal(heartbeatPublicationDue(state,1000,6000),true);
+ state.set('prematch',{lastSnapshotErrorAt:'2026-10-22T20:01:00Z'});assert.equal(heartbeatPublicationDue(state,1000,6000),false);assert.equal(heartbeatPublicationDue(state,1000,61000),true);
 });
 
 test('empty InPlay snapshot is deferred without marking recovery ready',{timeout:10000},async()=>{

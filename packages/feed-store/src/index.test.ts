@@ -14,7 +14,8 @@ test("connected mode never falls back to demo when state missing, stale or inval
       ...unavailable("Test"),
       updatedAt: new Date().toISOString(),
     };
-    await Promise.all([publish(feed), publish({ ...feed, notice: "latest" })]);
+    const publications=await Promise.all([publish(feed), publish({ ...feed, notice: "latest" })]);
+    for(const io of publications){assert.ok(io.bytes>0);assert.ok(io.serializeMs>=0);assert.ok(io.writeAwaitMs>=0);assert.ok(io.fsyncAwaitMs>=0);assert.ok(io.renameAwaitMs>=0);assert.ok(io.directorySyncAwaitMs>=0);assert.ok(io.totalWallMs>=io.serializeMs);}
     assert.equal((await readConnectedFeed(path)).notice, "latest");
     assert.equal(
       (await readConnectedFeed(path, Date.now() + 21000)).health,

@@ -99,8 +99,8 @@ export function maskEventAvailability(event:EventFeed['events'][number],reasons:
 // Explicit lazy arrays retain the public JSON schema without retaining all rows.
 export const jsonItems = (items: () => Iterable<unknown>) => ({ [Symbol.iterator]: items });
 export async function writeJsonObject(file: Awaited<ReturnType<typeof open>>, value: Record<string, unknown>,masks?:AvailabilityBlocks) {
-  let pending:string[]=[],bytes=0,total=0;const hash=createHash('sha256'),eventHash=createHash('sha256');
-  const flush=async()=>{if(!bytes)return;const text=pending.join('');hash.update(text);total+=Buffer.byteLength(text);await file.writeFile(text);pending=[];bytes=0;};
+  let pending:string[]=[],bytes=0,total=0,serializeMs=0,writeAwaitMs=0;const hash=createHash('sha256'),eventHash=createHash('sha256');
+  const flush=async()=>{if(!bytes)return;const text=pending.join('');hash.update(text);total+=Buffer.byteLength(text);const at=performance.now();try{await file.writeFile(text);}finally{writeAwaitMs+=performance.now()-at;}pending=[];bytes=0;};
   function* write(entry:any,key='',depth=0):Generator<string>{
     if(depth>128)throw Error('projection_depth_limit');
     if(entry===null||typeof entry!=='object'){yield (JSON.stringify(entry)??'null');return;}
@@ -129,7 +129,7 @@ export async function writeJsonObject(file: Awaited<ReturnType<typeof open>>, va
       if(!first)yield (',');first=false;yield (JSON.stringify(name)+':');yield* write(item,name,depth+1);}
     yield ('}');
   };
-  for(const token of write(value)){pending.push(token);bytes+=Buffer.byteLength(token);if(bytes>=64*1024)await flush();}await flush();return {sha256:hash.digest('hex'),bytes:total,eventSha256:eventHash.digest('hex')};
+  const iterator=write(value)[Symbol.iterator]();for(;;){const at=performance.now(),next=iterator.next();serializeMs+=performance.now()-at;if(next.done)break;pending.push(next.value);bytes+=Buffer.byteLength(next.value);if(bytes>=64*1024)await flush();}await flush();return {sha256:hash.digest('hex'),bytes:total,eventSha256:eventHash.digest('hex'),serializeMs,writeAwaitMs};
 }
 // Private checkpoint contract bounds one fixture to 32 MiB, not the document.
 // Stream map entries and fields into bounded chunks; never stringify a full checkpoint record.
@@ -140,7 +140,7 @@ export async function writeJsonRecord(file:Awaited<ReturnType<typeof open>>,reco
 }
 // One local worker writes a single atomic projection; API only reads. Never store credentials here.
 export function createPublisher(path = statePath()) {
-  let tail = Promise.resolve();
+  let tail:Promise<unknown> = Promise.resolve();
   return (feed: EventFeed, workerCheckpoint?: unknown,availabilityBlocks?:AvailabilityBlocks,observe?:(phase:string)=>void) => {
     const masks=availabilityBlocks?structuredClone(availabilityBlocks):undefined;
     const body = { ...feed, ...(workerCheckpoint === undefined ? {} : { workerCheckpoint }) };
@@ -149,9 +149,12 @@ export function createPublisher(path = statePath()) {
       const temp = `${path}.${process.pid}.tmp`;
       observe?.('projection.open');const file=await open(temp,'w',0o600);
       const writer={writeFile:async(text:string)=>{observe?.('projection.write');await file.writeFile(text);observe?.('projection.encode');}} as typeof file;
-      try{await writeJsonObject(writer,body,masks);observe?.('projection.fsync');await file.sync();}finally{await file.close();}
-      observe?.('projection.rename');await rename(temp,path);
-      const directory=await open(dirname(path),'r');try{observe?.('projection.directory_fsync');await directory.sync();}finally{await directory.close();}
+      const began=performance.now();let fsyncAwaitMs=0,closeAwaitMs=0,renameAwaitMs=0,directorySyncAwaitMs=0;let encoded:Awaited<ReturnType<typeof writeJsonObject>>;
+      try{encoded=await writeJsonObject(writer,body,masks);observe?.('projection.fsync');let at=performance.now();await file.sync();fsyncAwaitMs=performance.now()-at;}finally{const at=performance.now();await file.close();closeAwaitMs=performance.now()-at;}
+      observe?.('projection.rename');let at=performance.now();await rename(temp,path);renameAwaitMs=performance.now()-at;
+      const directory=await open(dirname(path),'r');try{observe?.('projection.directory_fsync');at=performance.now();await directory.sync();directorySyncAwaitMs=performance.now()-at;}finally{await directory.close();}
+      const totalWallMs=performance.now()-began;
+      return {...encoded,fsyncAwaitMs,closeAwaitMs,renameAwaitMs,directorySyncAwaitMs,totalWallMs,otherWallMs:Math.max(0,totalWallMs-encoded.serializeMs-encoded.writeAwaitMs-fsyncAwaitMs-closeAwaitMs-renameAwaitMs-directorySyncAwaitMs)};
     });
     tail = operation.catch(() => {});
     return operation;
