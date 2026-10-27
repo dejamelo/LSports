@@ -53,6 +53,13 @@ class OomRecovery(unittest.TestCase):
    result=NS['rehearsal_copy_permissions'](backup,rehearsal,[(source,target,sha)],{'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000]})
    self.assertEqual(result['scope'],'rehearsal_copy_only');self.assertEqual(target.stat().st_mode&0o777,0o600);self.assertEqual(rehearsal.stat().st_mode&0o777,0o700)
    self.assertEqual(before,(source.read_bytes(),source.stat().st_uid,source.stat().st_gid,source.stat().st_mode,backup.stat().st_mode))
+   original_chown=NS['os'].chown;attempts=[]
+   def reject_required_chown(path,uid,gid):attempts.append((Path(path),uid,gid));raise PermissionError('ownership change is required')
+   NS['os'].chown=reject_required_chown
+   try:
+    with self.assertRaises(PermissionError):NS['rehearsal_copy_permissions'](backup,rehearsal,[(source,target,sha)],{'uid':os.getuid()+1,'gid':os.getgid()+1,'groups':[os.getgid()+1]})
+   finally:NS['os'].chown=original_chown
+   self.assertEqual(len(attempts),1);self.assertEqual(attempts[0][0],rehearsal)
    target.unlink();os.link(source,target)
    with self.assertRaisesRegex(Exception,'REHEARSAL_COPY_IDENTITY_UNVERIFIED'):NS['rehearsal_copy_permissions'](backup,rehearsal,[(source,target,sha)],{'uid':os.getuid() or 1000,'gid':os.getgid() or 1000})
    with self.assertRaisesRegex(Exception,'REHEARSAL_NONROOT_IDENTITY_UNVERIFIED'):NS['rehearsal_copy_permissions'](backup,rehearsal,[],{'uid':0,'gid':0})

@@ -512,8 +512,18 @@ def rehearsal_copy_permissions(backup,rehearsal,sources,identity):
     for directory in dirs:require(directory.is_dir() and not directory.is_symlink(),'REHEARSAL_DIRECTORY_UNVERIFIED')
     before=[{'path':'/recovery'+('/'+str(p.relative_to(rehearsal)) if p!=rehearsal else ''),'uid':p.stat().st_uid,'gid':p.stat().st_gid,'mode':format(p.stat().st_mode&0o777,'04o')} for p in sorted(dirs|set(files))]
     # Owner-only access inside the bind root. Host backup parent stays root/0700.
-    for directory in dirs:os.chown(directory,uid,gid);os.chmod(directory,0o700)
-    for path in files:os.chown(path,uid,gid);os.chmod(path,0o600)
+    # Avoid an unnecessary chown when the private copy already has the exact
+    # container identity. On some host filesystems, even a same-owner chown is
+    # rejected for an unprivileged test process. A differing owner still needs
+    # an actual chown; failure remains fatal, and the checks below stay strict.
+    for directory in dirs:
+        st=directory.stat()
+        if (st.st_uid,st.st_gid)!=(uid,gid):os.chown(directory,uid,gid)
+        os.chmod(directory,0o700)
+    for path in files:
+        st=path.stat()
+        if (st.st_uid,st.st_gid)!=(uid,gid):os.chown(path,uid,gid)
+        os.chmod(path,0o600)
     for directory in dirs:require(directory.stat().st_uid==uid and directory.stat().st_gid==gid and directory.stat().st_mode&0o777==0o700,'REHEARSAL_DIRECTORY_ACCESS_UNVERIFIED')
     for path in files:require(path.stat().st_uid==uid and path.stat().st_gid==gid and path.stat().st_mode&0o777==0o600,'REHEARSAL_FILE_ACCESS_UNVERIFIED')
     for src,dst,sha in sources:require(snapshot_file_hash(dst)==sha and snapshot_file_hash(src)==sha,'REHEARSAL_CONTENT_CHANGED_DURING_PERMISSION_FIX')
