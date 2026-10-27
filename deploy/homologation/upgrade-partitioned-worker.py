@@ -240,10 +240,14 @@ def existing_pipeline_heap_plan(worker):
         if workers[0].get('running') is True:
             measured=json.loads(run(['docker','exec',workers[0]['id'],'node','-e',probe],timeout=30))
         else:
-            # Resume after a confirmed protected stop: measure the exact saved
-            # image/8 GiB/4608 profile in a no-network, read-only, data-free
-            # diagnostic process. Never require or restart the old worker.
-            require(live.get('State',{}).get('Running') is False and live.get('State',{}).get('ExitCode')==0 and live.get('State',{}).get('OOMKilled') is False,'PIPELINE_STOPPED_HEAP_PROBE_EXIT_UNVERIFIED')
+            # Resume after a confirmed protected stop: accept a clean exit or
+            # the narrowly verified checkpoint-write failure, then measure the
+            # exact saved image/profile in a data-free diagnostic process.
+            state=live.get('State',{})
+            if state.get('ExitCode')==1 and state.get('OOMKilled') is False:
+                verify_live_persistence_failure_identity(workers[0],{'snapshotMemoryRepair':True,'livePersistenceRepair':True,'pipelineRepair':True,'expectedLiveImage':image},image)
+            else:
+                require(state.get('Running') is False and state.get('ExitCode')==0 and state.get('OOMKilled') is False,'PIPELINE_STOPPED_HEAP_PROBE_EXIT_UNVERIFIED')
             measured=json.loads(run(['docker','run','--rm','--network','none','--read-only','--memory','8589934592','--memory-swap','8589934592','--cpus','2','--entrypoint','node',found['Id'],options,'-e',probe],timeout=30))
         limit=measured.get('heapLimitBytes')
         require(type(limit) is int and 4608*1024**2<=limit<=8589934592-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
