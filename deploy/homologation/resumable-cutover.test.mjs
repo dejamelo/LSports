@@ -1,9 +1,14 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
  assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));
+});
+test('missing local checkpoint only counts as stopped for recovery when every process and lock is absent',()=>{
+ const report={status:'blocked',matchingWorkerProcesses:0,workerLockAbsent:true,processes:{status:'ok',matching:0},locks:[],blockers:[{stage:'checkpoint',reason:'ENOENT'}],journalCount:1};
+ assert.equal(macAuditProvesStopped(report),false);assert.equal(macAuditProvesStopped(report,{allowMissingCheckpoint:true}),true);
+ for(const changed of [{matchingWorkerProcesses:1},{workerLockAbsent:false},{locks:[{}]},{journalCount:0},{blockers:[{stage:'checkpoint',reason:'INVALID'}]}])assert.equal(macAuditProvesStopped({...report,...changed},{allowMissingCheckpoint:true}),false);
 });
 test('completed stages are reused; failure stays pending and does not erase previous results',async()=>{
  const ledger={steps:{}};let saves=0,actions=0;

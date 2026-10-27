@@ -15,6 +15,10 @@ export function acceptedWorkerMemoryLimits({mode,snapshotMemoryRepair,pipelineRe
  if(snapshotMemoryRepair&&v8HeapOomRepair)return ['6442450944'];
  return ['4294967296'];
 }
+export function macAuditProvesStopped(audit,{allowMissingCheckpoint=false}={}){
+ if(audit?.status==='ok'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true)return true;
+ return allowMissingCheckpoint&&audit?.status==='blocked'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true&&audit.processes?.status==='ok'&&audit.processes?.matching===0&&Array.isArray(audit.locks)&&audit.locks.length===0&&audit.blockers?.length===1&&audit.blockers[0]?.stage==='checkpoint'&&audit.blockers[0]?.reason==='ENOENT'&&audit.journalCount>=1;
+}
 // Authorized protected recovery + resumable migration. No credentials are copied or printed.
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -183,8 +187,9 @@ export async function run(args){
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
    if(!['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);
-   const mac=rows.find(r=>r.operation==='cutover.audit');if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+   const mac=rows.find(r=>r.operation==='cutover.audit');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
+   if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:snapshotMemoryRepair}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    if(args[4]==='--startup-report'){
     stage='startup_report';
     const {createHash}=await import('node:crypto');
@@ -316,7 +321,7 @@ export async function run(args){
     if(distributionMode&&prepared.offlinePropagationVerified!==true)throw Error('DISTRIBUTION_PROPAGATION_TEST_UNVERIFIED');
     ledger.steps[throughputMode?'throughput_image':nullableMode?'nullable_markets_image':supplierMode?'supplier_order_image':fullMode?'full_image':distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
     const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);const fresh=freshRows.find(r=>r.operation==='cutover.audit');
-    if(fresh?.status!=='ok'||fresh.matchingWorkerProcesses!==0||fresh.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+    if(!macAuditProvesStopped(fresh,{allowMissingCheckpoint:snapshotMemoryRepair}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     if(['--supplier-order-rollback','--nullable-markets-rollback','--recovery-throughput-rollback'].includes(args[4])){const result=await remote('upgrade_partitioned',{phase:'rollback',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});ledger.steps[throughputMode?'throughput_rollback':nullableMode?'nullable_markets_rollback':'supplier_order_rollback']={status:'ok',result};await save();return;}
     let activationAudit=fresh;
     if(snapshotMemoryRepair){
