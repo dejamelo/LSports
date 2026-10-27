@@ -44,6 +44,30 @@ class InheritedHeap(unittest.TestCase):
     for changed in ({**plan,'oldSpaceMiB':4096},{**plan,'effectiveHeapLimitBytes':8589934592},{**plan,'containerLimitUnchanged':False}):
      with self.assertRaises(RuntimeError):NS['partition_heap_mib']({**progress,'heapBudgetPlan':changed})
   finally:NS['SECURE']=oldSecure;NS['run']=oldRun;NS['states']=oldStates
+ def test_stopped_worker_resume_measures_saved_profile_without_restarting_worker(self):
+  oldSecure,oldRun,oldStates=NS['SECURE'],NS['run'],NS['states']
+  try:
+   with tempfile.TemporaryDirectory() as tmp:
+    NS['SECURE']=Path(tmp);digest='9'*64;image='adl-worker-partitioned:'+digest[:24]
+    worker={'image':image,'environment':{'NODE_OPTIONS':'--max-old-space-size=4608'},'mem_limit':8589934592}
+    receipt={'image':image,'digest':digest,'memoryLimitBytes':8589934592,'oomRestoreVerified':True}
+    path=Path(tmp)/('partitioned-upgrade-'+digest[:24]+'.json');path.write_text(json.dumps(receipt));path.chmod(0o600)
+    image_id='sha256:'+'8'*64;worker_id='7'*64;calls=[]
+    def run(args,**kwargs):
+     calls.append(args)
+     if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':image_id,'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}}]).encode()
+     if args[:2]==['docker','inspect']:return json.dumps([{'Id':worker_id,'Image':image_id,'State':{'Running':False,'ExitCode':0,'OOMKilled':False},'HostConfig':{'Memory':8589934592},'Config':{'Env':['NODE_OPTIONS=--max-old-space-size=4608']}}]).encode()
+     if args[:3]==['docker','run','--rm']:
+      self.assertIn('--network',args);self.assertIn('none',args);self.assertIn('--read-only',args)
+      self.assertIn('--memory',args);self.assertIn('8589934592',args);self.assertIn('--max-old-space-size=4608',args)
+      return json.dumps({'heapLimitBytes':5033164800}).encode()
+     raise AssertionError(args)
+    NS['run']=run;NS['states']=lambda service:[{'id':worker_id,'running':False,'exitCode':0,'oomKilled':False}]
+    plan=NS['existing_pipeline_heap_plan'](worker)
+    self.assertEqual(plan['oldSpaceMiB'],4608);self.assertEqual(plan['effectiveHeapLimitBytes'],5033164800)
+    self.assertTrue(plan['preserveExisting']);self.assertTrue(plan['containerLimitUnchanged'])
+    self.assertFalse(any(args[:2]==['docker','exec'] for args in calls))
+  finally:NS['SECURE']=oldSecure;NS['run']=oldRun;NS['states']=oldStates
  def test_runtime_verification_uses_receipted_heap_and_confirms_both_snapshot_flags(self):
   plan={'evidenceVerified':True,'oldSpaceMiB':3840,'previousOldSpaceMiB':3840,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':4227858432}
   progress={'memoryLimitBytes':6442450944,'pipelineRepair':True,'heapBudgetPlan':plan}
