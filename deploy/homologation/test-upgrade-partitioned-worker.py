@@ -181,6 +181,13 @@ class Upgrade(unittest.TestCase):
   with self.assertRaisesRegex(RuntimeError,'UPGRADE_STOP_NO_OBSERVABLE_PROGRESS_NO_MORE_SIGNALS'):
    NS['watch_upgrade_stop'](lambda:{'running':True,'files':[],'records':[]},saved.append,now=lambda:clock[0],sleep=lambda sec:clock.__setitem__(0,clock[0]+sec))
   self.assertEqual(clock[0],90);self.assertIn('does not prove a deadlock',saved[-1]['note']);self.assertFalse(saved[-1]['forceStopEvidenceVerified'])
+ def test_shutdown_observer_counts_measured_cpu_or_disk_work_but_keeps_a_hard_deadline(self):
+  clock=[0];saved=[]
+  def sample():
+   return {'running':True,'files':[],'records':[],'containerWork':{'cpuUsageUsec':clock[0]*1000,'readBytes':clock[0]*1024**2,'writeBytes':0}}
+  with self.assertRaisesRegex(RuntimeError,'UPGRADE_STOP_OBSERVATION_DEADLINE_NO_MORE_SIGNALS'):
+   NS['watch_upgrade_stop'](sample,saved.append,timeout=45,interval=15,now=lambda:clock[0],sleep=lambda sec:clock.__setitem__(0,clock[0]+sec))
+  self.assertEqual(clock[0],45);self.assertTrue(any(s['samples'][-1].get('progressKind')=='container_cpu_or_io' for s in saved))
  def test_shutdown_progress_has_a_finite_deadline(self):
   clock=[0];saved=[]
   with self.assertRaisesRegex(RuntimeError,'UPGRADE_STOP_OBSERVATION_DEADLINE_NO_MORE_SIGNALS'):

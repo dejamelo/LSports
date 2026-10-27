@@ -1285,9 +1285,10 @@ def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None
     while True:
         point=sample();require(type(point.get('running')) is bool,'STOP_OBSERVATION_STATE_UNVERIFIED');point['observationElapsedSeconds']=round(now()-began,1)
         fingerprint=json.dumps({'files':point.get('files'),'records':point.get('records')},sort_keys=True)
-        changed=previous is not None and fingerprint!=previous
+        counter_progress=bool(observations and work_counter_progress(observations[-1].get('containerWork'),point.get('containerWork')))
+        changed=previous is not None and (fingerprint!=previous or counter_progress)
         if changed:last_change=now()
-        point['progressSincePreviousSample']=changed;point['assessment']='exited' if not point['running'] else 'observable_progress' if changed else 'no_new_observable_progress'
+        point['progressSincePreviousSample']=changed;point['progressKind']='checkpoint_or_log' if previous is not None and fingerprint!=previous else 'container_cpu_or_io' if counter_progress else 'none';point['assessment']='exited' if not point['running'] else 'observable_progress' if changed else 'no_new_observable_progress'
         observations.append(point);record({'samples':observations,'forceStopEvidenceVerified':False,'note':'Log/file inactivity does not prove a deadlock; live inbox/checkpoint consistency has not been verified for forced termination.'})
         if not point['running']:return observations
         elapsed=now()-began
@@ -1296,11 +1297,20 @@ def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None
         previous=fingerprint;sleep(min(interval,timeout-elapsed))
 
 def resumed_stop_budget(progress):
-    if progress.get('pipelineRepair') is True and partition_memory(progress)==6442450944:return 600
     previous=progress.get('shutdownObservation',{}).get('samples',[])
+    if progress.get('pipelineRepair') is True:
+        measured=max((s.get('lastCompletedPersistence',{}).get('lastDurationMs',0) for s in previous if isinstance(s,dict)),default=0)
+        if type(measured) in (int,float) and measured>0:return min(900,max(180,int((measured+120000+999)//1000)))
+        if partition_memory(progress)==6442450944:return 600
     # Only a pinned interrupted operation with measured write progress qualifies.
     # No repeated signal; inactivity and identity checks remain unchanged.
     return 600 if previous and previous[-1].get('progressSincePreviousSample') is True else 180
+
+def work_counter_progress(previous,current):
+    if not isinstance(previous,dict) or not isinstance(current,dict):return False
+    cpu=current.get('cpuUsageUsec',0)-previous.get('cpuUsageUsec',0)
+    io=sum(current.get(k,0)-previous.get(k,0) for k in ('readBytes','writeBytes'))
+    return cpu>=500000 or io>=1024*1024
 
 def upgrade_stop_sample(progress):
     workers=states('worker');require(len(workers)==1 and workers[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
@@ -1322,7 +1332,14 @@ def upgrade_stop_sample(progress):
             except FileNotFoundError:continue
             kind='inbox_wal' if target.name.endswith('.inbox.sqlite-wal') else 'inbox' if target.name.endswith('.inbox.sqlite') else 'checkpoint_tmp' if '.tmp' in target.name else 'checkpoint' if target.name in ('trade-feed.json','trade-feed.json.regular-checkpoint.json') else None
             if kind:files.append({'kind':kind,'lane':'prematch' if '.prematch.' in target.name else 'inplay' if '.inplay.' in target.name else None,'bytes':st.st_size,'modifiedNs':st.st_mtime_ns})
-    result={'atUTC':end.isoformat().replace('+00:00','Z'),'containerId':worker['id'],'running':worker['running'],'exitCode':worker.get('exitCode'),'oomKilled':worker.get('oomKilled'),'files':files,'records':records,'finishedAtUTC':info.get('State',{}).get('FinishedAt'),'signalsSent':0,'distributionOperations':0}
+    container_work=None
+    if worker.get('running'):
+        counter_probe="const fs=require('node:fs');const cpu=fs.readFileSync('/sys/fs/cgroup/cpu.stat','utf8').match(/^usage_usec (\\d+)/m),io=fs.readFileSync('/sys/fs/cgroup/io.stat','utf8');let readBytes=0,writeBytes=0;for(const line of io.split(/\\n/)){const r=line.match(/\\brbytes=(\\d+)/),w=line.match(/\\bwbytes=(\\d+)/);readBytes+=Number(r?.[1]||0);writeBytes+=Number(w?.[1]||0)}console.log(JSON.stringify({cpuUsageUsec:Number(cpu?.[1]||0),readBytes,writeBytes}))"
+        try:
+            candidate=json.loads(run(['docker','exec',worker['id'],'node','-e',counter_probe],timeout=15))
+            if all(type(candidate.get(k)) is int and candidate[k]>=0 for k in ('cpuUsageUsec','readBytes','writeBytes')):container_work=candidate
+        except (RuntimeError,subprocess.SubprocessError,ValueError,KeyError):pass
+    result={'atUTC':end.isoformat().replace('+00:00','Z'),'containerId':worker['id'],'running':worker['running'],'exitCode':worker.get('exitCode'),'oomKilled':worker.get('oomKilled'),'files':files,'records':records,'containerWork':container_work,'finishedAtUTC':info.get('State',{}).get('FinishedAt'),'signalsSent':0,'distributionOperations':0}
     persisted=[r for r in records if r.get('operation')=='file.persist'];completed=[r for r in persisted if r.get('lastCompletedAtUTC')]
     result['persistenceStage']=persisted[-1].get('stage','completed' if persisted[-1].get('lastCompletedAtUTC') else 'unknown') if persisted else 'not_observed'
     result['lastCompletedPersistence']=completed[-1] if completed else None
@@ -1785,9 +1802,16 @@ def upgrade_partitioned_unlocked(request):
                     stage='partitioned_upgrade.pre_exit_recovery';recover_completed_shutdown(progress,save,backup,evidence)
                 elif decision=='already_requested' and progress.get('shutdownObservation',{}).get('samples'):
                     previous=progress['shutdownObservation']['samples'][-1];fresh=upgrade_stop_sample(progress)
-                    if fresh['running'] and not previous.get('progressSincePreviousSample') and previous.get('observationElapsedSeconds',0)>=90 and fresh.get('files')==previous.get('files') and fresh.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence'):
+                    measured_work=False
+                    if fresh['running'] and previous.get('observationElapsedSeconds',0)>=90 and fresh.get('files')==previous.get('files') and fresh.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence'):
+                        if previous.get('containerWork') is not None:
+                            measured_work=work_counter_progress(previous['containerWork'],fresh.get('containerWork'))
+                        elif fresh.get('containerWork') is not None:
+                            time.sleep(8);later=upgrade_stop_sample(progress);measured_work=work_counter_progress(fresh.get('containerWork'),later.get('containerWork'));fresh=later
+                    if fresh['running'] and not previous.get('progressSincePreviousSample') and not measured_work and previous.get('observationElapsedSeconds',0)>=90 and fresh.get('files')==previous.get('files') and fresh.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence'):
                         emit(operation='cutover.aws',stage='partitioned_upgrade.stop_diagnosis',status='blocked',reason='SHUTDOWN_ALREADY_REQUESTED_RECOVERY_PROOF_REQUIRED',applicationStoppingObserved=evidence.get('applicationStoppingObserved'),process=evidence.get('process'),lastPersistence=fresh.get('lastCompletedPersistence'),persistenceStage=fresh.get('persistenceStage'),backup=str(backup),forceStopEvidenceVerified=False,posnetChanged=False)
                         raise RuntimeError('SHUTDOWN_ALREADY_REQUESTED_RECOVERY_PROOF_REQUIRED')
+                    if measured_work:emit(operation='cutover.aws',stage='partitioned_upgrade.stop_diagnosis',status='measured_process_work',cpuOrIoAdvanced=True,containerWork=fresh.get('containerWork'),backup=str(backup),signalsSent=0,forceStopEvidenceVerified=False,posnetChanged=False)
                 stage='partitioned_upgrade.stop_observation'
                 def observed(report):
                     progress['shutdownObservation']=report;save(progress)
