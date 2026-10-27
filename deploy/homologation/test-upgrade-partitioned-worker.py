@@ -26,6 +26,25 @@ class Upgrade(unittest.TestCase):
    bad={**worker,'id':'f'*64}
    with self.assertRaises(Exception):NS['archive_oom_locks'](directory,backup,progress,[bad])
 
+ def test_v8_rehearsal_disk_budget_uses_measured_projection_and_checkpoint_with_growth_reserve(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backup=Path(tmp);public=backup/'trade-feed.json';regular=backup/'trade-feed.json.regular-checkpoint.json';public.write_bytes(b'p'*100);regular.write_bytes(b'r'*200)
+   dst=backup/'rehearsal'/'trade-feed.json';src=public;progress={'v8HeapOomRepair':True};calls=[]
+   old={k:NS.get(k) for k in ('run','shutil','oom_restore_log_summary','write_recovery_attempt_report')}
+   def run(args,**kwargs):
+    if args[0]=='findmnt':return json.dumps({'filesystems':[{'source':'/dev/nvme0n1p1','target':'/','fstype':'ext4','size':100000000000,'avail':30000000000}]}).encode()
+    if args[0]=='lsblk':return json.dumps({'blockdevices':[{'name':'nvme0n1','type':'disk','size':'107374182400','children':[{'name':'nvme0n1p1','type':'part','size':'100000000000'}]}]}).encode()
+    raise AssertionError(args[0])
+   try:
+    NS.update(run=run,shutil=types.SimpleNamespace(**{**NS['shutil'].__dict__,'disk_usage':lambda _:types.SimpleNamespace(total=100000000000,free=30000000000)}),oom_restore_log_summary=lambda _: {'signals':[]},write_recovery_attempt_report=lambda path,data:Path(path))
+    output=io.StringIO()
+    with contextlib.redirect_stdout(output):NS['offline_rehearsal_disk_plan'](backup,[(src,dst,'0'*64)],progress,'a'*64)
+    row=json.loads(output.getvalue())
+   finally:
+    for key,value in old.items():NS[key]=value
+   measured=public.stat().st_size+regular.stat().st_size
+   self.assertEqual(row['outputReserveBytes'],measured*2);self.assertIn('equal growth reserve',row['budgetBasis']);self.assertEqual(row['copyMissingBytes'],100);self.assertEqual(row['status'],'verified')
+
  def test_v8_heap_oom_repair_requires_exact_stopped_container_and_log_signature(self):
   request={'snapshotMemoryRepair':True,'v8HeapOomRepair':True,'expectedOomPrefix':'05e3b610fa1b'}
   worker={'oomKilled':False,'exitCode':134,'running':False,'name':'/adl-homologation-worker-1','id':'05e3b610fa1b'+'a'*52}

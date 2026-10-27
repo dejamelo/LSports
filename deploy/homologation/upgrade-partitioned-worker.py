@@ -719,7 +719,15 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     missing=sum(src.stat().st_size for src,dst,sha in sources if not dst.exists())
     partial_bytes=partial.stat().st_size if partial.is_file() and not partial.is_symlink() else 0
     # Incomplete output is a lower bound, not the required final output size.
-    output_reserve=max(input_bytes*8,partial_bytes*2)
+    if progress.get('v8HeapOomRepair') is True:
+        public=backup/'trade-feed.json';regular=backup/'trade-feed.json.regular-checkpoint.json'
+        require(public.is_file() and not public.is_symlink() and regular.is_file() and not regular.is_symlink(),'MEASURED_REHEARSAL_OUTPUT_BASELINE_MISSING')
+        measured_peak=public.stat().st_size+regular.stat().st_size
+        output_reserve=max(measured_peak*2,partial_bytes*2)
+        budget_basis='two times measured public projection plus private checkpoint bytes, preserving equal growth reserve; exact current source copy plus 4 GiB safety and activation reserve'
+    else:
+        output_reserve=max(input_bytes*8,partial_bytes*2)
+        budget_basis='conservative planning reserve, not measured complete serialization peak'
     required=missing+output_reserve+4*1024**3
     removed=[];prior=oom_restore_log_summary(backup)
     if partial_bytes and not progress.get('projectionSerializationVerified') and not receipt.exists() and not receipt.is_symlink() and 'disk_full' in prior.get('signals',[]):
@@ -755,7 +763,7 @@ def offline_rehearsal_disk_plan(backup,sources,progress,digest):
     # EBS is provisioned in whole GiB; ext4 capacity is smaller than its device.
     minimum=(physical_gib+gib) if physical_gib is not None else None
     target=max(64,((minimum+3)//4)*4) if minimum is not None else None
-    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'minimumFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'currentEbsGiB':physical_gib,'minimumEbsGiB':minimum,'suggestedEbsGiB':target,'ebsGrowthGiB':target-physical_gib if target is not None else None,'estimatedEbsGrowthUSDPerMonth':round((target-physical_gib)*0.08,2) if target is not None else None,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':'conservative planning reserve, not measured complete serialization peak','removed':removed,'copies':copies}
+    report={'destination':str(backup),'filesystem':filesystem,'blockDevices':block_devices,'filesystemDevice':backup.stat().st_dev,'filesystemTotalBytes':usage.total,'freeDiskBytes':usage.free,'inputBytes':input_bytes,'copyMissingBytes':missing,'failedOutputBytes':partial_bytes,'failedOutputIsLowerBound':True,'outputReserveBytes':output_reserve,'safetyAndActivationReserveBytes':4*1024**3,'requiredFreeBytes':required,'missingBytes':short,'additionalGiB':gib,'minimumFilesystemGiB':(usage.total+short+1024**3-1)//1024**3,'currentEbsGiB':physical_gib,'minimumEbsGiB':minimum,'suggestedEbsGiB':target,'ebsGrowthGiB':target-physical_gib if target is not None else None,'estimatedEbsGrowthUSDPerMonth':round((target-physical_gib)*0.08,2) if target is not None else None,'gp3AdditionalStorageUSDPerMonthEstimate':round(gib*0.08,2),'priceAssumption':'us-east-2 gp3 0.08 USD/GiB-month; verify EBS type, size, pricing and device before console expansion; excludes IOPS/throughput/tax','budgetBasis':budget_basis,'removed':removed,'copies':copies}
     report_path=write_recovery_attempt_report(backup/'offline-rehearsal-disk-plan.json',json.dumps(report).encode())
     report['reportFile']=str(report_path)
     emit(operation='cutover.aws',stage='partitioned_upgrade.offline_disk',status='verified' if short==0 else 'blocked',**report,workerStarted=False,posnetChanged=False)
