@@ -1,8 +1,16 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {setTimeout as sleep} from 'node:timers/promises';
-import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,deferPublicProjectionDuringSnapshot,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
+import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,deferPublicProjectionDuringSnapshot,heartbeatPublicationDue,durableInboxBacklog,shouldDeferRoutineSnapshot,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
 const pkg={lane:'prematch',packageId:4511,username:'test',password:'test',hostname:'unused',queue:'unused',vhost:'unused',tls:false,port:5672} as any;
 test('offline batch policy matches the deployed PreMatch bounds',()=>{assert.equal(PREMATCH_CHECKPOINT_BATCH_THRESHOLD,32768);assert.equal(PREMATCH_CHECKPOINT_BATCH_FLUSH_MS,120000);});
+test('durable backlog reserves full-state serialization for retireable checkpoint batches',()=>{
+ const state=new TradeState();state.set('prematch',{ingressProgress:{received:20,acknowledged:0,processed:20,backlog:20,bytes:0,oldestAgeMs:0,receivedBytes:0,lastReceiveAt:null,lastAckAt:null,durableCommitMs:0,rssBytes:0,ingressMaxEventLoopDelayMs:0,metricWindowStartUTC:'',metricWindowEndUTC:'',headersByType:{}} as any});
+ assert.equal(durableInboxBacklog(state),20);assert.equal(heartbeatPublicationDue(state,0,120000),false);
+ state.set('prematch',{ingressProgress:{...state.connections.prematch.ingressProgress!,backlog:0}});assert.equal(heartbeatPublicationDue(state,0,120000),true);
+ assert.equal(shouldDeferRoutineSnapshot(false,900000),false,'initial/reconnect baseline remains mandatory');
+ assert.equal(shouldDeferRoutineSnapshot(true,PREMATCH_CHECKPOINT_BATCH_THRESHOLD+1),true);
+ assert.equal(shouldDeferRoutineSnapshot(true,PREMATCH_CHECKPOINT_BATCH_THRESHOLD),false);
+});
 async function until(check:()=>boolean){const end=Date.now()+15000;while(!check()){if(Date.now()>end)throw Error('isolated test deadline');await sleep(5);}}
 test('private checkpoint completes before the full public projection is materialized',async()=>{
  const order:string[]=[];const result=await checkpointBeforeProjection(async()=>{order.push('checkpoint:start');await sleep(10);order.push('checkpoint:durable');return 22;},()=>{assert.equal(order.at(-1),'checkpoint:durable');order.push('projection:materialized');return {events:1};});

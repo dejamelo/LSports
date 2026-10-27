@@ -100,6 +100,11 @@ export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,
  // the heap reserve needed by snapshot batches. The normal save after snapshot
  // completion (or error) advances the checkpoint without risking the inbox.
  if(snapshotApplicationActive)return false;
+ // A heartbeat cannot retire any inbox row, but it competes with the batch
+ // checkpoint that can. While SQLite has durable work pending, reserve the
+ // serialization slot for checkpoint batches; the inbox itself is the crash
+ // recovery source until those batches publish and retire their prefixes.
+ if(durableInboxBacklog(state)>0)return false;
  const active=Object.values(state.connections).flatMap(c=>{
   const snapshot=c.fullSnapshot;
   const errorAt=Date.parse(c.lastSnapshotErrorAt||'');
@@ -113,6 +118,15 @@ export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,
  // periodic full-state writes between snapshot batches, even if the capacity
  // drain temporarily clears the auxiliary application-active signal.
  return !waiting&&!applying&&now-lastCompletedAt>=60000;
+}
+export function durableInboxBacklog(state:Pick<TradeState,'connections'>){
+ return Object.values(state.connections).reduce((total,c)=>total+Math.max(0,c.ingressProgress?.processingBacklog??c.ingressProgress?.backlog??0),0);
+}
+export function shouldDeferRoutineSnapshot(regularSnapshotReady:boolean,backlog:number,threshold=PREMATCH_CHECKPOINT_BATCH_THRESHOLD){
+ // A first baseline is mandatory. Once one is complete, avoid interrupting
+ // durable replay with a redundant full refresh until the inbox has drained
+ // below one checkpoint batch. SQLite remains the recovery source meanwhile.
+ return regularSnapshotReady&&backlog>threshold;
 }
 export function setDurableSnapshotApplicationActive(state:TradeState,active:boolean,lane='default'){
  let lanes=durableSnapshotApplicationActive.get(state);
@@ -637,7 +651,13 @@ export async function session(
       // and held the publication gate while capacity was already exhausted.
       // The private checkpoint still advances before inbox retirement; the
       // fresh verified snapshot publishes the next public projection.
-      const snapshotPending=Date.now()>=nextDue["snapshot.events"]&&!!api.snapshotFull;
+      const inboxBacklog=durableInboxBacklog(state);
+      const deferRoutineSnapshot=shouldDeferRoutineSnapshot(regularSnapshotReady,inboxBacklog);
+      if(deferRoutineSnapshot&&Date.now()>=nextDue["snapshot.events"]){
+        nextDue["snapshot.events"]=Date.now()+60000;
+        console.info(JSON.stringify({operation:'snapshot.events',lane,status:'deferred',reason:'durable_backlog_drain',backlog:inboxBacklog,threshold:PREMATCH_CHECKPOINT_BATCH_THRESHOLD,nextAttemptAt:new Date(nextDue["snapshot.events"]).toISOString(),atUTC:new Date().toISOString()}));
+      }
+      const snapshotPending=!deferRoutineSnapshot&&Date.now()>=nextDue["snapshot.events"]&&!!api.snapshotFull;
       if(snapshotPending)state.set(lane,{fullSnapshot:{method:"disk_spool_two_pass",startedAt:new Date().toISOString()}});
       await processing;
       requireOpen();
