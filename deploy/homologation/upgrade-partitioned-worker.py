@@ -121,7 +121,8 @@ def verify_live_snapshot_pressure_sources(old_files,files,old_digest):
 def partition_memory(progress):
     value=progress.get('memoryLimitBytes',4294967296)
     verified_six_gib=value==6442450944 and (progress.get('pipelineRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('snapshotPressureRepair') is True and progress.get('livePersistenceRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('v8HeapOomRepair') is True)
-    require(value==4294967296 or verified_six_gib,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
+    verified_existing_eight_gib=value==8589934592 and progress.get('pipelineRepair') is True and progress.get('pipelineMemoryEightGiB') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True
+    require(value==4294967296 or verified_six_gib or verified_existing_eight_gib,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
     return value
 
 def candidate_memory(progress):
@@ -129,6 +130,12 @@ def candidate_memory(progress):
         require(progress.get('pipelineRepair') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True,'EIGHT_GIB_PROFILE_SCOPE_UNVERIFIED')
         return 8192*1024**2
     return partition_memory(progress)
+
+def pre_stop_memory_floor_gib(worker_running,eight_gib_pipeline):
+    # The old worker's cgroup is expected to be released by the controlled
+    # stop. The stronger 10 GiB floor is enforced after exit, before rehearsal
+    # and activation; only the reversible copy/stop phase uses the 6 GiB floor.
+    return 6 if worker_running else (10 if eight_gib_pipeline else 6)
 
 def expected_partitioned_model(saved_model,progress,snapshot_memory_repair):
     expected=copy.deepcopy(saved_model)
@@ -155,8 +162,9 @@ def partition_heap_mib(progress):
         require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('previousOldSpaceMiB')==3840 and plan.get('oldSpaceMiB')==4096 and plan.get('containerLimitUnchanged') is True and plan.get('outsideOldSpaceBytes')==2147483648 and plan.get('guardBudgetBytes')==335544320 and re.fullmatch('[0-9a-f]{64}',str(plan.get('sourceTailSha256',''))),'MEASURED_HEAP_PLAN_UNVERIFIED')
         return 4096
     if plan.get('preserveExisting') is True:
-        require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('oldSpaceMiB')==3840 and plan.get('previousOldSpaceMiB')==3840 and plan.get('containerLimitUnchanged') is True and 3840*1024**2<=plan.get('effectiveHeapLimitBytes',0)<=6442450944-512*1024**2,'HEAP_PRESERVATION_PLAN_UNVERIFIED')
-        return 3840
+        memory=partition_memory(progress);old_space=plan.get('oldSpaceMiB')
+        require(plan.get('evidenceVerified') is True and type(old_space) is int and plan.get('previousOldSpaceMiB')==old_space and plan.get('containerLimitUnchanged') is True and old_space*1024**2<=plan.get('effectiveHeapLimitBytes',0)<=memory-512*1024**2,'HEAP_PRESERVATION_PLAN_UNVERIFIED')
+        return old_space
     require(partition_memory(progress)==6442450944 and plan.get('evidenceVerified') is True and plan.get('oldSpaceMiB')==3584 and plan.get('previousOldSpaceMiB')==2560 and plan.get('containerLimitUnchanged') is True,'HEAP_BUDGET_PLAN_UNVERIFIED')
     return 3584
 
@@ -184,6 +192,18 @@ def existing_pipeline_heap_plan(worker):
         limit=measured.get('heapLimitBytes')
         require(type(limit) is int and 3840*1024**2<=limit<=6442450944-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
         return {'evidenceVerified':True,'oldSpaceMiB':3840,'previousOldSpaceMiB':3840,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':limit}
+    if options=='--max-old-space-size=4608' and snapshot_memory_bytes(worker.get('mem_limit'))==8589934592:
+        image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
+        path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
+        require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'PIPELINE_HEAP_RECEIPT_UNVERIFIED')
+        old=json.loads(path.read_bytes());require(old.get('image')==image and isinstance(old.get('digest'),str) and old['digest'][:24]==image.split(':')[1] and old.get('oomRestoreVerified') is True,'PIPELINE_HEAP_RESTORE_RECEIPT_UNVERIFIED')
+        found=json.loads(run(['docker','image','inspect',image]))[0]
+        require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
+        probe="const s=require('node:v8').getHeapStatistics();console.log(JSON.stringify({heapLimitBytes:s.heap_size_limit}))"
+        measured=json.loads(run(['docker','run','--rm','--network','none','--memory','8g','--read-only','-e','NODE_OPTIONS='+options,'--entrypoint','node',image,'-e',probe]))
+        limit=measured.get('heapLimitBytes')
+        require(type(limit) is int and 4608*1024**2<=limit<=8589934592-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
+        return {'evidenceVerified':True,'oldSpaceMiB':4608,'previousOldSpaceMiB':4608,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':limit}
     if options=='--max-old-space-size=4096' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944:
         image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
         path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
@@ -1291,11 +1311,13 @@ def upgrade_partitioned_unlocked(request):
             receipt_path,saved,files=resolve_prepared_upgrade(request,files);digest=saved['digest']
         meta=json.loads((SECURE/'deployment.json').read_bytes());base=partition_base(meta);before=model(base)
         require(control_status()==200,'API_NOT_HEALTHY')
-        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);eight_gib_pipeline=request.get('pipelineMemoryEightGiB') is True; six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;v8_heap_preserve=request.get('snapshotMemoryRepair') is True and request.get('v8HeapOomRepair') is True;require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944 or v8_heap_preserve and memory_limit==6442450944,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
-        if eight_gib_pipeline:require(request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and memory_limit==6442450944 and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608','EIGHT_GIB_PROFILE_REQUIRES_MEASURED_SIX_GIB_BASE_AND_PRESERVED_HEAP')
+        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);eight_gib_pipeline=request.get('pipelineMemoryEightGiB') is True; six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;v8_heap_preserve=request.get('snapshotMemoryRepair') is True and request.get('v8HeapOomRepair') is True
+        verified_eight_gib_base=eight_gib_pipeline and request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and memory_limit==8589934592 and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608'
+        require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944 or v8_heap_preserve and memory_limit==6442450944 or verified_eight_gib_base,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
+        if eight_gib_pipeline:require(request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and memory_limit in (6442450944,8589934592) and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608','EIGHT_GIB_PROFILE_REQUIRES_VERIFIED_BASE_AND_PRESERVED_HEAP')
         inherited_heap_plan=None
         if request.get('pipelineRepair'):
-            require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and memory_limit==6442450944,'PIPELINE_REQUIRES_SIX_GIB_VERIFIED_IDENTITY')
+            require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and (memory_limit==6442450944 or verified_eight_gib_base),'PIPELINE_REQUIRES_VERIFIED_MEMORY_IDENTITY')
             require(run(['systemctl','is-active','adl-worker-cache-reserve.service']).strip()==b'active','CACHE_RESERVE_NOT_ACTIVE_NO_WORKER_CHANGE')
             if request.get('preservedHeapBudgetRepair') and request.get('resumeBackup'):
                 require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') in ('--max-old-space-size=2560','--max-old-space-size=3584'),'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
@@ -1372,12 +1394,18 @@ def upgrade_partitioned_unlocked(request):
             require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==digest,'UPGRADE_IMAGE_LABEL_MISMATCH')
         else:
             require(phase=='prepare','UPGRADE_MUST_BE_PREPARED');workers=states('worker');require(len(workers)==1,'UPGRADE_WORKER_COUNT_UNVERIFIED');verify_stopped_upgrade_worker(workers[0],request,'UPGRADE_REQUIRES_VERIFIED_RUNNING_OR_OOM_WORKER',False)
-            require(snapshot_host_memory()>=(10 if eight_gib_pipeline else 6)*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT');require(shutil.disk_usage('/opt').free>=(4*1024**3 if request.get('pipelineRepair') else 1024**3),'UPGRADE_DISK_HEADROOM_INSUFFICIENT')
+            # The current 8 GiB worker must first be copied and stopped safely;
+            # its cgroup is part of the memory expected to be released. Require
+            # 6 GiB while it is live, then keep the 10 GiB gate after confirmed
+            # exit and before restore/rehearsal or starting its replacement.
+            pre_stop_floor=pre_stop_memory_floor_gib(workers[0]['running'],eight_gib_pipeline)
+            require(snapshot_host_memory()>=pre_stop_floor*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT');require(shutil.disk_usage('/opt').free>=(4*1024**3 if request.get('pipelineRepair') else 1024**3),'UPGRADE_DISK_HEADROOM_INSUFFICIENT')
             original_image=before['services']['worker']['image'];base_info=json.loads(run(['docker','image','inspect',original_image]))[0]
             container=json.loads(run(['docker','inspect',workers[0]['id']]))[0];require(container['Image']==base_info['Id'],'UPGRADE_RUNNING_IMAGE_MISMATCH');require(snapshot_memory_bytes(container['HostConfig']['Memory'])==memory_limit,'UPGRADE_CONTAINER_MEMORY_LIMIT_MISMATCH')
             if inherited_heap_plan and inherited_heap_plan.get('preserveExisting') is True:
                 actual_env=dict(v.split('=',1) for v in container.get('Config',{}).get('Env',[]) if '=' in v)
-                require(actual_env.get('NODE_OPTIONS')==before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=3840','PIPELINE_ACTIVE_HEAP_SETTING_MISMATCH')
+                preserved_option='--max-old-space-size='+str(inherited_heap_plan['oldSpaceMiB'])
+                require(actual_env.get('NODE_OPTIONS')==before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')==preserved_option,'PIPELINE_ACTIVE_HEAP_SETTING_MISMATCH')
             if request.get('v8HeapOomRepair'):
                 actual_env=dict(v.split('=',1) for v in container.get('Config',{}).get('Env',[]) if '=' in v)
                 require(memory_limit==6442450944 and actual_env.get('NODE_OPTIONS')==before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608','V8_HEAP_SETTING_CHANGED_NO_DEPLOYMENT')

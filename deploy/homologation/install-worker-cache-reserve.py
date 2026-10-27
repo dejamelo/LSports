@@ -1,8 +1,31 @@
 def install_cache_reserve():
-    require(os.geteuid()==0,'ROOT_REQUIRED');require(snapshot_host_memory()>=10*1024**3,'POSNET_HOST_RESERVE_BELOW_TEN_GIB')
+    require(os.geteuid()==0,'ROOT_REQUIRED')
     unit=Path('/etc/systemd/system/adl-worker-cache-reserve.service');script=SECURE/'worker-cache-reserve.py'
     content=('[Unit]\nDescription=ADL bounded clean-cache reserve, no worker restart\nAfter=docker.service\nRequires=docker.service\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /etc/adl-homologation/worker-cache-reserve.py\nRestart=no\nUMask=0077\nMemoryMax=128M\nCPUQuota=5%\nNice=10\nNoNewPrivileges=yes\nProtectSystem=strict\nReadWritePaths=/sys/fs/cgroup\n[Install]\nWantedBy=multi-user.target\n').encode()
     expected=[(script,CACHE_RESERVE_SOURCE.encode()),(unit,content)]
+    policy_hash=hashlib.sha256(CACHE_RESERVE_SOURCE.encode()).hexdigest()
+    expected_verified=False
+    for receipt in list(BACKUPS.glob('adl-cache-reserve-*/verified.json'))[:128]:
+        if receipt.is_symlink() or not receipt.is_file() or receipt.stat().st_uid!=os.geteuid() or receipt.stat().st_mode&0o077:continue
+        try:proof=json.loads(receipt.read_bytes())
+        except (ValueError,OSError):continue
+        if proof.get('policySha256')==policy_hash and proof.get('kernelReclaimVerifiedLimitBytes',proof.get('limitBytes'))==6442450944 and proof.get('kernelReclaimVerified') is True and proof.get('candidateWorkerLimitBytes')==8192*1024**2:
+            expected_verified=True;break
+    file_checks=[]
+    for path,data in expected:
+        st=path.stat() if path.exists() and not path.is_symlink() else None
+        file_checks.append({'name':path.name,'regular':st is not None and path.is_file(),'owner':st is not None and st.st_uid==os.geteuid(),'privateMode':st is not None and st.st_mode&0o077==0,'content':st is not None and path.read_bytes()==data})
+    files_match=all(all(row[k] for k in ('regular','owner','privateMode','content')) for row in file_checks)
+    service_active=run(['systemctl','is-active',unit.name]).strip()==b'active'
+    service_enabled=run(['systemctl','is-enabled',unit.name]).strip()==b'enabled'
+    if files_match and expected_verified and service_active and service_enabled:
+        emit(operation='pipeline.recovery',stage='cache_policy_installed',status='verified',reused=True,policySha256=policy_hash,kernelReclaimVerifiedLimitBytes=6442450944,candidateWorkerLimitBytes=8192*1024**2,guardUnchanged=True,workerRestarted=False,posnetChanged=False)
+        return
+    emit(operation='pipeline.recovery',stage='cache_policy_reuse_check',status='not_reused',filesMatch=files_match,fileChecks=file_checks,verifiedReceipt=expected_verified,serviceActive=service_active,serviceEnabled=service_enabled,workerRestarted=False)
+    # Installing or replacing the host policy happens only with the measured
+    # host reserve available. Reusing an exact active, receipt-backed policy
+    # performs no writes and does not consume a second copy of that reserve.
+    require(snapshot_host_memory()>=10*1024**3,'POSNET_HOST_RESERVE_BELOW_TEN_GIB')
     previous_script_sha256='79d34858740b082d20fb9ca5399aacf1efcadcfb98368980f860abe0314733c8'
     previous_unit_sha256='49b21d859f0634f0291e878fe259a8a0426ee34c7baf02ca6abe8e6284f2d89d'
     previous={};changed=False
@@ -17,7 +40,6 @@ def install_cache_reserve():
     private(backup/'installation.json',json.dumps({'unit':str(unit),'script':str(script),'unitExisted':unit.exists(),'scriptExisted':script.exists(),'previousScriptSha256':hashlib.sha256(previous[script]).hexdigest() if script in previous and previous[script] is not None else None,'previousUnitSha256':hashlib.sha256(previous[unit]).hexdigest() if unit in previous and previous[unit] is not None else None,'policySha256':hashlib.sha256(CACHE_RESERVE_SOURCE.encode()).hexdigest(),'rollback':'restore the exact files in this backup and restart only adl-worker-cache-reserve.service','workerRestarted':False}).encode())
     staged_script=backup/'worker-cache-reserve.next.py';staged_unit=backup/'adl-worker-cache-reserve.next.service';private(staged_script,CACHE_RESERVE_SOURCE.encode());private(staged_unit,content)
     run(['systemd-analyze','verify',str(staged_unit)],timeout=20,log=backup/'unit-verify.private.log')
-    policy_hash=hashlib.sha256(CACHE_RESERVE_SOURCE.encode()).hexdigest()
     verified_before=False
     verified_from_limit=None
     for receipt in list(BACKUPS.glob('adl-cache-reserve-*/verified.json'))[:128]:

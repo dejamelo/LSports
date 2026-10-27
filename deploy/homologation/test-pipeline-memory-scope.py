@@ -29,6 +29,14 @@ class Scope(unittest.TestCase):
    with self.assertRaises(RuntimeError):ns['partition_memory']({**pressure,**missing})
   args=ns['partition_rehearsal_args'](['docker','run','--rm','--memory','4g','--entrypoint','node','image'],p)
   self.assertEqual(args[args.index('--memory')+1],'6g');self.assertEqual(args[args.index('--memory-swap')+1],'6g');self.assertIn('eu.adl.recovery.cache-policy=bounded-reclaim-verified',args)
+ def test_existing_eight_gib_profile_requires_full_identity_and_memory_gate_is_phased(self):
+  progress={'memoryLimitBytes':8589934592,'pipelineRepair':True,'pipelineMemoryEightGiB':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True}
+  self.assertEqual(ns['partition_memory'](progress),8589934592)
+  for field in ('pipelineRepair','pipelineMemoryEightGiB','snapshotMemoryRepair','livePersistenceRepair'):
+   with self.assertRaises(RuntimeError):ns['partition_memory']({**progress,field:False})
+  self.assertEqual(ns['pre_stop_memory_floor_gib'](True,True),6)
+  self.assertEqual(ns['pre_stop_memory_floor_gib'](False,True),10)
+  self.assertEqual(ns['pre_stop_memory_floor_gib'](True,False),6)
  def test_unrelated_source_changes_and_wrong_digest_are_rejected(self):
   old={p:'old' for p in ns['PIPELINE_BASE_FILES']}
   dep='apps/worker/src/snapshot-capacity.ts';added={dep:'installed-dependency'};base_hash=hashlib.sha256(added[dep].encode()).hexdigest();pinned=ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep];ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep]=base_hash
