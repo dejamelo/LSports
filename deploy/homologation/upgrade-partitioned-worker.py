@@ -93,6 +93,18 @@ def verify_live_persistence_identity(worker,request,image):
     emit(operation='cutover.aws',stage='partitioned_upgrade.identity_comparison',status='verified' if all(checks.values()) else 'blocked',checks=checks,failedChecks=[key for key,value in checks.items() if not value],expectedImage=safe_image(expected),composeImage=safe_image(image),workerStarted=False,workerRestarted=False,providerRequests=0,posnetChanged=False)
     require(all(checks.values()),'CURRENT_PERSISTENCE_IMAGE_UNVERIFIED')
 
+def verify_current_worker_identity(worker,request,image):
+    # A verified V8 heap exit is the identity proof for the stopped container;
+    # the live-persistence path is reserved for a running worker.
+    if request.get('v8HeapOomRepair') is True:
+        verify_live_v8_heap_oom_identity(worker,request)
+        return 'verified_v8_heap_exit'
+    if request.get('livePersistenceRepair'):
+        verify_live_persistence_identity(worker,request,image)
+        return 'verified_live_persistence'
+    verify_live_oom_identity(worker,request)
+    return 'verified_kernel_oom'
+
 def verify_live_oom_sources(old_files,files,old_digest):
     legacy_files={name:value for name,value in old_files.items() if name!='apps/worker/src/timestamp-recovery.ts'}
     require(set(old_files)==set(files) and 'apps/worker/src/timestamp-recovery.ts' in old_files and hashlib.sha256(json.dumps(legacy_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_OOM_SOURCE_DIGEST_MISMATCH')
@@ -1300,9 +1312,9 @@ def upgrade_partitioned_unlocked(request):
             probe="const fs=require('node:fs'),h=require('node:crypto');let result={};for(const name of "+json.dumps(sorted(files))+ "){const p='/app/'+name;result[name]=fs.existsSync(p)?h.createHash('sha256').update(fs.readFileSync(p)).digest('hex'):null;}console.log(JSON.stringify(result));"
             hashes=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',original_image,'-e',probe]))
             if request.get('liveOomRepair') or request.get('livePersistenceRepair'):
-                if request.get('livePersistenceRepair'):verify_live_persistence_identity(workers[0],request,original_image)
-                elif request.get('v8HeapOomRepair'):verify_live_v8_heap_oom_identity(workers[0],request)
-                else:verify_live_oom_identity(workers[0],request)
+                identity_proof=verify_current_worker_identity(workers[0],request,original_image)
+                if identity_proof=='verified_v8_heap_exit':
+                    emit(operation='cutover.aws',stage='partitioned_upgrade.identity_comparison',status='verified',checks={'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'v8HeapExitIdentity':True,'workerImageMatchesCompose':container['Image']==base_info['Id'],'workerStopped':workers[0].get('running') is False},workerStarted=False,workerRestarted=False,providerRequests=0,posnetChanged=False)
                 old_digest=(base_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch');require(re.fullmatch('[0-9a-f]{64}',str(old_digest)),'CURRENT_OOM_IMAGE_LABEL_UNVERIFIED')
                 old_receipt=SECURE/('partitioned-upgrade-'+old_digest[:24]+'.json');require(old_receipt.is_file() and not old_receipt.is_symlink() and old_receipt.stat().st_uid==os.geteuid() and old_receipt.stat().st_mode&0o077==0,'CURRENT_OOM_SOURCE_RECEIPT_MISSING')
                 old=json.loads(old_receipt.read_bytes());require(old.get('digest')==old_digest and old.get('image')==original_image and old.get('oomRestoreVerified') is True,'CURRENT_OOM_SOURCE_RECEIPT_UNVERIFIED')

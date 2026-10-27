@@ -98,6 +98,18 @@ class Upgrade(unittest.TestCase):
   NS['verify_stopped_upgrade_worker']({**worker,'exitCode':0},{'snapshotMemoryRepair':True},'blocked')
   with self.assertRaises(Exception):NS['verify_stopped_upgrade_worker']({**worker,'exitCode':137},{'snapshotMemoryRepair':True,'expectedOomPrefix':request['expectedOomPrefix']},'blocked')
 
+ def test_v8_heap_exit_identity_takes_precedence_over_running_worker_identity(self):
+  calls=[];keys=('verify_live_v8_heap_oom_identity','verify_live_persistence_identity','verify_live_oom_identity');old={k:NS[k] for k in keys}
+  try:
+   NS['verify_live_v8_heap_oom_identity']=lambda *a:calls.append('v8')
+   NS['verify_live_persistence_identity']=lambda *a:calls.append('running')
+   NS['verify_live_oom_identity']=lambda *a:calls.append('kernel')
+   request={'snapshotMemoryRepair':True,'livePersistenceRepair':True,'v8HeapOomRepair':True,'expectedOomPrefix':'a'*16}
+   self.assertEqual(NS['verify_current_worker_identity']({'running':False,'exitCode':134},request,'image'),'verified_v8_heap_exit')
+   self.assertEqual(calls,['v8'])
+  finally:
+   NS.update(old)
+
  def test_live_oom_repair_rejects_identity_and_source_scope_changes(self):
   request={'snapshotMemoryRepair':True,'expectedOomPrefix':'7f43cb2939c7'}
   worker={'oomKilled':True,'exitCode':137,'running':False,'name':'/adl-homologation-worker-1','id':'7f43cb2939c7'+'a'*52}
