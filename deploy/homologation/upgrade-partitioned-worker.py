@@ -1666,7 +1666,7 @@ def upgrade_partitioned_unlocked(request):
         worker_states=states('worker')
         if progress['phase']=='prepared':
             emit(operation='cutover.aws',stage='partitioned_upgrade.old_worker.inspect',status='collected',workerStates=worker_states,backup=str(backup),posnetChanged=False)
-            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');verify_stopped_upgrade_worker(worker_states[0],request,'OLD_WORKER_EXIT_REQUIRES_REVIEW',True,progress.get('oomContainerId'));require(snapshot_host_memory()>=(10 if progress.get('pipelineMemoryEightGiB') else 6)*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
+            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');verify_stopped_upgrade_worker(worker_states[0],request,'OLD_WORKER_EXIT_REQUIRES_REVIEW',True,progress.get('oomContainerId'));pre_stop_floor=pre_stop_memory_floor_gib(worker_states[0]['running'],progress.get('pipelineMemoryEightGiB') is True);require(snapshot_host_memory()>=pre_stop_floor*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
             old_container=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0];
             if request.get('snapshotMemoryRepair') and not worker_states[0]['running']:
                 require(old_container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'OOM_RESTART_POLICY_UNSAFE');progress['oomContainerId']=worker_states[0]['id'];save(progress)

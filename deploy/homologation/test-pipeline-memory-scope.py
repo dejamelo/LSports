@@ -37,6 +37,8 @@ class Scope(unittest.TestCase):
   self.assertEqual(ns['pre_stop_memory_floor_gib'](True,True),6)
   self.assertEqual(ns['pre_stop_memory_floor_gib'](False,True),10)
   self.assertEqual(ns['pre_stop_memory_floor_gib'](True,False),6)
+  source=(test_dir/'upgrade-partitioned-worker.py').read_text()
+  self.assertIn("pre_stop_floor=pre_stop_memory_floor_gib(worker_states[0]['running'],progress.get('pipelineMemoryEightGiB') is True)",source)
  def test_unrelated_source_changes_and_wrong_digest_are_rejected(self):
   old={p:'old' for p in ns['PIPELINE_BASE_FILES']}
   dep='apps/worker/src/snapshot-capacity.ts';added={dep:'installed-dependency'};base_hash=hashlib.sha256(added[dep].encode()).hexdigest();pinned=ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep];ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep]=base_hash
