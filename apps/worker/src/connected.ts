@@ -93,13 +93,17 @@ export function decodeApplyTurn(state:TradeState,lane:import('@lsports/contracts
   const {events,...metadata}=decoded;return {...metadata,eventCount:events.length};
  });
 }
-export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,now=Date.now(),snapshotApplicationActive=false){
+export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,now=Date.now(),snapshotApplicationActive=false,hasUnpersistedChanges=true){
  // During application the source spool is still available for a clean retry,
  // while uncommitted inbox rows remain durable and unacknowledged. Serializing
  // the entire state every minute adds a multi-GB copy and repeatedly consumes
  // the heap reserve needed by snapshot batches. The normal save after snapshot
  // completion (or error) advances the checkpoint without risking the inbox.
  if(snapshotApplicationActive)return false;
+ // A heartbeat is only a safety net for an unpublished mutation. Rewriting an
+ // unchanged multi-gigabyte state cannot advance an inbox prefix and needlessly
+ // competes with startup recovery and the next durable checkpoint.
+ if(!hasUnpersistedChanges)return false;
  // A heartbeat cannot retire any inbox row, but it competes with the batch
  // checkpoint that can. While SQLite has durable work pending, reserve the
  // serialization slot for checkpoint batches; the inbox itself is the crash
@@ -185,7 +189,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     }
     const publish = createPublisher(path);
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
-    let writes=0,lastPersistLog=0,lastCompletedPublication=0,loopWindowStart=Date.now();
+    let writes=0,lastPersistLog=0,lastCompletedPublication=0,lastPersistedMutationGeneration=-1,loopWindowStart=Date.now();
     const save = coalescedPersistence(publicationId=>publicationCaptureTurn(state,stable=>operation("file.persist", "local", async () => {
         const memoryStage=(stage:string)=>{state.setPublicationPhase(stage);const m=process.memoryUsage();console.info(JSON.stringify({operation:'file.persist',status:'stage',publicationId,stage,atUTC:new Date().toISOString(),rssBytes:m.rss,heapUsedBytes:m.heapUsed,externalBytes:m.external,arrayBuffersBytes:m.arrayBuffers}));};
         memoryStage('capture');
@@ -208,6 +212,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           memoryStage('projection');projectionIo=await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
         }else memoryStage('snapshot_projection_deferred');
         lastCompletedPublication=Date.now();
+        lastPersistedMutationGeneration=stable.mutationGeneration;
         const projectionMetrics=projectionIo&&{bytes:projectionIo.bytes,serializeMs:projectionIo.serializeMs,writeAwaitMs:projectionIo.writeAwaitMs,fsyncAwaitMs:projectionIo.fsyncAwaitMs,closeAwaitMs:projectionIo.closeAwaitMs,renameAwaitMs:projectionIo.renameAwaitMs,directorySyncAwaitMs:projectionIo.directorySyncAwaitMs,totalWallMs:projectionIo.totalWallMs,otherWallMs:projectionIo.otherWallMs};
         const metric={publicationId,checkpointIo,projectionIo:projectionMetrics,writes:++writes,publicProjectionDeferredForSnapshot:deferProjection,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:deferProjection?0:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
@@ -215,7 +220,8 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     }),publicationId));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
-    const heartbeat = setInterval(() => {
+    let heartbeat:ReturnType<typeof setInterval>|undefined;
+    const startHeartbeat=()=>{heartbeat=setInterval(() => {
       if(signal.aborted)return; // No new periodic publications during the explicit final flush.
       if (Date.now() - lastCoverageLog >= 60000) {
         lastCoverageLog = Date.now();
@@ -226,7 +232,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           }),
         );
       }
-      if (!writing&&heartbeatPublicationDue(state,lastCompletedPublication,Date.now(),durableSnapshotApplicationActive.has(state)))
+      if (!writing&&heartbeatPublicationDue(state,lastCompletedPublication,Date.now(),durableSnapshotApplicationActive.has(state),state.mutationGeneration!==lastPersistedMutationGeneration))
         writing = save()
           .catch(() =>
             console.error("No se pudo guardar el estado local del worker."),
@@ -234,9 +240,12 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           .finally(() => {
             writing = undefined;
           });
-    }, 5000);
+    }, 5000);};
     try {
       await save();
+      // Do not let the five-second timer queue a second full-state write while
+      // the mandatory initial projection is still being restored and fsynced.
+      startHeartbeat();
       const tasks = config.packages.map(async (pkg) => {
         let attempt = 0;
         while (!signal.aborted) {
@@ -298,7 +307,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         throw error;
       }
     } finally {
-      clearInterval(heartbeat);loopDelay.disable();
+      if(heartbeat)clearInterval(heartbeat);loopDelay.disable();
       if (writing) await writing;
       for (const lane of ["prematch", "inplay"] as const)
         state.set(lane, {

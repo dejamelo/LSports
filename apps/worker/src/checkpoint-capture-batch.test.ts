@@ -10,6 +10,16 @@ test('durable backlog reserves full-state serialization for retireable checkpoin
  assert.equal(shouldDeferRoutineSnapshot(false,900000),false,'initial/reconnect baseline remains mandatory');
  assert.equal(shouldDeferRoutineSnapshot(true,PREMATCH_CHECKPOINT_BATCH_THRESHOLD+1),true);
  assert.equal(shouldDeferRoutineSnapshot(true,PREMATCH_CHECKPOINT_BATCH_THRESHOLD),false);
+ assert.equal(heartbeatPublicationDue(state,0,120000,false,false),false,'unchanged state needs no multi-gigabyte heartbeat rewrite');
+ assert.equal(heartbeatPublicationDue(state,0,120000,false,true),true,'a mutation still enables the recovery heartbeat');
+});
+test('mutation generation excludes persistence telemetry and freezes at publication capture',async()=>{
+ const state=new TradeState();assert.equal(state.mutationGeneration,0);
+ state.set('prematch',{persistenceProgress:{} as any});assert.equal(state.mutationGeneration,0);
+ state.set('prematch',{phase:'recovering'});assert.equal(state.mutationGeneration,1);
+ const captured=state.capturePublication();
+ try{await state.publicationMutation(()=>state.set('prematch',{phase:'connected'}));assert.equal(captured.state.mutationGeneration,1);assert.equal(state.mutationGeneration,2);}
+ finally{captured.release();}
 });
 async function until(check:()=>boolean){const end=Date.now()+15000;while(!check()){if(Date.now()>end)throw Error('isolated test deadline');await sleep(5);}}
 test('private checkpoint completes before the full public projection is materialized',async()=>{

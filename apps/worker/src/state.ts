@@ -151,6 +151,9 @@ const defined = <T extends object>(value: T) =>
     Object.entries(value).filter(([, v]) => v !== undefined),
   ) as Partial<T>;
 export class TradeState {
+  private mutationGenerationValue = 0;
+  get mutationGeneration() { return this.mutationGenerationValue; }
+  private noteMutation() { this.mutationGenerationValue++; }
   // Opt-in worker publication cache: immutable event projections; never raw SDK rows.
   private mutationTail:Promise<void>=Promise.resolve();
   exclusive<T>(operation:()=>T|Promise<T>):Promise<T>{
@@ -183,6 +186,7 @@ export class TradeState {
     if(this.publicationDone)throw Error('PUBLICATION_CAPTURE_OVERLAP');
     this.publicationStarted=Date.now();this.publicationPhase='capture';
     const captured=Object.create(this) as TradeState;
+    captured.mutationGenerationValue=this.mutationGenerationValue;
     captured.rows={prematch:new Map(this.rows.prematch),inplay:new Map(this.rows.inplay)};
     captured.connections=structuredClone(this.connections);captured.metrics=structuredClone(this.metrics);
     for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.add(row);
@@ -235,6 +239,7 @@ export class TradeState {
     decodedAt = Date.now(),
     receivedAt = decodedAt,
   ) {
+    this.noteMutation();
     const m = this.metrics[lane];
     m.messages++;
     const now=new Date(decodedAt).toISOString(),activity=(m.activity ||= {});
@@ -262,8 +267,10 @@ export class TradeState {
   }
   set(lane: Lane, patch: Partial<ConnectionState>) {
     Object.assign(this.connections[lane], patch);
+    if (Object.keys(patch).some(key => key !== "persistenceProgress")) this.noteMutation();
   }
   apply(lane: Lane, events: TradeEvent[], at: number, observation?:{source:"amqp"|"snapshot";receivedAt:number}) {
+    if(events.length)this.noteMutation();
     for (const event of events) {
       if (!Number.isSafeInteger(event.fixtureId) || event.fixtureId <= 0)
         throw new Error("Invalid provider fixture ID");
