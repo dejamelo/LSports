@@ -106,11 +106,13 @@ export function heartbeatPublicationDue(state:TradeState,lastCompletedAt:number,
   return snapshot&&!snapshot.completedAt&&(!c.lastSnapshotErrorAt||!Number.isFinite(errorAt)||errorAt<Date.parse(snapshot.startedAt))?[snapshot]:[];
  });
  const waiting=active.some(snapshot=>snapshot.stage!=='apply');
+ const applying=active.some(snapshot=>snapshot.stage==='apply');
  // This is a heartbeat, not a publication request on every 5s timer tick.
- // A full private checkpoint is multi-gigabyte; unconditional true while no
- // snapshot is active kept the FIFO writer permanently occupied, repeatedly
- // consuming the copy-on-write heap reserve and delaying durable inbox ACKs.
- return !waiting&&now-lastCompletedAt>=60000;
+ // A full private checkpoint is multi-gigabyte. The validated snapshot spool
+ // and durable inbox remain the recovery source while applying; do not start
+ // periodic full-state writes between snapshot batches, even if the capacity
+ // drain temporarily clears the auxiliary application-active signal.
+ return !waiting&&!applying&&now-lastCompletedAt>=60000;
 }
 export function setDurableSnapshotApplicationActive(state:TradeState,active:boolean,lane='default'){
  let lanes=durableSnapshotApplicationActive.get(state);

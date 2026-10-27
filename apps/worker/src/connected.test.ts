@@ -829,8 +829,8 @@ test('heartbeat skips full-state writes during durable snapshot apply and resume
  assert.equal(heartbeatPublicationDue(state,1000,61000),false);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z',stage:'apply'}});
  assert.equal(heartbeatPublicationDue(state,1000,61000,true),false);
- assert.equal(heartbeatPublicationDue(state,1000,61000,false),true);
- state.set('prematch',{lastSnapshotErrorAt:'2026-10-22T20:01:00Z'});assert.equal(heartbeatPublicationDue(state,1000,6000),false);assert.equal(heartbeatPublicationDue(state,1000,61000),true);
+ assert.equal(heartbeatPublicationDue(state,1000,61000,false),false,'apply stage suppresses full checkpoints even while capacity wait drops the auxiliary flag');
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:'2026-10-22T20:00:00Z',completedAt:'2026-10-22T20:02:00Z'},lastSnapshotErrorAt:'2026-10-22T20:03:00Z'});assert.equal(heartbeatPublicationDue(state,1000,6000),false);assert.equal(heartbeatPublicationDue(state,1000,61000),true);
 });
 
 test('empty InPlay snapshot is deferred without marking recovery ready',{timeout:10000},async()=>{
