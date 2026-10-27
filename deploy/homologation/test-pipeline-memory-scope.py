@@ -40,10 +40,10 @@ class Scope(unittest.TestCase):
   source=(test_dir/'upgrade-partitioned-worker.py').read_text()
   self.assertIn("pre_stop_floor=pre_stop_memory_floor_gib(worker_states[0]['running'],progress.get('pipelineMemoryEightGiB') is True)",source)
  def test_unrelated_source_changes_and_wrong_digest_are_rejected(self):
-  old={p:'old' for p in ns['PIPELINE_BASE_FILES']}
+  old={p:'old' for p in ns['PIPELINE_BASE_FILES']|ns['PIPELINE_AUXILIARY_FILES']}
   dep='apps/worker/src/snapshot-capacity.ts';added={dep:'installed-dependency'};base_hash=hashlib.sha256(added[dep].encode()).hexdigest();pinned=ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep];ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep]=base_hash
   try:
-   digest=hashlib.sha256(json.dumps({**old,**added},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+   digest=hashlib.sha256(json.dumps({p:({**old,**added})[p] for p in ns['PIPELINE_BASE_FILES']|set(added)},sort_keys=True,separators=(',',':')).encode()).hexdigest()
    candidate={**old,**added,'apps/worker/src/connected.ts':'batch-fairness','apps/worker/src/durable-ingress.mjs':'covering-index','apps/worker/src/full-snapshot.ts':'bounded-batch','apps/worker/src/provider.ts':'batch-plumbing','apps/worker/src/diagnostics.ts':'heap-and-container-admission',dep:'two-source-memory-budget'}
    self.assertEqual(set(candidate),ns['PARTITION_FILES']);ns['verify_pipeline_sources'](old,candidate,digest,added)
    for changed,sha,source in ((old,digest,added),({**candidate,'apps/worker/src/persistence.ts':'unrelated'},digest,added),({**candidate,'apps/worker/src/messages.ts':'unrelated'},digest,added),(candidate,'f'*64,added),(candidate,digest,{dep:'unverified-dependency'})):
