@@ -221,7 +221,7 @@ def partition_heap_mib(progress):
     plan=progress.get('heapBudgetPlan')
     if progress.get('snapshotMemoryEightGiBRepair') is True:
         memory=partition_memory(progress);old_space=plan.get('oldSpaceMiB') if plan else None
-        require(memory==8589934592 and plan.get('preserveExisting') is True and plan.get('evidenceVerified') is True and old_space==4608 and plan.get('previousOldSpaceMiB')==4608 and plan.get('containerLimitUnchanged') is True and 4608*1024**2<=plan.get('effectiveHeapLimitBytes',0)<=memory-512*1024**2,'SNAPSHOT_EIGHT_GIB_HEAP_PRESERVATION_UNVERIFIED')
+        require(memory==8589934592 and plan.get('preserveExisting') is True and plan.get('snapshotMemoryEightGiBRepair') is True and plan.get('evidenceVerified') is True and old_space==4608 and plan.get('previousOldSpaceMiB')==4608 and plan.get('containerLimitUnchanged') is True and 4608*1024**2<=plan.get('effectiveHeapLimitBytes',0)<=memory-512*1024**2,'SNAPSHOT_EIGHT_GIB_HEAP_PRESERVATION_UNVERIFIED')
         return old_space
     if plan is None:return 2560
     if plan.get('v8HeapCompactionPreserve') is True:
@@ -332,6 +332,24 @@ def existing_pipeline_heap_plan(worker):
     found=json.loads(run(['docker','image','inspect',image]))[0]
     require((found['Config'].get('Labels') or {}).get('eu.adl.partitioned.patch')==old['digest'],'PIPELINE_HEAP_SOURCE_IMAGE_MISMATCH')
     return copy.deepcopy(old['heapBudgetPlan'])
+
+def preserved_snapshot_eight_gib_heap_plan(worker,container,worker_model,expected_backup):
+    options=worker_model.get('environment',{}).get('NODE_OPTIONS')
+    require(options=='--max-old-space-size=4608' and snapshot_memory_bytes(worker_model.get('mem_limit'))==8589934592,'SNAPSHOT_EIGHT_GIB_BASE_PROFILE_MISMATCH')
+    require(worker.get('name')=='/adl-homologation-worker-1' and worker.get('running') is False and worker.get('oomKilled') is True and worker.get('exitCode')==137 and re.fullmatch('[0-9a-f]{64}',str(worker.get('id',''))),'SNAPSHOT_EIGHT_GIB_OOM_IDENTITY_UNVERIFIED')
+    require(container.get('Id')==worker.get('id') and container.get('Config',{}).get('Image')==worker_model.get('image') and container.get('State',{}).get('OOMKilled') is True and container.get('State',{}).get('ExitCode')==137 and container.get('HostConfig',{}).get('Memory')==8589934592 and container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'SNAPSHOT_EIGHT_GIB_CONTAINER_IDENTITY_UNVERIFIED')
+    image=worker_model.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'SNAPSHOT_EIGHT_GIB_IMAGE_UNVERIFIED')
+    path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
+    require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'SNAPSHOT_EIGHT_GIB_RECEIPT_UNVERIFIED')
+    old=json.loads(path.read_bytes());require(old.get('image')==image and old.get('backup')==expected_backup and old.get('oomRestoreVerified') is True and old.get('snapshotMemoryVerified') is True,'SNAPSHOT_EIGHT_GIB_RECOVERY_RECEIPT_UNVERIFIED')
+    found=json.loads(run(['docker','image','inspect',image]))[0]
+    require(found.get('Id')==container.get('Image') and (found.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==old.get('digest'),'SNAPSHOT_EIGHT_GIB_SOURCE_IMAGE_MISMATCH')
+    require(snapshot_host_memory()>=12*1024**3,'SNAPSHOT_EIGHT_GIB_HOST_RESERVE_INSUFFICIENT')
+    probe="const s=require('node:v8').getHeapStatistics();console.log(JSON.stringify({heapLimitBytes:s.heap_size_limit}))"
+    measured=json.loads(run(['docker','run','--rm','--network','none','--read-only','--memory','8g','--memory-swap','8g','--cpus','2','--entrypoint','node',found['Id'],options,'-e',probe],timeout=30))
+    limit=measured.get('heapLimitBytes')
+    require(type(limit) is int and 4608*1024**2<=limit<=8589934592-512*1024**2,'SNAPSHOT_EIGHT_GIB_EFFECTIVE_HEAP_UNVERIFIED')
+    return {'evidenceVerified':True,'preserveExisting':True,'snapshotMemoryEightGiBRepair':True,'oldSpaceMiB':4608,'previousOldSpaceMiB':4608,'containerLimitUnchanged':True,'effectiveHeapLimitBytes':limit}
 
 def measured_snapshot_apply_heap_plan(progress,backup,workers):
     require(progress.get('phase')=='stopped' and progress.get('memoryLimitBytes')==6442450944 and progress.get('pipelineRepair') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True,'MEASURED_HEAP_SCOPE_UNVERIFIED')
@@ -1473,8 +1491,9 @@ def upgrade_partitioned_unlocked(request):
                 require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') in ('--max-old-space-size=2560','--max-old-space-size=3584'),'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
             else:inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'])
         elif verified_snapshot_eight_gib:
-            inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'])
-            require(inherited_heap_plan and inherited_heap_plan.get('preserveExisting') is True and inherited_heap_plan.get('oldSpaceMiB')==4608 and snapshot_host_memory()>=12*1024**3,'SNAPSHOT_EIGHT_GIB_HEAP_OR_HOST_PROOF_FAILED')
+            current_workers=states('worker');require(len(current_workers)==1,'SNAPSHOT_EIGHT_GIB_WORKER_COUNT_UNVERIFIED')
+            current_container=json.loads(run(['docker','inspect',current_workers[0]['id']]))[0]
+            inherited_heap_plan=preserved_snapshot_eight_gib_heap_plan(current_workers[0],current_container,before['services']['worker'],request.get('checkpointRepairBackup'))
         def save(p):
             tmp=SECURE/(receipt_path.name+'.tmp');private(tmp,json.dumps(p).encode());durable_replace(tmp,receipt_path)
         # A failed preserved-data rehearsal has already stopped distribution and

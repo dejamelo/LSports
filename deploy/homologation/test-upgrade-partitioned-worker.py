@@ -6,7 +6,7 @@ for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-w
 class Upgrade(unittest.TestCase):
  def test_stopped_snapshot_repair_preserves_measured_existing_eight_gib_and_heap(self):
   mib=1024**2;gib=1024**3
-  p={'memoryLimitBytes':8*gib,'snapshotMemoryRepair':True,'snapshotMemoryEightGiBRepair':True,'snapshotMemoryEightGiBHeadroomBytes':12*gib,'heapBudgetPlan':{'preserveExisting':True,'evidenceVerified':True,'oldSpaceMiB':4608,'previousOldSpaceMiB':4608,'containerLimitUnchanged':True,'effectiveHeapLimitBytes':5*gib}}
+  p={'memoryLimitBytes':8*gib,'snapshotMemoryRepair':True,'snapshotMemoryEightGiBRepair':True,'snapshotMemoryEightGiBHeadroomBytes':12*gib,'heapBudgetPlan':{'preserveExisting':True,'snapshotMemoryEightGiBRepair':True,'evidenceVerified':True,'oldSpaceMiB':4608,'previousOldSpaceMiB':4608,'containerLimitUnchanged':True,'effectiveHeapLimitBytes':5*gib}}
   self.assertEqual(NS['partition_memory'](p),8*gib);self.assertEqual(NS['candidate_memory'](p),8*gib);self.assertEqual(NS['partition_heap_mib'](p),4608)
   self.assertEqual(NS['pre_stop_memory_floor_gib'](False,False,True),12);self.assertEqual(NS['pre_stop_memory_floor_gib'](True,False,True),6)
   args=NS['partition_rehearsal_args'](['docker','run','--rm','--memory','4g','--entrypoint','node','image'],p)
@@ -14,6 +14,31 @@ class Upgrade(unittest.TestCase):
   for changed in ({'snapshotMemoryEightGiBHeadroomBytes':12*gib-1},{'memoryLimitBytes':6*gib},{'snapshotMemoryRepair':False}):
    with self.assertRaises(Exception):NS['candidate_memory']({**p,**changed})
   with self.assertRaises(Exception):NS['partition_heap_mib']({**p,'heapBudgetPlan':{**p['heapBudgetPlan'],'oldSpaceMiB':4096}})
+
+ def test_eight_gib_heap_preservation_probe_requires_exact_oom_receipt_and_measures_clean_image(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   secure=Path(tmp);image='adl-worker-partitioned:'+'a'*24;image_id='sha256:'+'b'*64;digest='a'*64;backup='/var/backups/adl-partitioned-upgrade-i5txgwjx'
+   receipt=secure/('partitioned-upgrade-'+'a'*24+'.json');receipt.write_text(json.dumps({'image':image,'backup':backup,'digest':digest,'oomRestoreVerified':True,'snapshotMemoryVerified':True}));receipt.chmod(0o600)
+   old={k:NS.get(k) for k in ('SECURE','run','snapshot_host_memory')};calls=[]
+   def run(args,**kwargs):
+    calls.append(args)
+    if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':image_id,'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}}]).encode()
+    if args[:3]==['docker','run','--rm']:return json.dumps({'heapLimitBytes':5*1024**3}).encode()
+    raise AssertionError(args[:3])
+   NS.update(SECURE=secure,run=run,snapshot_host_memory=lambda:14*1024**3)
+   worker={'id':'c'*64,'name':'/adl-homologation-worker-1','running':False,'oomKilled':True,'exitCode':137}
+   container={'Id':worker['id'],'Image':image_id,'Config':{'Image':image},'State':{'OOMKilled':True,'ExitCode':137},'HostConfig':{'Memory':8589934592,'RestartPolicy':{'Name':'no'}}}
+   model={'image':image,'mem_limit':'8589934592','environment':{'NODE_OPTIONS':'--max-old-space-size=4608'}}
+   try:
+    plan=NS['preserved_snapshot_eight_gib_heap_plan'](worker,container,model,backup)
+    self.assertEqual(plan['oldSpaceMiB'],4608);self.assertEqual(plan['effectiveHeapLimitBytes'],5*1024**3);self.assertTrue(plan['containerLimitUnchanged'])
+    self.assertTrue(any('--memory-swap' in args and args[args.index('--memory-swap')+1]=='8g' for args in calls))
+    with self.assertRaises(Exception):NS['preserved_snapshot_eight_gib_heap_plan'](worker,container,model,backup+'-different')
+    with self.assertRaises(Exception):NS['preserved_snapshot_eight_gib_heap_plan']({**worker,'oomKilled':False},container,model,backup)
+    NS['snapshot_host_memory']=lambda:11*1024**3
+    with self.assertRaises(Exception):NS['preserved_snapshot_eight_gib_heap_plan'](worker,container,model,backup)
+   finally:
+    for key,value in old.items():NS[key]=value
 
  def test_activation_preserves_a_healthy_api_image_published_after_worker_prepare(self):
   saved={'services':{'api':{'image':'api-old'},'worker':{'image':'worker-old','mem_limit':'8589934592','environment':{'KEEP':'yes'}}},'networks':{'kept':{}},'volumes':{'kept':{}}}
