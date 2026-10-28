@@ -108,6 +108,9 @@ export function recoveryMode(mode){
  const snapshotMemoryRepair=['--snapshot-memory-repair','--snapshot-memory-rollback','--indexed-publication-repair'].includes(mode);
  return {snapshotMemoryRepair,durableMode:mode==='--durable-ingress-repair'||mode==='--durable-ingress-rollback'||snapshotMemoryRepair,durableRollback:mode==='--durable-ingress-rollback'||mode==='--snapshot-memory-rollback'};
 }
+export function partitionedRepairMode(mode){
+ return ['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--indexed-publication-repair','--snapshot-memory-repair','--full-recovery'].includes(mode);
+}
 export function remoteActionTimeout(action,extra={}){
  if(action==='upgrade_partitioned'&&(extra.finalizeAfterRecovery||extra.fullRecovery))return 4500000;
  if(action==='upgrade_partitioned'&&extra.snapshotMemoryRepair)return 1800000;
@@ -135,13 +138,16 @@ export function reusablePreparedImage(ledger,{backup,pipelineRepair=false,durabl
  return result;
 }
 export async function run(args){
+ const requestedMode=args.at(-1);
+ const indexedPublicationRepair=requestedMode==='--indexed-publication-repair';
  const {snapshotMemoryRepair,durableMode,durableRollback}=recoveryMode(args[4]);
- if(durableMode&&args[4]!=='--indexed-publication-repair')args=[...args.slice(0,4),durableRollback?'--recovery-throughput-rollback':'--snapshot-throughput-repair'];
+ if(durableMode&&!indexedPublicationRepair)args=[...args.slice(0,4),durableRollback?'--recovery-throughput-rollback':'--snapshot-throughput-repair'];
  let ledger,progress,save,lease,stage='arguments';
  try{
   if(args.length!==5||args[0]!=='--pid'||args[2]!=='--parent'||!['--recover-and-cutover','--validate-only','--repair-snapshot','--snapshot-report','--worker-exit-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--indexed-publication-repair','--snapshot-memory-repair','--api-validation-resume','--feed-validation-resume','--recovery-progress','--pipeline-report','--helper-preflight-report','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])||!/^\d+$/.test(args[1])||!/^\d+$/.test(args[3]))throw Error('EXPECTED_OWNER_PARENT_RECOVERY_MODE');
   const pid=args[1],parent=args[3];if(Number(pid)<=1||Number(parent)<=1||pid===parent)throw Error('INVALID_PIDS');
   if(args[4]==='--helper-preflight-report'){stage='remote_consumer_gate';await helperPreflightReport(stage);return;}
+  emit({stage:'mode_dispatch',status:'selected',mode:requestedMode,route:indexedPublicationRepair?'indexed_publication_repair':'existing_recovery_mode',workerStarted:false,workerRestarted:false,providerRequests:0,posnetChanged:false});
   stage='executor_lease';lease=createServer(socket=>socket.destroy());await new Promise((resolve,reject)=>{lease.once('error',()=>reject(Error('EXECUTOR_ALREADY_RUNNING_OR_PORT_43761_IN_USE')));lease.listen({host:'127.0.0.1',port:43761,exclusive:true},resolve);});
   stage='progress_directory';const folder=path.join(os.homedir(),'Library','Application Support','ADL','Cutover');await fs.mkdir(folder,{recursive:true,mode:0o700});const directory=await fs.lstat(folder);
   if(directory.isSymbolicLink()||!directory.isDirectory()||directory.uid!==process.getuid()||(directory.mode&0o077))throw Error('PROGRESS_DIRECTORY_NOT_PROTECTED');
@@ -278,7 +284,7 @@ export async function run(args){
     }
     ledger.steps.snapshot_capacity_repair={status:'ok',at:new Date().toISOString(),result};await save();
    }
-   if(['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery'].includes(args[4])){
+   if(partitionedRepairMode(args[4])){
     stage='partitioned_upgrade';
     const throughputMode=['--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback'].includes(args[4]);
     const nullableMode=['--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback'].includes(args[4]);
