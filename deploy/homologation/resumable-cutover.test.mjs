@@ -120,7 +120,7 @@ test('inventory repair separates repeated current-container distribution errors 
 
 
 test('OOM repair and rollback remain distinct durable modes; no migration mode is selected',async()=>{
- const {recoveryMode,partitionedRepairMode,indexedApiDeploymentReceipt}=await import('./resumable-adl-cutover.mjs');
+ const {recoveryMode,partitionedRepairMode,indexedApiDeploymentReceipt,alignApiDeploymentReceipt}=await import('./resumable-adl-cutover.mjs');
  assert.deepEqual(recoveryMode('--snapshot-memory-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--indexed-publication-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--snapshot-memory-rollback'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:true});
@@ -129,9 +129,14 @@ test('OOM repair and rollback remain distinct durable modes; no migration mode i
  assert.equal(partitionedRepairMode('--snapshot-memory-repair'),true);
  assert.equal(partitionedRepairMode('--feed-validation-resume'),false);
  const commit='a'.repeat(40),complete={stage:'complete',status:'ok',installedCommit:commit,installedImageId:'sha256:'+('b'.repeat(64)),installedSourceVerified:true,workersUnchanged:true,posnetChanged:false};
- assert.deepEqual(indexedApiDeploymentReceipt([{stage:'api_replace',status:'running'},complete],commit),{commit,imageId:complete.installedImageId,sourceFilesVerified:true,workersUnchanged:true,posnetChanged:false});
+ const receipt=indexedApiDeploymentReceipt([{stage:'api_replace',status:'running'},complete],commit);
+ assert.deepEqual(receipt,{commit,installedCommit:commit,imageId:complete.installedImageId,sourceFilesVerified:true,workersUnchanged:true,posnetChanged:false});
  assert.equal(indexedApiDeploymentReceipt([complete],'c'.repeat(40)),undefined);
  assert.equal(indexedApiDeploymentReceipt([{...complete,workersUnchanged:false}],commit),undefined);
+ const next='c'.repeat(40);
+ assert.equal(alignApiDeploymentReceipt(receipt,next,['apps/api/src/app.ts']),undefined);
+ assert.deepEqual(alignApiDeploymentReceipt(receipt,next,[]),{...receipt,commit:next,sourceCompatibilityVerified:true});
+ assert.equal(alignApiDeploymentReceipt({...receipt,sourceFilesVerified:false},next,[]),undefined);
 });
 
 test('persistence repair obtains exact image from successful protected progress and never guesses',()=>{

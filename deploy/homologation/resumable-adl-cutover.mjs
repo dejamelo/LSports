@@ -65,6 +65,7 @@ import {createServer} from 'node:net';
 import {spawn} from 'node:child_process';
 import {snapshotValidationReport,briefRecoveryTimeline} from './snapshot-validation-report.mjs';
 import {validateDistribution} from './distribution-validation.mjs';
+import {productionSource as apiProductionSource} from './update-adl-api.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.resolve(process.env.ADL_REPO_ROOT||path.resolve(here,'../..')),runtimeRef=process.env.ADL_RUNTIME_REF||'HEAD';
 export const resolveAuditEntrypoint=(repoRoot=root)=>path.resolve(repoRoot,'scripts/audit-aws-cutover.ts');
@@ -114,7 +115,14 @@ export function partitionedRepairMode(mode){
 export function indexedApiDeploymentReceipt(rows,commit){
  const complete=rows.findLast(row=>row.stage==='complete'&&row.status==='ok');
  if(!complete||complete.installedCommit!==commit||complete.installedSourceVerified!==true||complete.workersUnchanged!==true||complete.posnetChanged!==false)return;
- return {commit,imageId:complete.installedImageId,sourceFilesVerified:true,workersUnchanged:true,posnetChanged:false};
+ return {commit,installedCommit:complete.installedCommit,imageId:complete.installedImageId,sourceFilesVerified:true,workersUnchanged:true,posnetChanged:false};
+}
+export function alignApiDeploymentReceipt(receipt,requiredCommit,changedProductionFiles){
+ if(!receipt||receipt.sourceFilesVerified!==true||receipt.workersUnchanged!==true||receipt.posnetChanged!==false||!/^[0-9a-f]{40}$/.test(receipt.commit||'')||!/^[0-9a-f]{40}$/.test(requiredCommit||''))return;
+ const installedCommit=receipt.installedCommit||receipt.commit;
+ if(receipt.commit===requiredCommit)return {...receipt,installedCommit,sourceCompatibilityVerified:true};
+ if(changedProductionFiles.length!==0)return;
+ return {...receipt,commit:requiredCommit,installedCommit,sourceCompatibilityVerified:true};
 }
 export function remoteActionTimeout(action,extra={}){
  if(action==='upgrade_partitioned'&&(extra.finalizeAfterRecovery||extra.fullRecovery))return 4500000;
@@ -393,7 +401,7 @@ export async function run(args){
     if(repairOptions.pipelineRepair){
      const apiCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();
      repairOptions.requiredApiCommit=apiCommit;
-     const apiDeployment=await step(ledger,'indexed_api_compatibility',save,async()=>{
+     const recordedApiDeployment=await step(ledger,'indexed_api_compatibility',save,async()=>{
       stage='indexed_api_compatibility';
       const output=await command(process.execPath,[path.join(here,'update-adl-api.mjs'),'--repo',root,'--commit',apiCommit,'--preserve-local-changes'],undefined,1800000,true,false,{stage});
       const rows=output.split('\n').filter(Boolean).flatMap(line=>{try{return[JSON.parse(line)]}catch{return[]}});
@@ -401,7 +409,12 @@ export async function run(args){
       if(!receipt)throw Error('INDEXED_API_DEPLOYMENT_NOT_VERIFIED');
       return receipt;
      });
-     if(apiDeployment.commit!==apiCommit||apiDeployment.sourceFilesVerified!==true||apiDeployment.workersUnchanged!==true||apiDeployment.posnetChanged!==false)throw Error('INDEXED_API_DEPLOYMENT_RECEIPT_MISMATCH');
+     let changedProductionFiles=[];
+     if(recordedApiDeployment.commit!==apiCommit){
+      changedProductionFiles=(await command('git',['diff','--name-only','-z',recordedApiDeployment.commit,apiCommit,'--','apps','packages','package.json','package-lock.json','tsconfig.json','scripts/bootstrap-platform.ts','scripts/recover-platform-access.ts'],undefined,10000,true)).split('\0').filter(apiProductionSource);
+     }
+     const apiDeployment=alignApiDeploymentReceipt(recordedApiDeployment,apiCommit,changedProductionFiles);
+     if(!apiDeployment||apiDeployment.commit!==apiCommit||apiDeployment.sourceFilesVerified!==true||apiDeployment.workersUnchanged!==true||apiDeployment.posnetChanged!==false||apiDeployment.sourceCompatibilityVerified!==true)throw Error('INDEXED_API_DEPLOYMENT_RECEIPT_MISMATCH');
     }
     const sourceDigest=canonicalSourceDigest(files);
     const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup,sourceDigest}):undefined;
