@@ -9,6 +9,12 @@ test('8 GiB stopped-worker recovery distinguishes kernel and V8 OOM by exact wor
  for(const worker of [{...base,exitCode:134,oomKilled:true},{...base,exitCode:137,oomKilled:false},{...base,exitCode:1,oomKilled:false},{...base,name:'/other-worker',exitCode:134,oomKilled:false},{...base,id:'short',exitCode:134,oomKilled:false}])assert.equal(stoppedEightGiBWorkerFailure([worker]),undefined);
  assert.equal(stoppedEightGiBWorkerFailure([{...base,exitCode:134,oomKilled:false},{...base,id:'b'.repeat(64),exitCode:137,oomKilled:true}]),undefined);
 });
+test('pipeline identity expects the most recently activated successful worker image',()=>{
+ const ledger={steps:{throughput_upgrade:{status:'ok',at:'2026-10-28T17:48:03.211Z',result:{image:'adl-worker-partitioned:8ca85ea218b5a1deadd62191'}},full_upgrade:{status:'ok',at:'2026-10-28T21:02:34.894Z',result:{image:'adl-worker-partitioned:07ff6c5ab14c362e97cd1e9f'}}}};
+ assert.equal(persistenceExpectedImage(ledger,{}),'adl-worker-partitioned:07ff6c5ab14c362e97cd1e9f');
+ assert.equal(persistenceExpectedImage(ledger,{ADL_EXPECTED_LIVE_IMAGE:'adl-worker-partitioned:'+'a'.repeat(24)}),'adl-worker-partitioned:'+'a'.repeat(24));
+ assert.throws(()=>persistenceExpectedImage({steps:{}},{}),/EXPECTED_CURRENT_PERSISTENCE_IMAGE_REQUIRED/);
+});
 test('snapshot memory recovery selects only a backup with verified restore and projection readback',()=>{
  const verified='/var/backups/adl-partitioned-upgrade-w7r5wvwr';
  const unverified='/var/backups/adl-partitioned-upgrade-8n9ymoks';
