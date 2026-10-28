@@ -13,6 +13,12 @@ class Upgrade(unittest.TestCase):
   with self.assertRaises(Exception):NS['verify_snapshot_checkpoint_memory_sources'](old,candidate,'0'*64)
   compact=dict(old);compact['apps/worker/src/connected.ts']='export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=131072; export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=600000; pendingAcks.length+checkpointPending>=checkpointBatchThreshold; Math.min(4096,Math.max(1,checkpointBatchThreshold-pendingAcks.length-checkpointPending)); retained_in_durable_inbox'
   self.assertEqual(NS['verify_snapshot_checkpoint_memory_sources'](old,compact,digest),'durable_inbox_checkpoint_compaction')
+  transport=dict(old)
+  transport['apps/worker/src/connected.ts']=compact['apps/worker/src/connected.ts']
+  transport['apps/worker/src/full-snapshot.ts']='transportBytes+=chunk.length; transportComplete=res.complete===true; if(!transportComplete) reject(); if(transportBytes!==contentLengthBytes) reject(new Error(\'Snapshot HTTP Content-Length mismatch\'));'
+  self.assertEqual(NS['verify_snapshot_checkpoint_memory_sources'](old,transport,digest),'durable_checkpoint_and_complete_snapshot_transport')
+  for invalid in (transport['apps/worker/src/full-snapshot.ts'].replace('transportBytes!==contentLengthBytes','transportBytes>contentLengthBytes'),transport['apps/worker/src/full-snapshot.ts'].replace('if(!transportComplete)','if(transportComplete)')):
+   with self.assertRaises(Exception):NS['verify_snapshot_checkpoint_memory_sources'](old,{**transport,'apps/worker/src/full-snapshot.ts':invalid},digest)
   for invalid in ('export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=262144;','export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=131072;'):
    changed=dict(compact);changed['apps/worker/src/connected.ts']=invalid
    with self.assertRaises(Exception):NS['verify_snapshot_checkpoint_memory_sources'](old,changed,digest)

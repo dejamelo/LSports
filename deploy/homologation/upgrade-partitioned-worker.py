@@ -159,6 +159,17 @@ def verify_snapshot_checkpoint_memory_sources(old_files,files,old_digest):
     changed={name for name in files if files[name]!=old_files[name]}
     snapshot_memory_patch={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','packages/contracts/src/index.ts'}
     if changed==snapshot_memory_patch:return 'snapshot_memory_patch'
+    # The currently prepared repair combines the already bounded durable
+    # inbox checkpoint policy with transport completion proof. Keep the file
+    # set exact and require every guard that prevents partial baselines.
+    snapshot_transport_patch={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts'}
+    if changed==snapshot_transport_patch:
+        source=files['apps/worker/src/connected.ts']
+        require(re.search(r'PREMATCH_CHECKPOINT_BATCH_THRESHOLD\s*=\s*131072\s*;',source) and re.search(r'PREMATCH_CHECKPOINT_BATCH_FLUSH_MS\s*=\s*600000\s*;',source),'CHECKPOINT_COMPACTION_POLICY_UNVERIFIED')
+        require('pendingAcks.length+checkpointPending>=checkpointBatchThreshold' in source and 'Math.min(4096,Math.max(1,checkpointBatchThreshold-pendingAcks.length-checkpointPending))' in source and 'retained_in_durable_inbox' in source,'CHECKPOINT_COMPACTION_DURABILITY_BARRIER_UNVERIFIED')
+        snapshot=files['apps/worker/src/full-snapshot.ts']
+        require('transportBytes+=chunk.length' in snapshot and 'transportComplete=res.complete===true' in snapshot and 'if(!transportComplete)' in snapshot and 'transportBytes!==contentLengthBytes' in snapshot and 'Snapshot HTTP Content-Length mismatch' in snapshot,'SNAPSHOT_TRANSPORT_COMPLETION_PROOF_UNVERIFIED')
+        return 'durable_checkpoint_and_complete_snapshot_transport'
     # The inbox-backed compaction change is intentionally limited to the
     # checkpoint scheduler. Admit only its exact bounded policy and the
     # existing durable-inbox barriers; all other source deltas stay rejected.
