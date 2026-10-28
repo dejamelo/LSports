@@ -107,6 +107,16 @@ export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'conne
 // multi-gigabyte write without weakening inbox durability or its byte cap.
 export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=131072;
 export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=600000;
+// The durable inbox is already FULL-durable and keeps every staged row until
+// its applied prefix is covered by this checkpoint. InPlay used to checkpoint
+// every 32 messages, rewriting the same multi-GB state roughly every few
+// seconds during control-message replay. A 4,096-row cap amortizes that full
+// rewrite while bounding unretired raw messages; the existing ten-minute
+// flush remains the upper latency bound at low traffic.
+export const INPLAY_CHECKPOINT_BATCH_THRESHOLD=4096;
+export function checkpointBatchThresholdForLane(lane:import('@lsports/contracts').Lane){
+ return lane==='prematch'?PREMATCH_CHECKPOINT_BATCH_THRESHOLD:INPLAY_CHECKPOINT_BATCH_THRESHOLD;
+}
 // Preserve the same processing/FIFO barriers; expose which one is actually awaited.
 export async function snapshotApplyTurn<T>(processing:Promise<unknown>,state:Pick<TradeState,'exclusive'|'publicationMutation'>,apply:()=>T|Promise<T>,observe:(phase:string,elapsedMs:number)=>void,intervalMs=10000):Promise<T>{
  let phase='processing_queue',completed=false;const began=performance.now();const report=(stage:string)=>{try{observe(stage,Math.ceil(performance.now()-began));}catch{/* Instrumentation must not replace an application failure. */}};const timer=setInterval(()=>report(phase),intervalMs);timer.unref();
@@ -298,7 +308,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         while (!signal.aborted) {
           try {
             const runSession=dependencies.session ?? session;
-            const sessionDependencies=dependencies.session?undefined:{connect:amqp.connect,clientFactory:clients,durableConnect:connectDurableMq,checkpointBatchThreshold:pkg.lane==='prematch'?PREMATCH_CHECKPOINT_BATCH_THRESHOLD:32,checkpointBatchFlushMs:PREMATCH_CHECKPOINT_BATCH_FLUSH_MS};
+            const sessionDependencies=dependencies.session?undefined:{connect:amqp.connect,clientFactory:clients,durableConnect:connectDurableMq,checkpointBatchThreshold:checkpointBatchThresholdForLane(pkg.lane),checkpointBatchFlushMs:PREMATCH_CHECKPOINT_BATCH_FLUSH_MS};
             await runSession(pkg, config, state, save, signal, sessionDependencies, `${path}.${pkg.lane}.inbox.sqlite`);
             attempt = 0;
           } catch (error) {
