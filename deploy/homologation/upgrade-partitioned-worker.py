@@ -1610,7 +1610,7 @@ def upgrade_partitioned_unlocked(request):
         if receipt_path.exists():
             require(receipt_path.is_file() and not receipt_path.is_symlink(),'UPGRADE_RECEIPT_UNVERIFIED');progress=json.loads(receipt_path.read_bytes());require(progress['digest']==digest,'UPGRADE_DIGEST_MISMATCH');backup=Path(progress['backup'])
             if verified_existing_snapshot_profile:
-                require(request.get('fullRecovery') is True and progress.get('memoryLimitBytes')==memory_limit and progress.get('image')==image,'EXISTING_SNAPSHOT_MEMORY_PROFILE_RECEIPT_MISMATCH')
+                require(request.get('fullRecovery') is True and progress.get('memoryLimitBytes')==memory_limit and progress.get('image')=='adl-worker-partitioned:'+digest[:24],'EXISTING_SNAPSHOT_MEMORY_PROFILE_RECEIPT_MISMATCH')
                 progress['verifiedExistingSnapshotMemoryProfile']=True;progress['existingSnapshotMemoryNodeOptions']=before['services']['worker'].get('environment',{}).get('NODE_OPTIONS');save(progress)
             if request.get('v8HeapOomRepair'):
                 require(re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))) is not None,'EXPECTED_CURRENT_V8_OOM_PREFIX_REQUIRED')
