@@ -302,6 +302,8 @@ class Upgrade(unittest.TestCase):
    progress={'oldContainer':'a'*64,'shutdownObservation':{'samples':[{'atUTC':'2026-10-28T13:45:00Z','records':[{'operation':'file.persist','stage':'regular_checkpoint','loggedAtUTC':'2026-10-28T13:44:00Z'}],'lastCompletedPersistence':{'regularDurationMs':378835,'publishDurationMs':92671},'progressSincePreviousSample':True}]}}
    self.assertEqual(NS['resumed_stop_budget'](progress),600)
    budget=NS['resumed_stop_budget'](progress,True);self.assertGreater(budget,180);self.assertLessEqual(budget,1200)
+   current={'atUTC':'2026-10-28T13:56:37Z','records':[{'operation':'file.persist','stage':'regular_checkpoint','loggedAtUTC':'2026-10-28T13:55:38Z'}],'lastCompletedPersistence':{'lastDurationMs':357764,'regularDurationMs':284813,'publishDurationMs':72947}}
+   budget=NS['resumed_stop_budget']({'shutdownObservation':{'samples':[]}},True,current);self.assertGreater(budget,180);self.assertLessEqual(budget,1200)
   finally:NS['states']=old
  def test_shutdown_progress_has_a_finite_deadline(self):
   clock=[0];saved=[]

@@ -1419,15 +1419,17 @@ def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None
         if previous is not None and now()-last_change>=90:raise RuntimeError('UPGRADE_STOP_NO_OBSERVABLE_PROGRESS_NO_MORE_SIGNALS')
         previous=fingerprint;sleep(min(interval,timeout-elapsed))
 
-def resumed_stop_budget(progress, measured_full_recovery=False):
+def resumed_stop_budget(progress, measured_full_recovery=False, current_sample=None):
     previous=progress.get('shutdownObservation',{}).get('samples',[])
     if progress.get('pipelineRepair') is True or measured_full_recovery is True:
-        measured=max(((s.get('lastCompletedPersistence') or {}).get('lastDurationMs',0) for s in previous if isinstance(s,dict)),default=0)
+        samples=[s for s in previous if isinstance(s,dict)]
+        if isinstance(current_sample,dict):samples.append(current_sample)
+        measured=max(((s.get('lastCompletedPersistence') or {}).get('lastDurationMs',0) for s in samples),default=0)
         # A graceful stop can complete one persist and immediately begin another
         # final pass. If that second pass is already observable, budget its measured
         # remaining stage time instead of timing out against only the prior cycle.
         if previous and measured>0:
-            sample=previous[-1];completed=sample.get('lastCompletedPersistence') or {}
+            sample=samples[-1];completed=sample.get('lastCompletedPersistence') or {}
             records=[r for r in sample.get('records',[]) if isinstance(r,dict) and r.get('operation')=='file.persist' and r.get('stage') in ('capture','regular_checkpoint','projection')]
             active=records[-1] if records else None
             if active and active.get('loggedAtUTC') and sample.get('atUTC'):
@@ -1441,9 +1443,13 @@ def resumed_stop_budget(progress, measured_full_recovery=False):
                     elif stage=='projection':remaining_ms=max(0,int(completed.get('publishDurationMs',0))-elapsed_ms)
                     elif stage=='capture':remaining_ms=max(0,int(completed.get('captureDurationMs',0))-elapsed_ms)+int(completed.get('regularDurationMs',0))+int(completed.get('publishDurationMs',0))
                     else:remaining_ms=0
-                    if remaining_ms>0:return min(1200,max(180,int((remaining_ms+120000+999)//1000)))
+                    if remaining_ms>0:
+                        cycles=2 if measured_full_recovery else 1
+                        return min(1200,max(180,int((remaining_ms*cycles+120000+999)//1000)))
                 except (TypeError,ValueError,OverflowError):pass
-        if type(measured) in (int,float) and measured>0:return min(900,max(180,int((measured+120000+999)//1000)))
+        if type(measured) in (int,float) and measured>0:
+            cycles=2 if measured_full_recovery else 1
+            return min(1200,max(180,int((measured*cycles+120000+999)//1000)))
         if partition_memory(progress)==6442450944:return 600
     # Only a pinned interrupted operation with measured write progress qualifies.
     # No repeated signal; inactivity and identity checks remain unchanged.
@@ -1995,8 +2001,8 @@ def upgrade_partitioned_unlocked(request):
                     progress['shutdownObservation']=report;save(progress)
                     emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='observing',backup=str(backup),**report['samples'][-1],forceStopEvidenceVerified=False,posnetChanged=False)
                 if any(w['running'] for w in states('worker')):
-                    budget=resumed_stop_budget(progress,request.get('fullRecovery') is True) if request.get('resumeBackup') or request.get('pipelineRepair') or request.get('fullRecovery') else 180
                     initial=upgrade_stop_sample(progress)
+                    budget=resumed_stop_budget(progress,request.get('fullRecovery') is True,initial) if request.get('resumeBackup') or request.get('pipelineRepair') or request.get('fullRecovery') else 180
                     emit(operation='cutover.aws',stage='partitioned_upgrade.resume_stop_status',status='collected',backup=str(backup),current=initial,shutdownLogs=evidence.get('shutdownLogs',[]),observationBudgetSeconds=budget,signalsSent=0,forceStopEvidenceVerified=False,posnetChanged=False)
                     try:watch_upgrade_stop(lambda:upgrade_stop_sample(progress),observed,timeout=budget)
                     except RuntimeError:
