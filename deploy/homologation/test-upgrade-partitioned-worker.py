@@ -12,6 +12,18 @@ class Upgrade(unittest.TestCase):
   for state,verified in (({'Running':False,'ExitCode':0,'OOMKilled':False},False),({'Running':True,'ExitCode':0,'OOMKilled':False},True),({'Running':False,'ExitCode':0,'OOMKilled':True},True),({'Running':False,'ExitCode':1,'OOMKilled':False},True)):
    self.assertFalse(check(state,verified))
 
+ def test_graceful_handoff_receipt_proves_worker_exit_without_signal(self):
+  identity='a'*64
+  receipt={'phase':'stopped','oldContainer':identity,'supplierStoppedBeforeConsumer':True,
+   'supplierStoppedAtUTC':'2026-10-28T20:37:57.388767Z','stopRequestedAtUTC':'2026-10-28T20:37:57.471947Z',
+   'shutdownObservation':{'samples':[{'atUTC':'2026-10-28T20:39:14.323285Z','containerId':identity,'running':True,'exitCode':0,'oomKilled':False,'signalsSent':0},
+    {'atUTC':'2026-10-28T20:39:29.528921Z','containerId':identity,'running':False,'exitCode':0,'oomKilled':False,'signalsSent':0}]}}
+  proof=NS['verified_stopped_profile_proof']
+  self.assertTrue(proof(receipt,identity))
+  self.assertFalse(proof({**receipt,'oldContainer':'b'*64},identity))
+  self.assertFalse(proof({**receipt,'shutdownObservation':{'samples':[receipt['shutdownObservation']['samples'][-1]]}},identity))
+  self.assertFalse(proof({**receipt,'shutdownObservation':{'samples':receipt['shutdownObservation']['samples'][:-1]+[{**receipt['shutdownObservation']['samples'][-1],'signalsSent':1}]}},identity))
+
  def test_live_upgrade_binds_active_container_to_its_immutable_image_sources(self):
   installed={'apps/worker/src/connected.ts':'original-connected','packages/feed-store/src/index.ts':'original-index'}
   candidates={**installed,'packages/feed-store/src/indexed-feed.ts':'new-indexed-module'}

@@ -349,6 +349,27 @@ def verified_stopped_pipeline_probe_exit(state,verified_stopped_recovery):
     return (verified_stopped_recovery is True and state.get('Running') is False
         and state.get('OOMKilled') is False and state.get('ExitCode') in (0,137))
 
+def verified_stopped_profile_proof(progress,expected_container_id):
+    if (progress.get('phase')!='stopped' or progress.get('oldContainer')!=expected_container_id
+        or progress.get('supplierStoppedBeforeConsumer') is not True):return False
+    if (progress.get('preExitProof',{}).get('verified') is True
+        and progress.get('verifiedExitSignal',{}).get('containerId')==expected_container_id
+        and progress.get('verifiedExitSignal',{}).get('status') in ('docker_accepted','exit_observed_after_intent')):return True
+    observation=progress.get('shutdownObservation',{})
+    samples=observation.get('samples',[]) if isinstance(observation,dict) else []
+    if not isinstance(samples,list) or len(samples)<2:return False
+    final=samples[-1]
+    prior=any(isinstance(sample,dict) and sample.get('containerId')==expected_container_id
+        and sample.get('running') is True and sample.get('oomKilled') is False
+        and sample.get('signalsSent')==0 for sample in samples[:-1])
+    return (prior and isinstance(final,dict) and final.get('containerId')==expected_container_id
+        and final.get('running') is False and final.get('exitCode')==0
+        and final.get('oomKilled') is False and final.get('signalsSent')==0
+        and isinstance(final.get('atUTC'),str) and isinstance(progress.get('stopRequestedAtUTC'),str)
+        and isinstance(progress.get('supplierStoppedAtUTC'),str)
+        and progress['supplierStoppedAtUTC']<=progress['stopRequestedAtUTC']
+        and final['atUTC']>=progress['stopRequestedAtUTC'])
+
 def existing_pipeline_heap_plan(worker,verified_existing_snapshot_profile=False,verified_stopped_recovery=False,expected_container_id=None):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
     if options=='--max-old-space-size=2560':return None
@@ -1853,10 +1874,7 @@ def upgrade_partitioned_unlocked(request):
         if receipt_path.exists():
             require(receipt_path.is_file() and not receipt_path.is_symlink(),'UPGRADE_RECEIPT_UNVERIFIED');progress=json.loads(receipt_path.read_bytes());require(progress['digest']==digest,'UPGRADE_DIGEST_MISMATCH');backup=Path(progress['backup'])
             if defer_existing_profile_probe:
-                stopped_profile_proof=(progress.get('preExitProof',{}).get('verified') is True and
-                    progress.get('phase')=='stopped' and progress.get('oldContainer')==progress.get('verifiedExitContainerId') and
-                    progress.get('verifiedExitSignal',{}).get('containerId')==progress.get('oldContainer') and
-                    progress.get('verifiedExitSignal',{}).get('status') in ('docker_accepted','exit_observed_after_intent'))
+                stopped_profile_proof=verified_stopped_profile_proof(progress,progress.get('oldContainer'))
                 inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'],verified_existing_snapshot_profile,stopped_profile_proof,progress.get('oldContainer'))
                 progress['heapBudgetPlan']=inherited_heap_plan;save(progress)
             if verified_existing_snapshot_profile:
