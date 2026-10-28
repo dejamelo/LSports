@@ -36,6 +36,33 @@ const transportEnd=(reason:"connection_closed"|"channel_closed"|"consumer_cancel
  message:reason==="worker_stopped"?"Worker detenido por señal local.":"Transporte AMQP finalizado; el evento de cierre no informa la causa del broker.",
 });
 const durableSnapshotApplicationActive=new WeakMap<TradeState,Set<string>>();
+// A full snapshot is replayable from its private spool and durable inbox. Hold
+// cross-lane full-state checkpoint writes while it is being applied: those
+// writes can consume the V8 copy-on-write reserve and stall the snapshot's own
+// ordered mutations. The gate is released only after the snapshot has been
+// finalized (or the attempt has failed), before its final recovery save.
+const snapshotPersistenceDeferred=new WeakMap<TradeState,Set<string>>();
+const snapshotPersistenceWaiters=new WeakMap<TradeState,Set<()=>void>>();
+
+export function setSnapshotPersistenceDeferred(state:TradeState,deferred:boolean,lane='default'){
+ let lanes=snapshotPersistenceDeferred.get(state);
+ if(deferred){if(!lanes){lanes=new Set();snapshotPersistenceDeferred.set(state,lanes);}lanes.add(lane);return;}
+ if(!lanes)return;
+ lanes.delete(lane);
+ if(lanes.size)return;
+ snapshotPersistenceDeferred.delete(state);
+ const waiters=snapshotPersistenceWaiters.get(state);
+ if(waiters){snapshotPersistenceWaiters.delete(state);for(const resolve of waiters)resolve();}
+}
+
+export async function waitForSnapshotPersistence(state:TradeState){
+ if(!snapshotPersistenceDeferred.get(state)?.size)return;
+ await new Promise<void>(resolve=>{
+  let waiters=snapshotPersistenceWaiters.get(state);
+  if(!waiters){waiters=new Set();snapshotPersistenceWaiters.set(state,waiters);}
+  waiters.add(resolve);
+ });
+}
 
 // Report only source frame locations when a publication fails. Error messages
 // and raw stacks may contain supplier payloads or local paths.
@@ -98,7 +125,9 @@ export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'conne
   // only while a snapshot is actively mutating the shared state; this preserves
   // atomicity and validation-before-publication for the in-flight lane.
   const snapshot=c.fullSnapshot;
-  return !!snapshot&&!snapshot.completedAt&&Number.isFinite(Date.parse(snapshot.startedAt||''));
+  const errorAt=Date.parse(c.lastSnapshotErrorAt||'');
+  const failedBeforeApply=!!c.lastSnapshotErrorAt&&Number.isFinite(errorAt)&&errorAt>=Date.parse(snapshot?.startedAt||'')&&snapshot?.stage!=='apply';
+  return !!snapshot&&!snapshot.completedAt&&Number.isFinite(Date.parse(snapshot.startedAt||''))&&!failedBeforeApply;
  });
 }
 // The SQLite inbox is the replay journal: rows stay FULL-durable and unretired
@@ -183,12 +212,12 @@ export function inboxCheckpointDeferredDuringSnapshot(snapshotApplying:boolean,s
  return snapshotApplying||!!state&&(durableSnapshotApplicationActive.get(state)?.size??0)>0;
 }
 export type PersistenceSave = (()=>Promise<void>) & {beforeCapture?:(reserve:(publicationId:number)=>void)=>Promise<void>};
-export function coalescedPersistence(persist:(publicationId:number)=>Promise<void>){
+export function coalescedPersistence(persist:(publicationId:number)=>Promise<void>,beforeStart?:()=>Promise<void>){
  let tail:Promise<void>=Promise.resolve(),queued:{job:Promise<void>;reserves:((publicationId:number)=>void)[]}|undefined,sequence=0;
  const request=(reserve?:(publicationId:number)=>void)=>{
   if(queued){if(reserve)queued.reserves.push(reserve);return queued.job;}
   const reserves=reserve?[reserve]:[];const publicationId=++sequence;let job:Promise<void>;
-  job=tail.then(()=>{if(queued?.job===job)queued=undefined;
+  job=tail.then(async()=>{await beforeStart?.();if(queued?.job===job)queued=undefined;
    // Reserve only an already-applied prefix, immediately BEFORE invoking the
    // writer. Its subsequent immutable capture must include that prefix. Never
    // extend it after capture or acknowledge on a preceding publication.
@@ -274,7 +303,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           console.error(JSON.stringify({operation:'file.persist.failure',publicationId,stage:activeStage,stageElapsedMs:Math.max(0,Math.ceil(performance.now()-activeStageStarted)),elapsedMs:Math.max(0,Math.ceil(performance.now()-started)),errorType,...(typeof code==='string'&&allowedCodes.has(code)?{errorCode:code}:{}),errorFrames:safeErrorFrames(error),rssBytes:memory.rss,heapUsedBytes:memory.heapUsed,externalBytes:memory.external,arrayBuffersBytes:memory.arrayBuffers}));
           throw error;
         }
-    }),publicationId));
+    }),publicationId),()=>waitForSnapshotPersistence(state));
     let writing: Promise<void> | undefined;
     let lastCoverageLog = 0;
     let heartbeat:ReturnType<typeof setInterval>|undefined;
@@ -705,9 +734,12 @@ export async function session(
      try{
       requireOpen();
       bufferingForSnapshot = false;
-      state.set(lane, {
+      // Routine refreshes and local scheduler deferrals do not invalidate a
+      // previously verified baseline. Change the lane to recovering only
+      // after the provider scheduler admits the actual HTTP attempt.
+      if(!regularSnapshotReady)state.set(lane, {
         phase: "recovering",
-        recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady},
+        recoveryProgress:{stage:"snapshot",startedAt:new Date().toISOString(),regularSnapshotReady:false},
         message: "Recuperando snapshot; cuotas bloqueadas.",
       });
       // Gate the expensive public projection before the first recovery save.
@@ -723,8 +755,6 @@ export async function session(
         nextDue["snapshot.events"]=Date.now()+60000;
         console.info(JSON.stringify({operation:'snapshot.events',lane,status:'deferred',reason:'durable_backlog_drain',backlog:inboxBacklog,threshold:PREMATCH_CHECKPOINT_BATCH_THRESHOLD,nextAttemptAt:new Date(nextDue["snapshot.events"]).toISOString(),atUTC:new Date().toISOString()}));
       }
-      const snapshotPending=!deferRoutineSnapshot&&Date.now()>=nextDue["snapshot.events"]&&!!api.snapshotFull;
-      if(snapshotPending)state.set(lane,{fullSnapshot:{method:"disk_spool_two_pass",startedAt:new Date().toISOString()}});
       await processing;
       requireOpen();
       await save();
@@ -757,16 +787,17 @@ export async function session(
               requireOpen();await processing;await save();timestampRecoveryPending=false;
               console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
             }
-            const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
-            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});
+            const ackedAtStart=acknowledgedMessages;let fullStarted=Date.now(),fullStartedAt:string|undefined,snapshotRequestAdmitted=false,snapshotStatePreparation:Promise<void>|undefined;let lastProgressLog=0;
             // Close the cross-lane checkpoint race before the final pre-snapshot
             // save. That save drains any checkpoint already queued; the shared
             // gate prevents another full-state write from starting while the
             // validated spool is read. Inbox rows remain durable in SQLite.
-            if(durable){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);await processing;if(backgroundCommit)await backgroundCommit;}
+            if(durable){await processing;if(backgroundCommit)await backgroundCommit;}
             await save();
             const applySnapshotBatch=async(rows:import('./state.js').TradeEvent[],at:number)=>{
               if(durable){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}
+              if(!snapshotStatePreparation)throw new Error('Snapshot apply began without scheduler admission');
+              await snapshotStatePreparation;
               await waitForInboxCapacity();
               const prefix=processing;const applied=(async()=>{for(let index=0;index<rows.length;index++)await snapshotApplyTurn(index===0?prefix:Promise.resolve(),state,()=>{requireOpen();state.apply(lane,[{...rows[index],marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{
                 if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,atUTC:new Date().toISOString()}));
@@ -778,7 +809,34 @@ export async function session(
             // until the verified spool has finished. The rows remain unacked
             // and recoverable; finally below releases the gate on success or
             // recoverable failure.
-            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply'){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt,...(progress.readBytes!==undefined?{readBytes:progress.readBytes}:{}),...(progress.stageElapsedMs!==undefined?{stageElapsedMs:progress.stageElapsedMs}:{}),...(progress.stageDurationsMs?{stageDurationsMs:progress.stageDurationsMs}:{})}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
+            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{
+              if(progress.stage==='waiting_http'&&!snapshotRequestAdmitted){
+                // The scheduler has admitted this request. A local_in_flight
+                // defer emits no progress and leaves the previous baseline
+                // untouched. Pause durable replay only while a real request is
+                // in flight; the inbox keeps accepting unacked messages.
+                snapshotRequestAdmitted=true;fullStarted=Date.now();fullStartedAt=progress.lastProgressAt;checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);
+                if(durable){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}
+              }
+              if(progress.stage==='apply'&&!snapshotStatePreparation){
+                if(!snapshotRequestAdmitted)throw new Error('Snapshot apply began without scheduler admission');
+                // Do not suppress checkpoint/public projection during HTTP or
+                // validation: the previous baseline is still authoritative.
+                // Defer full-state captures only after the whole document has
+                // passed validation and this lane is about to mutate shared state.
+                setSnapshotPersistenceDeferred(state,true,pkg.lane);
+                // The complete response has now passed validation. Invalidate
+                // stale prices only at this atomic apply boundary, not while a
+                // request is waiting for a local permit or parsing its spool.
+                regularSnapshotReady=false;
+                state.set(lane,{phase:'recovering',recoveryProgress:{stage:'snapshot',startedAt:fullStartedAt||progress.lastProgressAt,regularSnapshotReady:false},fullSnapshot:{method:'disk_spool_two_pass',startedAt:fullStartedAt||progress.lastProgressAt},message:'Recuperando snapshot; cuotas bloqueadas.'});
+                snapshotStatePreparation=state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});
+                void snapshotStatePreparation.catch(()=>{});
+              }
+              if(durable&&progress.stage==='apply'){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}
+              if(snapshotStatePreparation)state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt,...(progress.readBytes!==undefined?{readBytes:progress.readBytes}:{}),...(progress.stageElapsedMs!==undefined?{stageElapsedMs:progress.stageElapsedMs}:{}),...(progress.stageDurationsMs?{stageDurationsMs:progress.stageDurationsMs}:{})}});
+              if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}
+            },apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
           }else if(lane==='prematch'&&api.snapshotPartitioned){
@@ -812,7 +870,8 @@ export async function session(
           regularSnapshotReady = true;
           state.set(lane, { diagnostic: undefined, lastSnapshotDiagnostic: undefined });
           nextDue["snapshot.events"] = Date.now() + Math.max(300000, config.recoveryMs);
-        } catch (error) {
+         } catch (error) {
+          setSnapshotPersistenceDeferred(state,false,pkg.lane);
           if (closed || signal.aborted) throw failure||error;
           state.set(lane,{lastSnapshotErrorAt:new Date().toISOString()});
           const diagnostic = describeFailure(error, "snapshot.events", "http");
@@ -898,6 +957,10 @@ export async function session(
           ? "Feed conectado; snapshot recuperado." + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : "")
           : (rows === undefined ? "Feed AMQP conectado; recuperación HTTP pendiente." : "Feed conectado; snapshot regular vacío (0 fixtures).") + (["partial", "rate_limited"].includes(outrightRecovery.status) ? " Recuperación Outright incompleta; revisá el diagnóstico." : " Recuperación Outright consultada por separado."),
       });
+      // Release queued cross-lane saves only after the snapshot is marked
+      // complete and the finite handoff has restored its FIFO barrier. The
+      // recovery save below captures and publishes that committed state.
+      setSnapshotPersistenceDeferred(state,false,pkg.lane);
       await save();
       if(!closed&&!signal.aborted&&regularSnapshotReady&&!timestampRecoveryPending&&checkpointAnchorSeconds!==undefined&&processedSourceFloor!==undefined)await durableConnection.checkpointAnchor?.(Math.min(checkpointAnchorSeconds,Math.max(0,Math.floor(processedSourceFloor/1000)-2)));
       console.log(
@@ -909,7 +972,7 @@ export async function session(
           coverage: state.projection(Date.now(),false).coverage?.[lane],
         }),
       );
-     }finally{snapshotApplicationActive=false;setDurableSnapshotApplicationActive(state,false,pkg.lane);if(checkpointFlushTimer){clearTimeout(checkpointFlushTimer);checkpointFlushTimer=undefined;}commitPending(true);if(buffered.length&&!closed)scheduleDrain();}
+     }finally{setSnapshotPersistenceDeferred(state,false,pkg.lane);snapshotApplicationActive=false;setDurableSnapshotApplicationActive(state,false,pkg.lane);if(checkpointFlushTimer){clearTimeout(checkpointFlushTimer);checkpointFlushTimer=undefined;}commitPending(true);if(buffered.length&&!closed)scheduleDrain();}
     };
     await recover();
     // Metadata is ancillary. Do not let a slow metadata HTTP call hold the

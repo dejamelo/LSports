@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
-import { safeErrorFrames, session } from "./connected.js";
+import { safeErrorFrames, session, coalescedPersistence, setSnapshotPersistenceDeferred, waitForSnapshotPersistence } from "./connected.js";
 import { TradeState, quoteConfirmed } from "./state.js";
 import type { PackageConfig } from "./config.js";
 import { clients } from "./provider.js";
@@ -16,6 +16,33 @@ test("persistence diagnostics expose only safe source locations",()=>{
   assert.doesNotMatch(JSON.stringify(frames),/secret|private|payload|\/app/);
   const noStack=new Error("no stack");noStack.stack="";
   assert.deepEqual(safeErrorFrames(noStack),[]);
+});
+
+test("full snapshot defers cross-lane checkpoint capture until every snapshot gate releases",async()=>{
+ const state=new TradeState();let captures=0;
+ setSnapshotPersistenceDeferred(state,true,"prematch");
+ setSnapshotPersistenceDeferred(state,true,"inplay");
+ const persist=coalescedPersistence(async()=>{captures++;},()=>waitForSnapshotPersistence(state));
+ const first=persist(),second=persist();
+ await new Promise(resolve=>setTimeout(resolve,10));
+ assert.equal(captures,0);
+ setSnapshotPersistenceDeferred(state,false,"prematch");
+ await new Promise(resolve=>setTimeout(resolve,10));
+ assert.equal(captures,0);
+ setSnapshotPersistenceDeferred(state,false,"inplay");
+ await Promise.all([first,second]);
+ assert.equal(captures,1);
+});
+test("snapshot validation leaves prior-baseline checkpoints publishable until apply starts",async()=>{
+ const state=new TradeState();let captures=0;
+ const persist=coalescedPersistence(async()=>{captures++;},()=>waitForSnapshotPersistence(state));
+ // During download and complete-document validation, the prior baseline stays
+ // authoritative, so its inbox saves must not queue behind snapshot work.
+ await persist();assert.equal(captures,1);
+ // The snapshot gate is installed at the validated apply boundary.
+ setSnapshotPersistenceDeferred(state,true,"prematch");
+ const applyingCheckpoint=persist();await new Promise(resolve=>setTimeout(resolve,10));assert.equal(captures,1);
+ setSnapshotPersistenceDeferred(state,false,"prematch");await applyingCheckpoint;assert.equal(captures,2);
 });
 test("worker consumes while snapshot is pending, preserves newer deltas, persists before ack and gates on shutdown", async () => {
   const state = new TradeState();
@@ -745,6 +772,8 @@ test('full recovery consumes 100 deltas before snapshot completes, commits once 
  const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel;},async close(){assert.equal(stopped,true);connection.emit('close');}});
  const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',port:5672,tls:false,queue:'_4511_'};
  const fake:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){assert.equal(acks,100);stopped=true;},async distributionStatus(){return{isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async snapshot(){assert.fail('Must use unfiltered spooled snapshot');},async catalog(){return[];},async snapshotFull(sink){
+  sink.progress?.({stage:'waiting_http',bytes:0,validatedRows:0,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  sink.progress?.({stage:'apply',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date().toISOString()});
   for(let i=0;i<100;i++)deliver({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'live-'+i,ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'123',Price:'2.8',Status:1}]}]}]}})),properties:{headers:{}},fields:{redelivered:false}} as ConsumeMessage);
   await allAcked;assert.equal(state.connections.prematch.recoveryProgress?.regularSnapshotReady,false);assert.equal(state.connections.prematch.phase,'recovering');assert.ok(messageWrites<=3);
   await sink.apply({fixtureId:1,fixture:{status:1,sport:{name:'Football'}},markets:[{id:1,status:1,bets:[{id:'123',price:'2.1',status:1,isChanged:1}]}]},Date.now()-10000);
@@ -779,6 +808,8 @@ test('1600 snapshot rows do not trigger 160 full checkpoints; continuous AMQP st
  const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(_q:string,cb:(msg:ConsumeMessage)=>void){deliver=cb;return{consumerTag:'test'};},ack(){assert.equal(persisted,true);acks++;},nack(){assert.fail('must not nack');}});
  const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel;},async close(){connection.emit('close');}});
  const api:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async snapshot(){assert.fail('Full recovery only');},async catalog(){return[];},async snapshotFull(sink){
+  sink.progress?.({stage:'waiting_http',bytes:0,validatedRows:0,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  sink.progress?.({stage:'apply',bytes:100,validatedRows:1600,appliedRows:0,lastProgressAt:new Date().toISOString()});
   for(let i=1;i<=1600;i++)await sink.apply({fixtureId:i,fixture:{status:1,sport:{name:'Football'}},markets:[]},Date.now()-1000);
   deliver!({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'throughput-test',ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'123',Price:'2.4',Status:1}]}]}]}})),properties:{headers:{}},fields:{redelivered:false}} as ConsumeMessage);
   while(!acks)await new Promise(r=>setImmediate(r));return{ids:new Set(Array.from({length:1600},(_,i)=>i+1)),rows:1600,bytes:100};
@@ -868,9 +899,9 @@ test('a zero-row failed snapshot releases the projection gate after the other la
  state.set('inplay',{phase:'recovering',session:{id:'inplay-session',startedAt},recoveryProgress:{stage:'waiting_retry',startedAt,regularSnapshotReady:false},fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'waiting_http'}});
  assert.equal(state.feed().events.find(e=>e.source==='inplay')?.selections.every(s=>!s.available),true,'InPlay without a verified baseline stays unavailable');
  assert.equal(deferPublicProjectionDuringSnapshot(state),true,'active snapshot must hold the global projection gate');
- state.set('inplay',{fullSnapshot:undefined});
- assert.equal(deferPublicProjectionDuringSnapshot(state),false,'a lane without a verified baseline must not block the other verified lane');
- state.set('inplay',{fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'apply',appliedRows:1}});
+ state.set('inplay',{lastSnapshotErrorAt:new Date(Date.parse(startedAt)+1000).toISOString()});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),false,'a failed request before application must release the other lane projection gate');
+ state.set('inplay',{lastSnapshotErrorAt:undefined,fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'apply',appliedRows:1}});
  assert.equal(deferPublicProjectionDuringSnapshot(state),true,'partially applied snapshot must keep the global projection gate');
 });
 
@@ -930,7 +961,7 @@ test('capacity pressure drains the durable inbox before snapshot and between app
  const connection=Object.assign(new EventEmitter(),{async activateTransport(){},intakePaused:()=>paused,async createChannel(){return channel;},async close(){connection.emit('close');}});
  const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'unused',port:5672,tls:false,queue:'unused'};
  const api:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async catalog(){return[];},async snapshot(){throw Error('full only');},async snapshotFull(sink){
-  assert.equal(acks,1,'startup capacity must be relieved before snapshot');sink.progress?.({stage:'apply',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date().toISOString()});paused=true;deliver(message(2));
+  assert.equal(acks,1,'startup capacity must be relieved before snapshot');sink.progress?.({stage:'waiting_http',bytes:0,validatedRows:0,appliedRows:0,lastProgressAt:new Date().toISOString()});sink.progress?.({stage:'apply',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date().toISOString()});paused=true;deliver(message(2));
   await sink.apply({fixtureId:1,fixture:{status:1,sport:{name:'Football'}},markets:[{id:1,status:1,bets:[{id:'1',price:'2.1',status:1,isChanged:0}]}]},Date.now()-10000);
   assert.equal(acks,2,'apply must release replay while capacity is paused');return{ids:new Set([1]),rows:1,bytes:100};
  }};
