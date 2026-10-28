@@ -182,7 +182,7 @@ export async function run(args){
    if(args[4]==='--pipeline-report'){
     stage='pipeline_report';
     if(!['local_exit','journal_export','journal_import','aws_start','throughput_upgrade'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('PIPELINE_REPORT_REQUIRES_COMPLETED_UPGRADE');
-    const macRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);const mac=macRows.find(r=>r.operation==='cutover.audit');
+    const macRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:[2]});const mac=macRows.find(r=>r.operation==='cutover.audit');
     if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:true}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
     const names=partitionWorkerSourceNames.map(n=>'apps/worker/src/'+n);names.push(...partitionPackageSourceNames);
