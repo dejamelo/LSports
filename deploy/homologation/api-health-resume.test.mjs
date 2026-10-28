@@ -1,12 +1,20 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import {spawnSync} from 'node:child_process';
-import {acceptedWorkerMemoryLimits} from './resumable-adl-cutover.mjs';
+import {acceptedWorkerMemoryLimits,snapshotMemoryHostHeadroomApproved} from './resumable-adl-cutover.mjs';
 test('six GiB preflight is accepted only for its protected live pipeline or snapshot-pressure repair',()=>{
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,livePersistenceRepair:true}),['4294967296','6442450944']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,livePersistenceRepair:false}),['4294967296']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,livePersistenceRepair:false,v8HeapOomRepair:true}),['6442450944']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineRepair:true}),['6442450944']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineRepair:true,pipelineMemoryEightGiB:true}),['6442450944','8589934592']);
+ assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineMemoryEightGiB:true}),['8589934592']);
  assert.deepEqual(acceptedWorkerMemoryLimits({mode:'--repair-snapshot'}),['2147483648','4294967296']);
+});
+test('8 GiB snapshot profile requires at least 4 GiB host headroom beyond its cgroup limit',()=>{
+ const model={memoryLimitBytes:'8589934592'};
+ assert.equal(snapshotMemoryHostHeadroomApproved(model,12*1024**3),true);
+ assert.equal(snapshotMemoryHostHeadroomApproved(model,12*1024**3-1),false);
+ assert.equal(snapshotMemoryHostHeadroomApproved({...model,memoryLimitBytes:'4294967296'},16*1024**3),false);
+ assert.equal(snapshotMemoryHostHeadroomApproved(model,Number.MAX_SAFE_INTEGER+1),false);
 });
 test('health action bypasses readiness requirement without bypassing root gate',()=>{const s=fs.readFileSync(new URL('./execute-adl-cutover-aws.py',import.meta.url),'utf8');assert(s.indexOf("require(os.geteuid()==0")<s.indexOf("if action=='api_health'"));assert(s.indexOf("if action=='api_health'")<s.indexOf("'API_NOT_HEALTHY'"));});
 test('resume branches before preflight and upgrade; requires installed correction and fresh Mac audit',()=>{const s=fs.readFileSync(new URL('./resumable-adl-cutover.mjs',import.meta.url),'utf8');const branch=s.slice(s.indexOf("if(['--api-validation-resume','--feed-validation-resume','--recovery-progress'].includes(args[4])){"),s.indexOf('// Current consumer safety'));assert(branch.includes('INSTALLED_WORKER_CORRECTIONS_UNVERIFIED_NO_RESTART'));assert(branch.includes('FRESH_MAC_ABSENCE_AUDIT_FAILED'));assert(branch.includes('validateFullRecovery'));assert(!branch.includes("remote('upgrade_partitioned'"));assert(!branch.includes("remote('start'"));});

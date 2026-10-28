@@ -10,10 +10,15 @@ export function persistenceExpectedImage(ledger,env=process.env){
 }
 export function acceptedWorkerMemoryLimits({mode,snapshotMemoryRepair,pipelineRepair,livePersistenceRepair,v8HeapOomRepair,pipelineMemoryEightGiB}){
  if(mode==='--repair-snapshot')return ['2147483648','4294967296'];
+ if(snapshotMemoryRepair&&pipelineMemoryEightGiB&&!pipelineRepair)return ['8589934592'];
  if(pipelineRepair)return pipelineMemoryEightGiB?['6442450944','8589934592']:['6442450944'];
  if(snapshotMemoryRepair&&livePersistenceRepair)return ['4294967296','6442450944'];
  if(snapshotMemoryRepair&&v8HeapOomRepair)return ['6442450944'];
  return ['4294967296'];
+}
+export function snapshotMemoryHostHeadroomApproved(model,availableMemoryBytes){
+ const limit=Number(model?.memoryLimitBytes);
+ return Number.isSafeInteger(limit)&&Number.isSafeInteger(availableMemoryBytes)&&limit===8589934592&&availableMemoryBytes>=limit+4*1024**3;
 }
 export function macAuditProvesStopped(audit,{allowMissingCheckpoint=false}={}){
  if(audit?.status==='ok'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true)return true;
@@ -183,6 +188,7 @@ export async function run(args){
   const pipelineMemoryEightGiB=process.env.ADL_PIPELINE_MEMORY_EIGHT_GIB==='1';
   const acceptedMemory=acceptedWorkerMemoryLimits({mode:args[4],snapshotMemoryRepair,pipelineRepair:process.env.ADL_PIPELINE_REPAIR==='1',livePersistenceRepair:process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1',v8HeapOomRepair:process.env.ADL_LIVE_V8_HEAP_OOM_REPAIR==='1',pipelineMemoryEightGiB});
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!acceptedMemory.includes(String(pre.workerModel?.memoryLimitBytes))||!workerCapacityApproved(pre.workerModel,{repairSnapshot:args[4]==='--repair-snapshot',pipelineMemoryEightGiB}))throw Error('REMOTE_API_OR_CAPACITY_UNVERIFIED');
+  if(snapshotMemoryRepair&&pipelineMemoryEightGiB&&!snapshotMemoryHostHeadroomApproved(pre.workerModel,pre.capacity?.availableMemoryBytes))throw Error('SNAPSHOT_EIGHT_GIB_HOST_HEADROOM_INSUFFICIENT');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
   if(['--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
    stage='validation_resume_gate';
