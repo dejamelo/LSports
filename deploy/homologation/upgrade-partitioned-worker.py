@@ -212,7 +212,8 @@ def partition_memory(progress):
     verified_six_gib=value==6442450944 and (progress.get('pipelineRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('snapshotPressureRepair') is True and progress.get('livePersistenceRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('v8HeapOomRepair') is True)
     verified_existing_eight_gib=value==8589934592 and progress.get('pipelineRepair') is True and progress.get('pipelineMemoryEightGiB') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True
     verified_snapshot_eight_gib=value==8589934592 and progress.get('snapshotMemoryEightGiBRepair') is True and progress.get('snapshotMemoryRepair') is True and progress.get('snapshotMemoryEightGiBHeadroomBytes',0)>=12*1024**3 and progress.get('heapBudgetPlan',{}).get('preserveExisting') is True
-    require(value==4294967296 or verified_six_gib or verified_existing_eight_gib or verified_snapshot_eight_gib,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
+    verified_existing_snapshot=value==8589934592 and progress.get('verifiedExistingSnapshotMemoryProfile') is True and progress.get('existingSnapshotMemoryNodeOptions')=='--max-old-space-size=4608'
+    require(value==4294967296 or verified_six_gib or verified_existing_eight_gib or verified_snapshot_eight_gib or verified_existing_snapshot,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
     return value
 
 def candidate_memory(progress):
@@ -1608,6 +1609,9 @@ def upgrade_partitioned_unlocked(request):
             save(progress)
         if receipt_path.exists():
             require(receipt_path.is_file() and not receipt_path.is_symlink(),'UPGRADE_RECEIPT_UNVERIFIED');progress=json.loads(receipt_path.read_bytes());require(progress['digest']==digest,'UPGRADE_DIGEST_MISMATCH');backup=Path(progress['backup'])
+            if verified_existing_snapshot_profile:
+                require(request.get('fullRecovery') is True and progress.get('memoryLimitBytes')==memory_limit and progress.get('image')==image,'EXISTING_SNAPSHOT_MEMORY_PROFILE_RECEIPT_MISMATCH')
+                progress['verifiedExistingSnapshotMemoryProfile']=True;progress['existingSnapshotMemoryNodeOptions']=before['services']['worker'].get('environment',{}).get('NODE_OPTIONS');save(progress)
             if request.get('v8HeapOomRepair'):
                 require(re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))) is not None,'EXPECTED_CURRENT_V8_OOM_PREFIX_REQUIRED')
                 progress['v8HeapOomRepair']=True;progress['expectedOomPrefix']=request['expectedOomPrefix'];save(progress)
@@ -1696,7 +1700,7 @@ def upgrade_partitioned_unlocked(request):
             inherited_v8_compaction=bool(inherited_heap_plan and inherited_heap_plan.get('v8HeapCompactionPreserve') is True and request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True)
             snapshot_eight_headroom=snapshot_host_memory() if verified_snapshot_eight_gib else 0
             if verified_snapshot_eight_gib:require(snapshot_eight_headroom>=12*1024**3,'SNAPSHOT_EIGHT_GIB_HOST_HEADROOM_CHANGED')
-            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineMemoryEightGiB':eight_gib_pipeline,'snapshotMemoryEightGiBRepair':verified_snapshot_eight_gib,'snapshotMemoryEightGiBHeadroomBytes':snapshot_eight_headroom,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,'v8HeapOomRepair':request.get('v8HeapOomRepair') is True,'inheritedV8HeapCompactionPlan':inherited_v8_compaction,**({'expectedOomPrefix':request.get('expectedOomPrefix')} if request.get('v8HeapOomRepair') else {}),**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
+            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineMemoryEightGiB':eight_gib_pipeline,'snapshotMemoryEightGiBRepair':verified_snapshot_eight_gib,'snapshotMemoryEightGiBHeadroomBytes':snapshot_eight_headroom,'verifiedExistingSnapshotMemoryProfile':verified_existing_snapshot_profile,'existingSnapshotMemoryNodeOptions':before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') if verified_existing_snapshot_profile else None,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,'v8HeapOomRepair':request.get('v8HeapOomRepair') is True,'inheritedV8HeapCompactionPlan':inherited_v8_compaction,**({'expectedOomPrefix':request.get('expectedOomPrefix')} if request.get('v8HeapOomRepair') else {}),**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
         if request.get('measuredSnapshotApplyHeapRepair'):
             require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('snapshotMemoryRepair') is True,'MEASURED_HEAP_REQUEST_SCOPE_UNVERIFIED')
             plan=measured_snapshot_apply_heap_plan(progress,backup,states('worker'))
