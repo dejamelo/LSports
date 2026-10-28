@@ -317,7 +317,20 @@ export async function run(args){
      stage='throughput_upgrade';
     }
     if(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])){ledger.spoolMemoryBefore??={validation:ledger.lastValidation,upgrade:ledger.steps.throughput_upgrade,evidence:ledger.recoveryThroughputLatestEvidence};await save();}
-    const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true}:distributionMode?{fixCommit:'2aa06f7'}:{};
+    const snapshotMemoryResult=ledger.steps.snapshot_memory_data?.result;
+    const existingSnapshotMemoryProof=preserveVerifiedEightGiB?{
+     status:snapshotMemoryResult.status,
+     offlineRestoreVerified:snapshotMemoryResult.offlineRestoreVerified,
+     projectionReadbackVerified:snapshotMemoryResult.projectionReadbackVerified,
+     rehearsalCopyVerified:snapshotMemoryResult.rehearsalCopyVerified,
+     preservedSpoolRehearsed:snapshotMemoryResult.preservedSpoolRehearsed,
+     effectiveHeapLimitBytes:snapshotMemoryResult.rehearsalMemory.effectiveHeapLimitBytes,
+     maxSampledHeapBytes:snapshotMemoryResult.rehearsalMemory.maxSampledHeapBytes,
+     maxObservedRSSBytes:snapshotMemoryResult.rehearsalMemory.maxObservedRSSBytes,
+     readbackHeapLimitBytes:snapshotMemoryResult.projectionReadbackMemory.effectiveHeapLimitBytes,
+     projectionReadbackBudgetBytes:snapshotMemoryResult.projectionReadbackBudget.budgetBytes
+    }:undefined;
+    const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true,...(existingSnapshotMemoryProof?{verifiedExistingSnapshotMemoryProfile:existingSnapshotMemoryProof}:{})}:distributionMode?{fixCommit:'2aa06f7'}:{};
     if(durableMode)repairOptions.durableIngress=true;
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;if(!snapshotMemoryEightGiB)repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryEightGiB){

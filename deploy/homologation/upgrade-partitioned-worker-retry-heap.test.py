@@ -10,7 +10,7 @@ import unittest
 
 SOURCE=Path(__file__).with_name('upgrade-partitioned-worker.py')
 tree=ast.parse(SOURCE.read_text())
-selected={'partition_memory','partition_heap_mib','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime','existing_pipeline_heap_plan','pre_stop_copy_files'}
+selected={'partition_memory','partition_heap_mib','candidate_memory','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime','existing_pipeline_heap_plan','pre_stop_copy_files','verified_existing_snapshot_memory_profile'}
 functions=[node for node in tree.body if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in selected]
 
 def require(ok,reason):
@@ -37,6 +37,12 @@ class MeasuredSnapshotRetryHeap(unittest.TestCase):
         self.progress={'phase':'stopped','backup':str(self.backup),'memoryLimitBytes':6442450944,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True,'oldContainer':'a'*64,'heapBudgetPlan':{'evidenceVerified':True,'measuredSnapshotApply':True,'previousOldSpaceMiB':3840,'oldSpaceMiB':4096,'containerLimitUnchanged':True,'outsideOldSpaceBytes':2147483648,'guardBudgetBytes':335544320,'sourceTailSha256':'a'*64}}
         self.worker=[{'id':'a'*64,'running':False,'oomKilled':False,'exitCode':0}]
     def tearDown(self):self.tmp.cleanup()
+    def test_verified_existing_eight_gib_profile_is_reused_without_relaxing_heap_reserve(self):
+        proof={'status':'ok','offlineRestoreVerified':True,'projectionReadbackVerified':True,'rehearsalCopyVerified':True,'preservedSpoolRehearsed':True,'effectiveHeapLimitBytes':5033164800,'maxSampledHeapBytes':4374513640,'maxObservedRSSBytes':4951400448,'readbackHeapLimitBytes':5033164800,'projectionReadbackBudgetBytes':335544320}
+        worker={'environment':{'NODE_OPTIONS':'--max-old-space-size=4608'}}
+        self.assertTrue(namespace['verified_existing_snapshot_memory_profile'](proof,worker,8589934592))
+        self.assertFalse(namespace['verified_existing_snapshot_memory_profile']({**proof,'maxSampledHeapBytes':4700000000},worker,8589934592))
+        self.assertFalse(namespace['verified_existing_snapshot_memory_profile'](proof,{'environment':{'NODE_OPTIONS':'--max-old-space-size=6144'}},8589934592))
     def test_measured_heap_failure_selects_4608_mib_inside_same_six_gib_cgroup(self):
         plan=namespace['measured_snapshot_retry_heap_plan'](self.progress,self.backup,self.worker)
         self.assertEqual(plan['oldSpaceMiB'],4608);self.assertEqual(plan['outsideOldSpaceBytes'],1610612736)

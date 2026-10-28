@@ -12,6 +12,13 @@ PROJECTION_RESUME_DRIVER_SHA256='b2f7cd58ee386c3855b9225088d112fef51a8b442bd0369
 def verify_pinned_added_dependencies(files,pins):
     return all(name in files and hashlib.sha256(files[name].encode()).hexdigest()==digest for name,digest in pins.items())
 
+def verified_existing_snapshot_memory_profile(proof,worker,memory_limit):
+    heap_limit=proof.get('effectiveHeapLimitBytes')
+    heap_peak=proof.get('maxSampledHeapBytes')
+    rss_peak=proof.get('maxObservedRSSBytes')
+    budget=proof.get('projectionReadbackBudgetBytes')
+    return proof.get('status')=='ok' and all(proof.get(key) is True for key in ('offlineRestoreVerified','projectionReadbackVerified','rehearsalCopyVerified','preservedSpoolRehearsed')) and type(heap_limit) is int and type(heap_peak) is int and heap_limit-heap_peak>=512*1024**2 and type(rss_peak) is int and rss_peak<memory_limit and proof.get('readbackHeapLimitBytes')==heap_limit and type(budget) is int and budget>0 and memory_limit==8589934592 and worker.get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608'
+
 def verify_projection_resume_artifacts(backup,progress,image_info,name):
     require(isinstance(name,str) and re.fullmatch(r'projection-resume-[0-9]{8}T[0-9]{4}Z',name),'PROJECTION_RESUME_DIRECTORY_UNVERIFIED')
     resume=backup/name;require(resume.parent==backup and resume.is_dir() and not resume.is_symlink() and resume.stat().st_mode&0o077==0,'PROJECTION_RESUME_DIRECTORY_UNSAFE')
@@ -1512,9 +1519,10 @@ def upgrade_partitioned_unlocked(request):
         require(control_status()==200,'API_NOT_HEALTHY')
         memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);eight_gib_pipeline=request.get('pipelineMemoryEightGiB') is True; snapshot_eight_gib=request.get('snapshotMemoryEightGiBRepair') is True; six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;v8_heap_preserve=request.get('snapshotMemoryRepair') is True and request.get('v8HeapOomRepair') is True
         verified_eight_gib_base=eight_gib_pipeline and request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and memory_limit==8589934592 and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608'
+        verified_existing_snapshot_profile=verified_existing_snapshot_memory_profile(request.get('verifiedExistingSnapshotMemoryProfile') or {},before['services']['worker'],memory_limit)
         snapshot_headroom=snapshot_host_memory() if snapshot_eight_gib else 0
         verified_snapshot_eight_gib=snapshot_eight_gib and request.get('snapshotMemoryRepair') is True and memory_limit==8589934592 and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608' and snapshot_headroom>=12*1024**3
-        require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944 or v8_heap_preserve and memory_limit==6442450944 or verified_eight_gib_base or verified_snapshot_eight_gib,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
+        require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944 or v8_heap_preserve and memory_limit==6442450944 or verified_eight_gib_base or verified_snapshot_eight_gib or verified_existing_snapshot_profile,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
         if eight_gib_pipeline:require(request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and memory_limit in (6442450944,8589934592) and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608','EIGHT_GIB_PROFILE_REQUIRES_VERIFIED_BASE_AND_PRESERVED_HEAP')
         inherited_heap_plan=None
         if request.get('pipelineRepair'):
