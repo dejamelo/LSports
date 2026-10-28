@@ -400,7 +400,6 @@ export async function run(args){
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
     if(repairOptions.pipelineRepair){
      const apiCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();
-     repairOptions.requiredApiCommit=apiCommit;
      const recordedApiDeployment=await step(ledger,'indexed_api_compatibility',save,async()=>{
       stage='indexed_api_compatibility';
       const output=await command(process.execPath,[path.join(here,'update-adl-api.mjs'),'--repo',root,'--commit',apiCommit,'--preserve-local-changes'],undefined,1800000,true,false,{stage});
@@ -415,6 +414,9 @@ export async function run(args){
      }
      const apiDeployment=alignApiDeploymentReceipt(recordedApiDeployment,apiCommit,changedProductionFiles);
      if(!apiDeployment||apiDeployment.commit!==apiCommit||apiDeployment.sourceFilesVerified!==true||apiDeployment.workersUnchanged!==true||apiDeployment.posnetChanged!==false||apiDeployment.sourceCompatibilityVerified!==true)throw Error('INDEXED_API_DEPLOYMENT_RECEIPT_MISMATCH');
+     repairOptions.requiredApiCommit=apiDeployment.installedCommit;
+     repairOptions.requiredApiSourceTreeCommit=apiCommit;
+     repairOptions.requiredApiSourceCompatibilityVerified=apiDeployment.sourceCompatibilityVerified;
     }
     const sourceDigest=canonicalSourceDigest(files);
     const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup,sourceDigest}):undefined;
