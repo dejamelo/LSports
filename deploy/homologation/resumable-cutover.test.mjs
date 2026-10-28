@@ -126,7 +126,7 @@ test('inventory repair separates repeated current-container distribution errors 
 
 
 test('OOM repair and rollback remain distinct durable modes; no migration mode is selected',async()=>{
- const {recoveryMode,partitionedRepairMode,indexedApiDeploymentReceipt,alignApiDeploymentReceipt,indexedApiReaderCompatible}=await import('./resumable-adl-cutover.mjs');
+ const {recoveryMode,partitionedRepairMode,indexedApiDeploymentReceipt,alignApiDeploymentReceipt,indexedApiReaderCompatible,indexedApiChangesCompatible}=await import('./resumable-adl-cutover.mjs');
  assert.deepEqual(recoveryMode('--snapshot-memory-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--indexed-publication-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--snapshot-memory-rollback'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:true});
@@ -151,6 +151,9 @@ test('OOM repair and rollback remain distinct durable modes; no migration mode i
  assert.equal(indexedApiReaderCompatible(installed,writerOnly),true);
  assert.equal(indexedApiReaderCompatible(installed,writerOnly.replace('readPage(input)','readPageWithDifferentCursor(input)')),false);
  assert.equal(indexedApiReaderCompatible(installed,writerOnly.replace('CREATE TABLE feed_events','CREATE TABLE other_table')),false);
+ assert.equal(indexedApiChangesCompatible(['apps/worker/src/connected.ts','packages/feed-store/src/indexed-feed.ts'],installed,writerOnly),true);
+ assert.equal(indexedApiChangesCompatible(['apps/api/src/app.ts'],installed,writerOnly),false);
+ assert.equal(indexedApiChangesCompatible(['packages/feed-store/src/indexed-feed.ts'],installed,writerOnly.replace('readPage(input)','readPageWithDifferentCursor(input)')),false);
 });
 
 test('persistence repair obtains exact image from successful protected progress and never guesses',()=>{

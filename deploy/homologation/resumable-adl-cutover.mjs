@@ -135,6 +135,10 @@ export function indexedApiReaderCompatible(installedSource,candidateSource){
  const a=contract(installedSource),b=contract(candidateSource);
  return typeof a==='string'&&a===b;
 }
+export function indexedApiChangesCompatible(changedFiles,installedFeedStore,candidateFeedStore){
+ if(!Array.isArray(changedFiles)||changedFiles.some(name=>!['apps/worker/src/connected.ts','packages/feed-store/src/indexed-feed.ts'].includes(name)))return false;
+ return !changedFiles.includes('packages/feed-store/src/indexed-feed.ts')||indexedApiReaderCompatible(installedFeedStore,candidateFeedStore);
+}
 export function alignApiDeploymentReceipt(receipt,requiredCommit,changedProductionFiles,verifiedSourceManifest){
  const sourceManifest=receipt?.sourceManifest||verifiedSourceManifest;
  if(!receipt||receipt.sourceFilesVerified!==true||!sourceManifest||receipt.sourceManifest&&canonicalSourceDigest(receipt.sourceManifest)!==receipt.sourceManifestSha256||! /^[0-9a-f]{64}$/.test(canonicalSourceDigest(sourceManifest))||receipt.workersUnchanged!==true||receipt.posnetChanged!==false||!/^[0-9a-f]{40}$/.test(receipt.commit||'')||!/^[0-9a-f]{40}$/.test(requiredCommit||''))return;
@@ -439,12 +443,13 @@ export async function run(args){
       apiSourceManifest={};
       for(const name of apiSources)apiSourceManifest[name]=createHash('sha256').update(await command('git',['show',recordedApiDeployment.commit+':'+name],undefined,10000,true)).digest('hex');
      }
-     let readerCompatibilityVerified=changedProductionFiles.length===0;
-     if(!readerCompatibilityVerified&&changedProductionFiles.length===1&&changedProductionFiles[0]==='packages/feed-store/src/indexed-feed.ts'){
+     let installedFeedStore,candidateFeedStore;
+     if(changedProductionFiles.includes('packages/feed-store/src/indexed-feed.ts')){
       const installed=await command('git',['show',recordedApiDeployment.commit+':packages/feed-store/src/indexed-feed.ts'],undefined,10000,true);
       const candidate=await command('git',['show',workerCommit+':packages/feed-store/src/indexed-feed.ts'],undefined,10000,true);
-      readerCompatibilityVerified=indexedApiReaderCompatible(installed,candidate);
+      installedFeedStore=installed;candidateFeedStore=candidate;
      }
+     const readerCompatibilityVerified=indexedApiChangesCompatible(changedProductionFiles,installedFeedStore,candidateFeedStore);
      if(!readerCompatibilityVerified)throw Error('INDEXED_API_READ_CONTRACT_CHANGED');
      const apiDeployment=alignApiDeploymentReceipt(recordedApiDeployment,recordedApiDeployment.commit,[],apiSourceManifest);
      if(!apiDeployment||apiDeployment.commit!==recordedApiDeployment.commit||apiDeployment.sourceFilesVerified!==true||apiDeployment.workersUnchanged!==true||apiDeployment.posnetChanged!==false||apiDeployment.sourceCompatibilityVerified!==true)throw Error('INDEXED_API_DEPLOYMENT_RECEIPT_MISMATCH');
