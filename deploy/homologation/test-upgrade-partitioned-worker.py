@@ -4,6 +4,23 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_activation_preserves_a_healthy_api_image_published_after_worker_prepare(self):
+  saved={'services':{'api':{'image':'api-old'},'worker':{'image':'worker-old','mem_limit':'8589934592','environment':{'KEEP':'yes'}}},'networks':{'kept':{}},'volumes':{'kept':{}}}
+  current=copy.deepcopy(saved);current['services']['api']['image']='api-current'
+  baseline=NS['activation_base_model'](saved,current,True)
+  self.assertEqual(baseline,current)
+  expected=NS['expected_partitioned_model'](baseline,{'image':'worker-new','memoryLimitBytes':8589934592,'pipelineMemoryEightGiB':True,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True},True)
+  self.assertEqual(expected['services']['api']['image'],'api-current')
+  self.assertEqual(expected['networks'],saved['networks']);self.assertEqual(expected['volumes'],saved['volumes'])
+  with self.assertRaises(Exception):NS['activation_base_model'](saved,current,False)
+  changed_worker=copy.deepcopy(current);changed_worker['services']['worker']['mem_limit']='6442450944'
+  with self.assertRaises(Exception):NS['activation_base_model'](saved,changed_worker,True)
+  changed_proxy=copy.deepcopy(current);changed_proxy['services']['proxy']={'image':'unexpected'}
+  with self.assertRaises(Exception):NS['activation_base_model'](saved,changed_proxy,True)
+  prepared=NS['expected_partitioned_model'](saved,{'image':'worker-new','memoryLimitBytes':8589934592,'pipelineMemoryEightGiB':True,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True},True)
+  prepared['services']['api']['image']='api-current'
+  self.assertEqual(NS['activation_base_model'](saved,prepared,True,NS['expected_partitioned_model'](saved,{'image':'worker-new','memoryLimitBytes':8589934592,'pipelineMemoryEightGiB':True,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True},True)),prepared)
+
  def test_pipeline_dependency_pin_matches_current_source_manifest(self):
   path=HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts'
   digest=hashlib.sha256(path.read_bytes()).hexdigest()

@@ -84,11 +84,12 @@ export function pinnedResumePreparation(snapshotMemoryRepair,ledger,env=process.
  const image=prepared?.status==='ok'&&prepared.result?.backup===backup&&/^adl-worker-partitioned:[0-9a-f]{24}$/.test(prepared.result?.image||'')?prepared.result.image:undefined;
  return {resumeBackup:backup,...(image?{resumePreparedImage:image}:{})};
 }
-export function reusablePreparedImage(ledger,{backup,pipelineRepair=false,durableIngress=false,sourceDigest}={}){
+export function reusablePreparedImage(ledger,{backup,pipelineRepair=false,durableIngress=false,snapshotPressureRepair=false,sourceDigest}={}){
  const result=ledger?.steps?.throughput_image?.status==='ok'?ledger.steps.throughput_image.result:undefined;
  if(!result||!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(result.image||'')||!/^[0-9a-f]{64}$/.test(sourceDigest||'')||result.image!=='adl-worker-partitioned:'+sourceDigest.slice(0,24)||result.backup!==backup||result.progressPhase!=='stopped'||result.workerRestarted!==false||result.offlineSnapshotMemoryVerified!==true)return;
  if(pipelineRepair&&result.offlinePipelineLoadVerified!==true)return;
  if(durableIngress&&result.offlineDurableIngressVerified!==true)return;
+ if(snapshotPressureRepair&&result.offlineSnapshotPressureVerified!==true)return;
  return result;
 }
 export async function run(args){

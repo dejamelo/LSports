@@ -82,18 +82,12 @@ export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkp
 // still advances before ACK; the verified snapshot triggers the next publish.
 export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'connections'>){
  return Object.values(state.connections).some(c=>{
-  // A durable session enters recovery before it creates the fullSnapshot
-  // record. While its mandatory baseline is still missing, the startup feed
-  // already published by runConnected is the blocked public baseline. Keep it
-  // stable during session setup and backlog drain: rebuilding millions of
-  // recovered selections before the snapshot gate can take minutes and stall
-  // both inbox lanes. The private checkpoint still advances before ACK.
-  const recoveringWithoutBaseline=!!c.session&&Number.isFinite(Date.parse(c.session.startedAt||''))&&c.recoveryProgress?.regularSnapshotReady===false;
-  if(recoveringWithoutBaseline)return true;
-  // `startedAt` is set before the initial save and before waiting_http. That
-  // interval can last minutes; gate publication from then through successful
-  // completion, including local in-flight/heap deferrals. These failures leave
-  // the blocked baseline in place and must not trigger another multi-GB publish.
+  // A lane without a verified baseline remains unavailable in projection via
+  // its own `phase !== connected` guard. Do not let that lane suppress public
+  // updates from another lane whose baseline is already verified.
+  // `startedAt` is set before waiting_http. Keep the global projection gate
+  // only while a snapshot is actively mutating the shared state; this preserves
+  // atomicity and validation-before-publication for the in-flight lane.
   const snapshot=c.fullSnapshot;
   return !!snapshot&&!snapshot.completedAt&&Number.isFinite(Date.parse(snapshot.startedAt||''));
  });
@@ -741,7 +735,13 @@ export async function session(
               console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
             }
             const ackedAtStart=acknowledgedMessages;const fullStarted=Date.now();checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);let lastProgressLog=0;
-            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});await save();
+            regularSnapshotReady=false;state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});await state.exclusive(async()=>{await state.publicationIdle();state.beginPartitionedSnapshot(lane);});
+            // Close the cross-lane checkpoint race before the final pre-snapshot
+            // save. That save drains any checkpoint already queued; the shared
+            // gate prevents another full-state write from starting while the
+            // validated spool is read. Inbox rows remain durable in SQLite.
+            if(durable){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);await processing;if(backgroundCommit)await backgroundCommit;}
+            await save();
             const applySnapshotBatch=async(rows:import('./state.js').TradeEvent[],at:number)=>{
               if(durable){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}
               await waitForInboxCapacity();
@@ -755,12 +755,7 @@ export async function session(
             // until the verified spool has finished. The rows remain unacked
             // and recoverable; finally below releases the gate on success or
             // recoverable failure.
-            if(durable){
-              snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);
-              await processing;
-              if(backgroundCommit)await backgroundCommit;
-            }
-            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply'){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
+            const result=await api.snapshotFull({lane,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{if(durable&&progress.stage==='apply'){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt,...(progress.readBytes!==undefined?{readBytes:progress.readBytes}:{}),...(progress.stageElapsedMs!==undefined?{stageElapsedMs:progress.stageElapsedMs}:{}),...(progress.stageDurationsMs?{stageDurationsMs:progress.stageDurationsMs}:{})}});if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}},apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
           }else if(lane==='prematch'&&api.snapshotPartitioned){

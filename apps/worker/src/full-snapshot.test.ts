@@ -32,6 +32,17 @@ test('bounded envelope parser validates ordering, trailing Header, UTF8 and reje
  await writeFile(file,JSON.stringify({Header:{},Body:[{FixtureId:1,Fixture:{},Extra:'x'.repeat(1024)}]}));await assert.rejects(walkSnapshot(file,async()=>{},256));
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('snapshot parser exposes monotonic byte and validated-row progress while walking a spool',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-full-snapshot-read-progress-')),file=join(dir,'body');
+ try{
+  const rows=Array.from({length:300},(_,i)=>({...row(i+1),Padding:'x'.repeat(4096)}));const body=JSON.stringify({Header:{HttpStatusCode:200},Body:rows});await writeFile(file,body);
+  const samples:Array<{bytes:number;rows:number}>=[];let readRows=0;
+  await walkSnapshot(file,async()=>{readRows++;},undefined,undefined,undefined,(bytes,count)=>samples.push({bytes,rows:count}));
+  assert.ok(samples.length>1);assert.equal(samples.at(-1)?.bytes,Buffer.byteLength(body));assert.equal(readRows,300);
+  for(let i=1;i<samples.length;i++){assert.ok(samples[i].bytes>=samples[i-1].bytes);assert.ok(samples[i].rows>=samples[i-1].rows);}
+  assert.equal(samples.at(-1)?.rows,300);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
 test('full HTTP >256 MiB is spooled, not aggregated; exact unfiltered SDK request and bounded item conversion',{timeout:120000},async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-full-volume-'));let applied=0,largestRSS=process.memoryUsage().rss;const before=largestRSS;
  const available=process.availableMemory;process.availableMemory=()=>768*1024*1024;
@@ -216,7 +227,7 @@ test('apply progress exposes the first completed row before the next 100-row che
    if(applied===99){assert.equal(progress.at(-1)?.stage,'apply');assert.equal(progress.at(-1)?.appliedRows,1);}
    applied++;
   }});
-  assert.equal(applied,100);assert.equal(result.rows,100);assert.equal(progress.at(-1)?.appliedRows,100);assert.equal(progress.at(-1)?.stage,'complete');
+  assert.equal(applied,100);assert.equal(result.rows,100);assert.equal(progress.at(-1)?.appliedRows,100);assert.equal(progress.at(-1)?.stage,'complete');assert.equal(progress.at(-1)?.stageDurationsMs?.download!==undefined,true);assert.equal(progress.at(-1)?.stageDurationsMs?.validate!==undefined,true);assert.equal(progress.at(-1)?.stageDurationsMs?.apply!==undefined,true);
  }finally{process.availableMemory=original;server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await rm(directory,{recursive:true,force:true});}
 });
 

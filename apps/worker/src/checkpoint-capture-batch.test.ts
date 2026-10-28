@@ -48,10 +48,10 @@ test('durable inbox remains received but unprocessed while a full snapshot is va
   release();await until(()=>metrics?.checkpointed===8);const drained=openInbox(dbPath);assert.equal(drained.stats().backlog,0);drained.close();
  }finally{release();abort.abort();await task.catch(()=>{});await actor?.close();await rm(dir,{recursive:true,force:true});}
 });
-test('snapshot application defers full public projection until the verified baseline is complete',()=>{
+test('only active snapshot mutation defers public projection; a recovering lane remains individually blocked',()=>{
  const state=new TradeState();assert.equal(deferPublicProjectionDuringSnapshot(state),false);
  const recoveryAt=new Date().toISOString();state.set('prematch',{phase:'recovering',session:{id:'isolated-recovery',startedAt:recoveryAt},recoveryProgress:{stage:'snapshot',startedAt:recoveryAt,regularSnapshotReady:false}});
- assert.equal(deferPublicProjectionDuringSnapshot(state),true,'a reconnect before its first snapshot must keep the already-blocked public baseline while the durable backlog drains');
+ assert.equal(deferPublicProjectionDuringSnapshot(state),false,'the recovering lane is unavailable by phase and must not stall the other feed');
  state.set('prematch',{session:undefined,recoveryProgress:undefined,phase:'starting'});
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);

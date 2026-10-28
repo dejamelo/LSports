@@ -191,6 +191,28 @@ def expected_partitioned_model(saved_model,progress,snapshot_memory_repair):
         worker['environment']['NODE_OPTIONS']='--max-old-space-size='+str(partition_heap_mib(progress))
     return expected
 
+def activation_base_model(saved_model,current_model,active_api_matches_current,expected_models=()):
+    """Preserve a healthy API-only publication made after worker preparation."""
+    if current_model==saved_model:return copy.deepcopy(saved_model)
+    if isinstance(expected_models,dict):expected_models=(expected_models,)
+    if any(current_model==candidate for candidate in expected_models):return copy.deepcopy(current_model)
+    differences=[]
+    def compare(old,new,path=''):
+        if isinstance(old,dict) and isinstance(new,dict):
+            for key in sorted(set(old)|set(new)):
+                compare(old.get(key,'<missing>'),new.get(key,'<missing>'),path+'.'+str(key))
+        elif old!=new:differences.append(path)
+    compare(saved_model,current_model)
+    current_worker=current_model.get('services',{}).get('worker')
+    saved_worker=saved_model.get('services',{}).get('worker')
+    expected_workers=[candidate.get('services',{}).get('worker') for candidate in expected_models if isinstance(candidate,dict)]
+    api_only=current_worker==saved_worker and differences==['.services.api.image']
+    prepared_worker=(current_worker is not None and current_worker in expected_workers and
+        differences and '.services.api.image' in differences and all(path=='.services.api.image' or path.startswith('.services.worker.') for path in differences))
+    require(active_api_matches_current and (api_only or prepared_worker),
+            'DEPLOYMENT_CHANGED_SINCE_UPGRADE_PREPARE')
+    return copy.deepcopy(current_model)
+
 def partition_heap_mib(progress):
     plan=progress.get('heapBudgetPlan')
     if plan is None:return 2560
@@ -1723,10 +1745,25 @@ def upgrade_partitioned_unlocked(request):
         handoff=request['handoff'];audit=handoff['audit'];require(audit['status']=='ok' and audit['workerLockAbsent'] and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(request['freshAuditAt'].endswith('Z') and -5<=time.time()-datetime.datetime.fromisoformat(request['freshAuditAt'].replace('Z','+00:00')).timestamp()<60,'MAC_REAUDIT_EXPIRED')
         digest_handoff=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();migration_receipt=SECURE/('cutover-'+digest_handoff+'.json');migration=json.loads(migration_receipt.read_bytes());require(migration.get('startRequestedAtUTC'),'MIGRATION_NOT_COMPLETE')
-        saved_model=json.loads((backup/'model.before.private.json').read_bytes());expected=expected_partitioned_model(saved_model,progress,request.get('snapshotMemoryRepair') is True)
-        rollback_expected=copy.deepcopy(saved_model) if progress.get('pipelineMemoryEightGiB') is True else copy.deepcopy(expected)
+        saved_model=json.loads((backup/'model.before.private.json').read_bytes());current=model(partition_base(meta))
+        active_api_matches=False
+        if current!=saved_model:
+            api=states('api')
+            if len(api)==1 and api[0].get('running') is True and api[0].get('health')=='healthy':
+                info=json.loads(run(['docker','inspect',api[0]['id']]))[0]
+                ref=current.get('services',{}).get('api',{}).get('image')
+                active_api_matches=info.get('Config',{}).get('Image')==ref
+                if active_api_matches:
+                    expected_id=json.loads(run(['docker','image','inspect',ref]))[0].get('Id')
+                    active_api_matches=info.get('Image')==expected_id
+        expected_from_saved=expected_partitioned_model(saved_model,progress,request.get('snapshotMemoryRepair') is True)
+        rollback_from_saved=copy.deepcopy(saved_model) if progress.get('pipelineMemoryEightGiB') is True else copy.deepcopy(expected_from_saved)
+        if progress.get('pipelineMemoryEightGiB') is not True:rollback_from_saved['services']['worker']['image']=progress['baseImage']
+        activation_model=activation_base_model(saved_model,current,active_api_matches,(expected_from_saved,rollback_from_saved))
+        expected=expected_partitioned_model(activation_model,progress,request.get('snapshotMemoryRepair') is True)
+        rollback_expected=copy.deepcopy(activation_model) if progress.get('pipelineMemoryEightGiB') is True else copy.deepcopy(expected)
         if progress.get('pipelineMemoryEightGiB') is not True:rollback_expected['services']['worker']['image']=progress['baseImage']
-        current=model(partition_base(meta));require(current==saved_model or current==expected or phase=='rollback' and current==rollback_expected,'DEPLOYMENT_CHANGED_SINCE_UPGRADE_PREPARE')
+        require(current==activation_model or current==expected or phase=='rollback' and current==rollback_expected,'DEPLOYMENT_CHANGED_SINCE_UPGRADE_PREPARE')
         image_id=json.loads(run(['docker','image','inspect',progress['image']]))[0]['Id']
         if phase=='rollback':
             stage='partitioned_upgrade.rollback'

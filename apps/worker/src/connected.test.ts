@@ -862,11 +862,14 @@ test('empty InPlay snapshot is deferred without marking recovery ready',{timeout
 test('a zero-row failed snapshot releases the projection gate after the other lane completes',async()=>{
  const {deferPublicProjectionDuringSnapshot}=await import('./connected.js');
  const state=new TradeState(),startedAt=new Date().toISOString();
+ state.replace('inplay',[{fixtureId:901,fixture:{sport:{id:6046,name:'Football'},status:1},markets:[{id:1,status:1,bets:[{id:'2',name:'1',price:'2.1',status:1,isChanged:0}]}]}],Date.now());
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'complete',completedAt:new Date().toISOString(),rows:1}});
- state.set('inplay',{fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'waiting_http'}});
+ state.set('prematch',{phase:'connected',recoveryProgress:{stage:'idle',startedAt,regularSnapshotReady:true}});
+ state.set('inplay',{phase:'recovering',session:{id:'inplay-session',startedAt},recoveryProgress:{stage:'waiting_retry',startedAt,regularSnapshotReady:false},fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'waiting_http'}});
+ assert.equal(state.feed().events.find(e=>e.source==='inplay')?.selections.every(s=>!s.available),true,'InPlay without a verified baseline stays unavailable');
  assert.equal(deferPublicProjectionDuringSnapshot(state),true,'active snapshot must hold the global projection gate');
  state.set('inplay',{fullSnapshot:undefined});
- assert.equal(deferPublicProjectionDuringSnapshot(state),false,'an empty failed snapshot must not hold the completed lane stale');
+ assert.equal(deferPublicProjectionDuringSnapshot(state),false,'a lane without a verified baseline must not block the other verified lane');
  state.set('inplay',{fullSnapshot:{method:'disk_spool_two_pass',startedAt,stage:'apply',appliedRows:1}});
  assert.equal(deferPublicProjectionDuringSnapshot(state),true,'partially applied snapshot must keep the global projection gate');
 });

@@ -31,6 +31,13 @@ test('prepared snapshot repair image is reused only with matching backup and pas
  }
  assert.equal(reusablePreparedImage({steps:{throughput_image:{status:'pending',result}}},{backup:result.backup,pipelineRepair:true,durableIngress:true,sourceDigest}),undefined);
 });
+test('prepared pressure-repair image is not reused until its matching pressure proof is recorded',()=>{
+ const sourceDigest='c'.repeat(64),result={image:'adl-worker-partitioned:'+sourceDigest.slice(0,24),backup:'/var/backups/adl-partitioned-upgrade-safe',progressPhase:'stopped',workerRestarted:false,offlineSnapshotMemoryVerified:true,offlinePipelineLoadVerified:true,offlineDurableIngressVerified:true,offlineSnapshotPressureVerified:false};
+ const ledger={steps:{throughput_image:{status:'ok',result}}},options={backup:result.backup,pipelineRepair:true,durableIngress:true,snapshotPressureRepair:true,sourceDigest};
+ assert.equal(reusablePreparedImage(ledger,options),undefined);
+ result.offlineSnapshotPressureVerified=true;
+ assert.equal(reusablePreparedImage(ledger,options),result);
+});
 
 test('prepared source digest matches Python canonical JSON ordering and Unicode escaping',()=>{
  assert.equal(canonicalSourceDigest({b:'á',a:'x'}),'76404747ae9230492614230d19b592d3322e2b20c31c9a4eafbbcf46199a169e');

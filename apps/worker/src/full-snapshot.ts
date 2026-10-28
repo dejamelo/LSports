@@ -27,8 +27,9 @@ export const FULL_SNAPSHOT_LIMITS={responseBytes:2*1024*MiB,itemBytes:16*MiB,fix
 const fail=(reason:string,shape:Partial<NonNullable<import('@lsports/contracts').IntegrationDiagnostic['snapshotValidation']>>={}):never=>{throw new OperationError({operation:'snapshot.events',protocol:'http',category:'invalid_response',reason:'invalid_snapshot',snapshotValidation:{phase:'batch',code:'full_document_invalid',detail:reason,attribution:'not_proven',...shape},message:'Snapshot completo rechazado: '+reason+'. No se publica baseline incompleto.'});};
 export function fullSnapshotMemory(lane:'prematch'|'inplay'='prematch'){const c=snapshotCapacity({...process.env,[lane==='inplay'?'LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'LSPORTS_PREMATCH_SNAPSHOT_MAX_RESPONSE_MB']:'32'},undefined,lane);if(!c.allowed){console.info(JSON.stringify({operation:'offline.memory_budget',lane,stage:'snapshot_guard',budgetBytes:c.budgetBytes,headroomBytes:c.headroomBytes,allowed:false,memory:c.memory}));throw new OperationError({operation:'snapshot.events',protocol:'local',category:'response_limit',reason:'memory_budget_exceeded',deferred:true,memoryBudgetBytes:c.budgetBytes,memoryHeadroomBytes:c.headroomBytes,snapshotMemory:c.memory,responseLimitBytes:FULL_SNAPSHOT_LIMITS.itemBytes,message:'Margen insuficiente para conversión/persistencia incremental; recuperación pendiente.'});}}
 // Tokens bounded independently of the full document. Strings are never interpreted as structure.
-async function* tokens(file:string,max:number){let primitive='',quoted=false,escape=false,parts:string[]=[],size=0;
+async function* tokens(file:string,max:number,onReadProgress?:(bytes:number)=>void){let primitive='',quoted=false,escape=false,parts:string[]=[],size=0,readBytes=0;
  for await(const chunk of createReadStream(file,{encoding:'utf8',highWaterMark:64*1024})){
+  readBytes+=Buffer.byteLength(chunk,'utf8');onReadProgress?.(readBytes);
   const batch:string[]=[];let start=quoted?0:-1;
   for(let i=0;i<chunk.length;i++){const ch=chunk[i];
    if(quoted){if(size+i-start+1>max)fail('token_size_limit');if(escape)escape=false;else if(ch==='\\')escape=true;else if(ch==='"'){parts.push(chunk.slice(start,i+1));batch.push(parts.join(''));parts=[];size=0;quoted=false;start=-1;}}
@@ -41,8 +42,8 @@ async function* tokens(file:string,max:number){let primitive='',quoted=false,esc
   await yieldTurn();
  }if(quoted)fail('truncated_string');if(primitive)yield [primitive];
 }
-export async function walkSnapshot(file:string,onRow:(raw:unknown,rawBytes:number)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes,checkpoint?:'regular'|'events',onCheckpointRow?:(row:unknown,regular:boolean)=>Promise<void>){
- const it=tokens(file,limit)[Symbol.asyncIterator]();let batch:string[]=[],offset=0,lastItemBytes=0;
+export async function walkSnapshot(file:string,onRow:(raw:unknown,rawBytes:number)=>Promise<void>,limit=FULL_SNAPSHOT_LIMITS.itemBytes,checkpoint?:'regular'|'events',onCheckpointRow?:(row:unknown,regular:boolean)=>Promise<void>,onReadProgress?:(readBytes:number,rows:number)=>void){
+ let rows=0,readBytes=0;const it=tokens(file,limit,bytes=>{readBytes=bytes;onReadProgress?.(readBytes,rows);})[Symbol.asyncIterator]();let batch:string[]=[],offset=0,lastItemBytes=0;
  const fill=async()=>{const next=await it.next();if(next.done)fail('truncated_json');batch=next.value as string[];offset=0;};
  const take=async()=>{if(offset>=batch.length)await fill();return batch[offset++];};
  const rawValue=async(first:string,max=limit)=>{
@@ -87,7 +88,7 @@ export async function walkSnapshot(file:string,onRow:(raw:unknown,rawBytes:numbe
  try{if(await take()!=='{')fail('root_not_object');let next=await take();while(next!=='}'){
   let key:unknown;try{key=JSON.parse(next);}catch{fail('invalid_root_key');}if(typeof key!=='string'||key.length>64||keys.size>=64||keys.has(key))fail('duplicate_or_invalid_root_key');keys.add(key as string);if(await take()!==':')fail('invalid_root_colon');
   let first=await take();if(key===(checkpoint||'Body')){
-   body=true;if(first!=='[')fail('body_not_array');first=await take();if(first!==']')for(;;){const row=await rawValue(first);await onRow(row,lastItemBytes);first=await take();if(first===']')break;if(first!==',')fail('invalid_body_separator');first=await take();}
+   body=true;if(first!=='[')fail('body_not_array');first=await take();if(first!==']')for(;;){const row=await rawValue(first);await onRow(row,lastItemBytes);rows++;onReadProgress?.(readBytes,rows);first=await take();if(first===']')break;if(first!==',')fail('invalid_body_separator');first=await take();}
   }else{const value=checkpoint==='events'&&key==='workerCheckpoint'?await privateCheckpoint(first):checkpoint&&key!=='mode'&&key!=='version'?(await metadataValue(first),undefined):await rawValue(first,checkpoint?limit:64*1024);if(key===(checkpoint==='regular'?'version':checkpoint==='events'?'workerCheckpoint':'Header'))header=value;else if(checkpoint||['Errors','errors','Error','error'].includes(key as string))rootErrors[key as string]=value;}
   next=await take();if(next==='}')break;if(next!==',')fail('invalid_root_separator');next=await take();if(next==='}')fail('trailing_comma');
  }if(offset<batch.length||!(await it.next()).done)fail('trailing_json');
@@ -120,12 +121,12 @@ export function convertSnapshotRow(raw:unknown):TradeEvent{
  const row=TransformerUtil.transform(normalizeSdkTimestamps(raw),GetEventsResultElement) as TradeEvent;attachTimestampPrecision(raw,row);
  if(row.fixtureId!==r.FixtureId||!row.fixture||row.markets?.some(m=>!Number.isSafeInteger(m.id)||!m.id||m.bets?.some(b=>b.id===undefined||b.id===null||String(b.id).trim()==='')))return fail('sdk_row_mismatch');return row;
 }
-export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string;httpStatus?:number;responseHeaderStatusCode?:number;emptyResponse?:boolean};
+export type FullSnapshotProgress={stage:'waiting_http'|'download'|'validate'|'apply'|'complete';bytes:number;validatedRows:number;appliedRows:number;lastProgressAt:string;httpStatus?:number;responseHeaderStatusCode?:number;emptyResponse?:boolean;readBytes?:number;stageElapsedMs?:number;stageDurationsMs?:Partial<Record<'download'|'validate'|'apply',number>>};
 export async function fullSnapshot(options:{lane?:'prematch'|'inplay';timestamp?:number;url:string;credentials:{packageId:number;username:string;password:string};directory:string;assertOpen:()=>void;apply:(row:TradeEvent,started:number)=>Promise<void>;applyBatch?:(rows:TradeEvent[],started:number)=>Promise<void>;signal?:AbortSignal;progress?:(progress:FullSnapshotProgress)=>void;downloadGate?:(download:()=>Promise<void>)=>Promise<void>;limits?:Partial<typeof FULL_SNAPSHOT_LIMITS>}){
  const lane=options.lane??'prematch';const limits={...FULL_SNAPSHOT_LIMITS,...options.limits};if(!Number.isSafeInteger(limits.memoryWaitMs)||limits.memoryWaitMs<0||limits.memoryWaitMs>60000||!Number.isSafeInteger(limits.memoryRetryMs)||limits.memoryRetryMs<1||limits.memoryRetryMs>1000)throw Error('INVALID_SNAPSHOT_MEMORY_WAIT');fullSnapshotMemory(lane);options.assertOpen();
  const space=await statfs(options.directory);if(Number(space.bavail)*Number(space.bsize)<limits.responseBytes+512*MiB)fail('disk_headroom');
  const dir=await mkdtemp(join(options.directory,'.full-snapshot-'));const file=join(dir,'response.private.json');
- let bytes=0,timedOut=false,httpStatus:number|undefined,responseHeaderStatusCode:number|undefined,emptyResponse:boolean|undefined,validatedRows=0,appliedRows=0;let lastStage:FullSnapshotProgress['stage']='waiting_http';const progress=(stage:FullSnapshotProgress['stage'])=>{lastStage=stage;options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString(),...(httpStatus!==undefined?{httpStatus}:{}),...(responseHeaderStatusCode!==undefined?{responseHeaderStatusCode}:{}),...(emptyResponse!==undefined?{emptyResponse}:{})});};const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
+ let bytes=0,timedOut=false,httpStatus:number|undefined,responseHeaderStatusCode:number|undefined,emptyResponse:boolean|undefined,validatedRows=0,appliedRows=0,readBytes:number|undefined;let lastStage:FullSnapshotProgress['stage']='waiting_http',stageStarted=performance.now(),lastReadReport=stageStarted,lastReportedRead=0;const stageDurationsMs:NonNullable<FullSnapshotProgress['stageDurationsMs']>={};const progress=(stage:FullSnapshotProgress['stage'],read?:number)=>{const now=performance.now();if(stage!==lastStage){if(lastStage==='download'||lastStage==='validate'||lastStage==='apply')stageDurationsMs[lastStage]=(stageDurationsMs[lastStage]||0)+(now-stageStarted);lastStage=stage;stageStarted=now;lastReadReport=now;lastReportedRead=0;}if(read!==undefined)readBytes=read;options.progress?.({stage,bytes,validatedRows,appliedRows,lastProgressAt:new Date().toISOString(),...(httpStatus!==undefined?{httpStatus}:{}),...(responseHeaderStatusCode!==undefined?{responseHeaderStatusCode}:{}),...(emptyResponse!==undefined?{emptyResponse}:{}),...(readBytes!==undefined?{readBytes}:{}),stageElapsedMs:Math.ceil(now-stageStarted),stageDurationsMs:{...stageDurationsMs}});};const parseProgress=(stage:'validate'|'apply',read:number,rows:number)=>{if(read-lastReportedRead>=16*MiB||performance.now()-lastReadReport>=5000){lastReportedRead=read;lastReadReport=performance.now();if(stage==='validate')validatedRows=rows;progress(stage,read);}};const started=Date.now();const abort=new AbortController(),signal=options.signal?AbortSignal.any([abort.signal,options.signal]):abort.signal;
  const timer=setTimeout(()=>{timedOut=true;abort.abort();},limits.totalMs);timer.unref();
  let pressureWaitMs=0,lastMemoryLog=-Infinity;
  // A complete HTTP download is not an invalid document when live memory dips.
@@ -166,7 +167,7 @@ export async function fullSnapshot(options:{lane?:'prematch'|'inplay';timestamp?
   const downloaded=await open(file,'r');try{await downloaded.sync();}finally{await downloaded.close();}
   progress('validate');await memoryReady();
   const ids=new Set<number>();let rows=0;
-  const responseHeader=await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){await memoryReady();await yieldTurn();}},limits.itemBytes);
+  const responseHeader=await walkSnapshot(file,async raw=>{options.assertOpen();const row=convertSnapshotRow(raw);if(ids.has(row.fixtureId)||++rows>limits.fixtures)fail('duplicate_or_excess_fixture');ids.add(row.fixtureId);validatedRows=rows;if(rows%100===0)progress('validate');if(rows%10===0){await memoryReady();await yieldTurn();}},limits.itemBytes,undefined,undefined,(read,seen)=>parseProgress('validate',read,seen));
   if(responseHeader&&typeof responseHeader==='object'&&!Array.isArray(responseHeader)){const code=(responseHeader as Record<string,unknown>).HttpStatusCode;if(Number.isSafeInteger(code)&&Number(code)>=100&&Number(code)<=599)responseHeaderStatusCode=Number(code);}emptyResponse=rows===0;
   // HTTP 200 with a valid envelope but no rows is not a recoverable baseline.
   // Reject the streamed path too, before applying or marking either lane ready.
@@ -187,7 +188,7 @@ export async function fullSnapshot(options:{lane?:'prematch'|'inplay';timestamp?
    if(pending.length&&(pending.length>=16||pendingBytes+rawBytes>2*MiB))await flush();
    pending.push(convertSnapshotRow(raw));pendingBytes+=rawBytes;
    if(!options.applyBatch||pending.length>=16||pendingBytes>=2*MiB)await flush();
-  },limits.itemBytes);await flush();
+  },limits.itemBytes,undefined,undefined,(read,seen)=>parseProgress('apply',read,seen));await flush();
   progress('complete');
   return {ids,rows,bytes,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString()};
  }catch(error){try{progress(lastStage);}catch{/* Progress reporting must not replace the original failure. */}if(timedOut)throw new OperationError({operation:'snapshot.events',protocol:'http',category:'network',reason:'timeout',timeoutMs:limits.totalMs,message:'Tiempo máximo de descarga snapshot excedido; baseline bloqueado.'});if(error instanceof OperationError&&httpStatus!==undefined&&error.diagnostic.httpStatus===undefined)throw new OperationError({...error.diagnostic,httpStatus});throw error;}finally{clearTimeout(timer);abort.abort();await rm(dir,{recursive:true,force:true});}
