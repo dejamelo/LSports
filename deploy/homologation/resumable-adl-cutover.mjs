@@ -183,7 +183,7 @@ export async function run(args){
     stage='pipeline_report';
     if(!['local_exit','journal_export','journal_import','aws_start','throughput_upgrade'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('PIPELINE_REPORT_REQUIRES_COMPLETED_UPGRADE');
     const macRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000);const mac=macRows.find(r=>r.operation==='cutover.audit');
-    if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+    if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:true}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
     const names=partitionWorkerSourceNames.map(n=>'apps/worker/src/'+n);names.push(...partitionPackageSourceNames);
     if(process.env.ADL_PIPELINE_REPAIR==='1')names.push('packages/feed-store/src/indexed-feed.ts');
