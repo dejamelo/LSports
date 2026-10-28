@@ -24,6 +24,10 @@ function diagnostic(d={}){return{
  rateLimitSource:['local_in_flight','local_operation_cooldown','local_host_cooldown','supplier_http'].includes(d.rateLimitSource)?d.rateLimitSource:undefined,
  httpStatus:Number.isInteger(d.httpStatus)?d.httpStatus:undefined,amqpCode:Number.isInteger(d.amqpCode)?d.amqpCode:undefined,retryAt:utc(d.retryAt),snapshotValidation:validation(d.snapshotValidation)};}
 function progress(p={}){return Object.fromEntries(Object.entries(p).filter(([k,v])=>['acknowledgedMessages','rows','bytes','validatedRows','appliedRows','ackedDuringRecovery'].includes(k)&&Number.isSafeInteger(v)&&v>=0||k==='active'&&typeof v==='boolean'||['startedAt','completedAt','registeredAt','lastAckAt','lastProgressAt'].includes(k)&&utc(v)||k==='method'&&v==='disk_spool_two_pass'||k==='stage'&&['waiting_http','download','validate','apply','complete'].includes(v)));}
+function publication(p){if(!p||typeof p!=='object')return undefined;const out={revision:Number.isSafeInteger(p.revision)&&p.revision>=0?p.revision:null,updatedAt:utc(p.updatedAt),databaseBytes:Number.isSafeInteger(p.databaseBytes)&&p.databaseBytes>=0?p.databaseBytes:null,marketCount:Number.isSafeInteger(p.marketCount)&&p.marketCount>=0?p.marketCount:null,health:p.health==='available'||p.health==='unavailable'?p.health:null,counts:{},pages:{}};
+ for(const row of Array.isArray(p.counts)?p.counts:[])if(['prematch','inplay'].includes(row.lane)&&count(row.events))out.counts[row.lane]=row.events;
+ for(const lane of ['prematch','inplay']){const row=p.pages?.[lane];if(!row||typeof row!=='object')continue;out.pages[lane]={...Object.fromEntries(['events','markets','pricedSelections','selectableSelections','pagesQueried'].filter(k=>count(row[k])).map(k=>[k,row[k]])),newestEventUpdatedAt:utc(row.newestEventUpdatedAt),hasMore:typeof row.hasMore==='boolean'?row.hasMore:null};}
+ return out;}
 function observation(l={},previous={},projection={},since){
  const session=utc(l.session?.startedAt),boundary=Date.parse(session),isCurrent=t=>Number.isFinite(boundary)&&Number.isFinite(Date.parse(t))&&Date.parse(t)>=boundary;
  const sameSession=!!session&&session===utc(previous.session?.startedAt);
@@ -43,6 +47,7 @@ function observation(l={},previous={},projection={},since){
 }
 export function snapshotValidationReport(current,ledger={}){return{readOnlyRemote:true,providerRequests:0,workerRestarted:false,posnetChanged:false,
  capturedAtUTC:new Date().toISOString(),validationSinceUTC:utc(current.validationSinceUTC),
+ ...(current.indexedPublication?{indexedPublication:publication(current.indexedPublication)}:{}),
  current:{prematch:lane(current.lanes?.prematch),inplay:lane(current.lanes?.inplay)},
  feedObservations:Object.fromEntries(['prematch','inplay'].map(name=>[name,observation(current.lanes?.[name],ledger.lastValidation?.lanes?.[name],current.projectionByLane?.[name],current.validationSinceUTC)])),
  ...(current.timeline?{timeline:current.timeline}:{}),
