@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('8 GiB stopped-worker recovery distinguishes kernel and V8 OOM by exact worker identity',()=>{
  const base={name:'/adl-homologation-worker-1',state:'exited',id:'a'.repeat(64)};
@@ -8,6 +8,17 @@ test('8 GiB stopped-worker recovery distinguishes kernel and V8 OOM by exact wor
  assert.deepEqual(stoppedEightGiBWorkerFailure([{...base,exitCode:134,oomKilled:false}]),{kind:'v8_heap_oom',id:base.id});
  for(const worker of [{...base,exitCode:134,oomKilled:true},{...base,exitCode:137,oomKilled:false},{...base,exitCode:1,oomKilled:false},{...base,name:'/other-worker',exitCode:134,oomKilled:false},{...base,id:'short',exitCode:134,oomKilled:false}])assert.equal(stoppedEightGiBWorkerFailure([worker]),undefined);
  assert.equal(stoppedEightGiBWorkerFailure([{...base,exitCode:134,oomKilled:false},{...base,id:'b'.repeat(64),exitCode:137,oomKilled:true}]),undefined);
+});
+test('snapshot memory recovery selects only a backup with verified restore and projection readback',()=>{
+ const verified='/var/backups/adl-partitioned-upgrade-w7r5wvwr';
+ const unverified='/var/backups/adl-partitioned-upgrade-8n9ymoks';
+ const ledger={steps:{
+  throughput_image:{status:'ok',result:{backup:unverified,offlineRestoreVerified:false,projectionReadbackVerified:false}},
+  snapshot_memory_data:{status:'ok',result:{backup:verified,offlineRestoreVerified:true,projectionReadbackVerified:true}},
+ }};
+ assert.equal(verifiedSnapshotMemorySourceBackup(ledger),verified);
+ assert.equal(verifiedSnapshotMemorySourceBackup({steps:{snapshot_memory_data:{status:'ok',result:{backup:verified,offlineRestoreVerified:true,projectionReadbackVerified:false}}}}),undefined);
+ assert.equal(verifiedSnapshotMemorySourceBackup({steps:{snapshot_memory_data:{status:'ok',result:{backup:'/tmp/untrusted',offlineRestoreVerified:true,projectionReadbackVerified:true}}}}),undefined);
 });
 test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
  assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));

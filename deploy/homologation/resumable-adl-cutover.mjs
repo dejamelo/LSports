@@ -20,6 +20,16 @@ export function snapshotMemoryHostHeadroomApproved(model,availableMemoryBytes){
  const limit=Number(model?.memoryLimitBytes);
  return Number.isSafeInteger(limit)&&Number.isSafeInteger(availableMemoryBytes)&&limit===8589934592&&availableMemoryBytes>=limit+4*1024**3;
 }
+export function verifiedSnapshotMemorySourceBackup(ledger){
+ const candidates=[ledger?.steps?.snapshot_memory_data,ledger?.steps?.throughput_upgrade,ledger?.steps?.throughput_image];
+ for(const step of candidates){
+  if(step?.status!=='ok')continue;
+  const result=step.result||{};
+  if(result.offlineRestoreVerified!==true||result.projectionReadbackVerified!==true)continue;
+  if(typeof result.backup==='string'&&/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(result.backup))return result.backup;
+ }
+ return undefined;
+}
 export function stoppedEightGiBWorkerFailure(containers){
  const candidates=(containers||[]).filter(c=>c?.name==='/adl-homologation-worker-1'&&c?.state==='exited'&&/^[0-9a-f]{64}$/.test(c?.id||''));
  if(candidates.length!==1)return undefined;
@@ -301,7 +311,8 @@ export async function run(args){
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;if(!snapshotMemoryEightGiB)repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryEightGiB){
      repairOptions.snapshotMemoryEightGiBRepair=true;
-     repairOptions.snapshotMemorySourceBackup=ledger.steps.throughput_image?.result?.backup;
+     repairOptions.snapshotMemorySourceBackup=verifiedSnapshotMemorySourceBackup(ledger);
+     if(!repairOptions.snapshotMemorySourceBackup)throw Error('SNAPSHOT_MEMORY_SOURCE_BACKUP_UNVERIFIED');
      const stoppedFailure=stoppedEightGiBWorkerFailure(pre.awsWorkerContainers);
      if(!stoppedFailure)throw Error('SNAPSHOT_OOM_IDENTITY_CHANGED');
      repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=stoppedFailure.id.slice(0,12);repairOptions.snapshotCheckpointMemoryRepair=true;
