@@ -14,9 +14,9 @@ test('historical snapshot progress is excluded; live current-session log wins',(
  const s=status(0);s.timeline={records:[{lane:'prematch',operation:'snapshot.events',status:'full_spool_progress',stage:'complete',loggedAtUTC:'2026-10-21T12:00:00Z'},{lane:'prematch',operation:'snapshot.events',status:'full_spool_progress',stage:'validate',validatedRows:1234,loggedAtUTC:time(10)}]};
  const r=sampleRecovery(s);assert.equal(r.lanes.prematch.snapshot.stage,'validate');assert.equal(r.lanes.prematch.snapshot.validatedRows,1234);assert.equal(r.lanes.prematch.snapshot.source,'current_session_worker_log');
 });
-test('three bounded read-only observations save progress without modifying completed migration',async()=>{
- let calls=0,waits=0,written=0;const ledger={steps:{journal_import:{status:'ok'}}};const log=console.log;console.log=()=>{};
- try{const result=await observeRecovery(async(action,extra)=>{assert.equal(action,'status');assert.ok(extra.timelineWindow);return status(calls++);},{},ledger,async()=>{},'/private/report',async()=>{written++;},{wait:async ms=>{assert.equal(ms,60000);waits++;}});assert.equal(result.samples,3);assert.equal(result.workerRestarted,false);assert.equal(waits,2);assert.equal(written,1);assert.equal(ledger.steps.journal_import.status,'ok');}finally{console.log=log;}
+test('three bounded read-only observations save indexed publication without modifying completed migration',async()=>{
+ let calls=0,waits=0,written=0;const ledger={steps:{journal_import:{status:'ok'}}};const log=console.log;console.log=()=>{};const publication={revision:17,updatedAt:time(2),marketCount:9,pages:{prematch:{events:10,selectableSelections:2},inplay:{events:0}}};
+ try{const result=await observeRecovery(async(action,extra)=>{assert.equal(action,'status');assert.ok(extra.timelineWindow);return {...status(calls++),indexedPublication:publication};},{},ledger,async()=>{},'/private/report',async()=>{written++;},{wait:async ms=>{assert.equal(ms,60000);waits++;}});assert.equal(result.samples,3);assert.equal(result.publication.revision,17);assert.equal(result.workerRestarted,false);assert.equal(waits,2);assert.equal(written,1);assert.equal(ledger.steps.journal_import.status,'ok');}finally{console.log=log;}
 });
 
 test('pipeline collector correlates identity and memory for each sample and preserves complete sanitized timeline',async()=>{

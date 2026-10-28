@@ -260,7 +260,7 @@ export async function run(args){
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair||args[4]==='--full-recovery'?[2]:[]});
    const mac=rows.find(r=>r.operation==='cutover.audit');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
-   if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:snapshotMemoryRepair||args[4]==='--full-recovery'}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+   if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:snapshotMemoryRepair||args[4]==='--full-recovery'||args[4]==='--snapshot-validation-report'}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    if(args[4]==='--startup-report'){
     stage='startup_report';
     const {createHash}=await import('node:crypto');

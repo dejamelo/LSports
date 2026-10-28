@@ -1,7 +1,7 @@
 import {setTimeout as delay} from 'node:timers/promises';
 const lanes=['prematch','inplay'];
 export function sampleRecovery(status){
- const result={at:status.checkpointReader?.observedAtUTC||new Date().toISOString(),workerRunning:status.workers?.length===1&&status.workers[0].running===true,lanes:{},persistedFormat:status.persistedFormat,timeline:status.timeline};
+ const result={at:status.checkpointReader?.observedAtUTC||new Date().toISOString(),workerRunning:status.workers?.length===1&&status.workers[0].running===true,lanes:{},persistedFormat:status.persistedFormat,publication:status.indexedPublication,timeline:status.timeline};
  for(const lane of lanes){
   const l=status.lanes?.[lane]||{},start=Date.parse(l.session?.startedAt);
   const logs=(status.timeline?.records||[]).filter(r=>r.lane===lane&&r.operation==='snapshot.events'&&r.status==='full_spool_progress'&&Date.parse(r.loggedAtUTC)>=start);
@@ -35,10 +35,10 @@ export async function observeRecovery(remote,handoff,ledger,save,reportPath,writ
   const sample=sampleRecovery(status);if(identity)sample.identity=identity;samples.push(sample);
   if(identity)console.log(JSON.stringify({operation:'cutover.pipeline_identity',sample:i+1,worker:identity.worker,expectedImage:identity.expectedImage,composeImage:identity.composeImage,expectedImageId:identity.expectedImageId,containerImageId:identity.containerImageId,failedChecks:identity.failedChecks,receipt:identity.receipt,sourceMatches:Object.fromEntries(Object.entries(identity.sourceComparisons||{}).map(([ref,v])=>[ref,v.allMatch])),cgroupMemory:identity.cgroupMemory}));
   ledger.recoveryProgressObservation={status:'measuring',samples,reportPath};await save();
-  console.log(JSON.stringify({operation:'cutover.recovery_progress',sample:i+1,at:sample.at,workerRunning:sample.workerRunning,lanes:Object.fromEntries(lanes.map(l=>[l,{phase:sample.lanes[l].phase,snapshot:sample.lanes[l].snapshot,processingBacklog:sample.lanes[l].metrics.processingBacklog,processed:sample.lanes[l].metrics.processed,checkpointed:sample.lanes[l].metrics.checkpointed}]))}));
+  console.log(JSON.stringify({operation:'cutover.recovery_progress',sample:i+1,at:sample.at,workerRunning:sample.workerRunning,publication:sample.publication,lanes:Object.fromEntries(lanes.map(l=>[l,{phase:sample.lanes[l].phase,snapshot:sample.lanes[l].snapshot,processingBacklog:sample.lanes[l].metrics.processingBacklog,processed:sample.lanes[l].metrics.processed,checkpointed:sample.lanes[l].metrics.checkpointed}]))}));
   if(!sample.workerRunning)break;
   if(i<2)await wait(60000);
  }
- const result={readOnly:true,workerRestarted:false,providerRequests:0,posnetChanged:false,macWorkerStopped:true,workerRunning:samples.at(-1).workerRunning,samples: samples.length,...(identityRequest?{identity:samples.at(-1).identity,persistedFormat:samples.at(-1).persistedFormat}:{}),lanes:Object.fromEntries(lanes.map(l=>[l,recoveryRates(samples,l)])),persistence:samples.at(-1).persistence,ackMeaning:'durable_inbox_receipt_not_processing_completion',reportPath};
+ const result={readOnly:true,workerRestarted:false,providerRequests:0,posnetChanged:false,macWorkerStopped:true,workerRunning:samples.at(-1).workerRunning,samples: samples.length,...(identityRequest?{identity:samples.at(-1).identity,persistedFormat:samples.at(-1).persistedFormat}:{}),publication:samples.at(-1).publication,lanes:Object.fromEntries(lanes.map(l=>[l,recoveryRates(samples,l)])),persistence:samples.at(-1).persistence,ackMeaning:'durable_inbox_receipt_not_processing_completion',reportPath};
  await writeReport(reportPath,JSON.stringify({...result,observations:samples},null,2));ledger.recoveryProgressObservation={status:'collected',...result};await save();console.log(JSON.stringify({operation:'cutover.recovery_progress',...result,...(identityRequest?{identity:undefined}: {})}));return result;
 }

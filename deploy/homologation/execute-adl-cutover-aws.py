@@ -876,6 +876,8 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
     reader_info={'file':str(path),'sizeBytes':path.stat().st_size,'previousWholeFileLimitBytes':268435456,'reader':'incremental_json','recordLimitBytes':16777216,'chunkBytes':65536}
     emit(operation='cutover.aws',stage='checkpoint_reader',status='reading',**reader_info,readOnly=True,workerRestarted=False,providerRequests=0)
     indexed=indexed_publication_status(directory)
+    if indexed is not None:
+        result['indexedPublication']={k:indexed.get(k) for k in ('revision','updatedAt','databaseBytes','marketCount','counts','pages','health')}
     available=diagnostic_available_memory_bytes()
     require(available>192*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
     selectable=0;markets=0;prices=0;reasons={}
