@@ -17,13 +17,21 @@ test('streamed HTTP 200 empty snapshots reject for both lanes before marking a b
  }
 });
 test('active snapshot response can outlast a short total window without being classified as idle',async()=>{
- const dir=await mkdtemp(join(tmpdir(),'adl-full-total-window-'));let applied=0;const available=process.availableMemory;process.availableMemory=()=>1024**3;
- const server=createServer((_req,res)=>{res.write('{"Header":{"HttpStatusCode":200},"Body":[');setTimeout(()=>res.end(JSON.stringify(row(1))+']}'),120);});
+ const dir=await mkdtemp(join(tmpdir(),'adl-full-total-window-'));let applied=0;const available=process.availableMemory;process.availableMemory=()=>1024**3;const payload=JSON.stringify({Header:{HttpStatusCode:200},Body:[row(1)]});
+ const server=createServer((_req,res)=>{res.writeHead(200,{'Content-Length':Buffer.byteLength(payload)});res.write(payload.slice(0,Math.floor(payload.length/2)));setTimeout(()=>res.end(payload.slice(Math.floor(payload.length/2))),120);});
  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
  try{
   const result=await fullSnapshot({url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},limits:{totalMs:500,idleMs:300},async apply(){applied++;}});
-  assert.equal(result.rows,1);assert.equal(applied,1);assert.deepEqual(await readdir(dir),[]);
+  assert.equal(result.rows,1);assert.equal(applied,1);assert.equal(result.transportComplete,true);assert.equal(result.httpStatus,200);assert.equal(result.contentLengthBytes,result.transportBytes);assert.equal(result.bytes,Buffer.byteLength(payload));assert.deepEqual(await readdir(dir),[]);
  }finally{process.availableMemory=available;server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
+});
+test('truncated HTTP transport is rejected before any snapshot row is applied',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-http-transport-truncated-'));let applied=0;const body=JSON.stringify({Header:{HttpStatusCode:200},Body:[row(1)]});
+ const server=createServer((_req,res)=>{res.writeHead(200,{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)+19});res.end(body);});await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{
+  await assert.rejects(fullSnapshot({url:'http://127.0.0.1:'+(server.address() as {port:number}).port,credentials:{packageId:4511,username:'isolated',password:'isolated'},directory:dir,assertOpen(){},async apply(){applied++;}}));
+  assert.equal(applied,0);assert.deepEqual(await readdir(dir),[]);
+ }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
 });
 test('bounded envelope parser validates ordering, trailing Header, UTF8 and rejects truncation, duplicate root and application errors',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-full-envelope-'));try{const file=join(dir,'body');
