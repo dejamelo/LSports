@@ -154,6 +154,12 @@ test('OOM repair and rollback remain distinct durable modes; no migration mode i
  assert.equal(indexedApiChangesCompatible(['apps/worker/src/connected.ts','packages/feed-store/src/indexed-feed.ts'],installed,writerOnly),true);
  assert.equal(indexedApiChangesCompatible(['apps/api/src/app.ts'],installed,writerOnly),false);
  assert.equal(indexedApiChangesCompatible(['packages/feed-store/src/indexed-feed.ts'],installed,writerOnly.replace('readPage(input)','readPageWithDifferentCursor(input)')),false);
+ const oldContracts='export interface ConnectionState { persistenceProgress?:{writes:number;rssBytes?:number}; }';
+ const newContracts='export interface ConnectionState { persistenceProgress?:{writes:number;rssBytes?:number;indexedProjection?:{rows:number;rebuild:boolean;durationMs:number;upsertRows?:number;deletedRows?:number;yieldCount?:number;maxSliceMs?:number;commitMs?:number;elapsedMs?:number};}; }';
+ const workerPatch=['apps/worker/src/connected.ts','packages/contracts/src/index.ts','packages/feed-store/src/indexed-feed.ts'];
+ assert.equal(indexedApiChangesCompatible(workerPatch,installed,writerOnly,oldContracts,newContracts),true);
+ assert.equal(indexedApiChangesCompatible(workerPatch,installed,writerOnly.replace('readPage(input)','readPageWithDifferentCursor(input)'),oldContracts,newContracts),false);
+ assert.equal(indexedApiChangesCompatible(['packages/contracts/src/index.ts'],installed,writerOnly,oldContracts,newContracts.replace('rows:number','rows?:number')),false);
 });
 
 test('persistence repair obtains exact image from successful protected progress and never guesses',()=>{
