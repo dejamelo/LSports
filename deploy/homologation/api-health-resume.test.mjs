@@ -7,6 +7,7 @@ test('six GiB preflight is accepted only for its protected live pipeline or snap
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineRepair:true}),['6442450944']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineRepair:true,pipelineMemoryEightGiB:true}),['6442450944','8589934592']);
  assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,pipelineMemoryEightGiB:true}),['8589934592']);
+ assert.deepEqual(acceptedWorkerMemoryLimits({snapshotMemoryRepair:true,snapshotMemoryEightGiB:true}),['8589934592']);
  assert.deepEqual(acceptedWorkerMemoryLimits({mode:'--repair-snapshot'}),['2147483648','4294967296']);
 });
 test('8 GiB snapshot profile requires at least 4 GiB host headroom beyond its cgroup limit',()=>{

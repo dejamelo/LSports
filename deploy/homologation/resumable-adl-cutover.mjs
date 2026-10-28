@@ -8,9 +8,9 @@ export function persistenceExpectedImage(ledger,env=process.env){
  if(!/^adl-worker-partitioned:[0-9a-f]{24}$/.test(image||'')||env.ADL_LIVE_OOM_REPAIR==='1')throw Error('EXPECTED_CURRENT_PERSISTENCE_IMAGE_REQUIRED');
  return image;
 }
-export function acceptedWorkerMemoryLimits({mode,snapshotMemoryRepair,pipelineRepair,livePersistenceRepair,v8HeapOomRepair,pipelineMemoryEightGiB}){
+export function acceptedWorkerMemoryLimits({mode,snapshotMemoryRepair,pipelineRepair,livePersistenceRepair,v8HeapOomRepair,pipelineMemoryEightGiB,snapshotMemoryEightGiB}){
  if(mode==='--repair-snapshot')return ['2147483648','4294967296'];
- if(snapshotMemoryRepair&&pipelineMemoryEightGiB&&!pipelineRepair)return ['8589934592'];
+ if(snapshotMemoryRepair&&(snapshotMemoryEightGiB||pipelineMemoryEightGiB&&!pipelineRepair))return ['8589934592'];
  if(pipelineRepair)return pipelineMemoryEightGiB?['6442450944','8589934592']:['6442450944'];
  if(snapshotMemoryRepair&&livePersistenceRepair)return ['4294967296','6442450944'];
  if(snapshotMemoryRepair&&v8HeapOomRepair)return ['6442450944'];
@@ -186,9 +186,10 @@ export async function run(args){
   // Current consumer safety is deliberately not cached. No DNS/TLS/POSNET maintenance repeated.
   stage='remote_consumer_gate';const pre=await remote('preflight');
   const pipelineMemoryEightGiB=process.env.ADL_PIPELINE_MEMORY_EIGHT_GIB==='1';
-  const acceptedMemory=acceptedWorkerMemoryLimits({mode:args[4],snapshotMemoryRepair,pipelineRepair:process.env.ADL_PIPELINE_REPAIR==='1',livePersistenceRepair:process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1',v8HeapOomRepair:process.env.ADL_LIVE_V8_HEAP_OOM_REPAIR==='1',pipelineMemoryEightGiB});
+  const snapshotMemoryEightGiB=snapshotMemoryRepair&&process.env.ADL_SNAPSHOT_MEMORY_KEEP_EIGHT_GIB==='1';
+  const acceptedMemory=acceptedWorkerMemoryLimits({mode:args[4],snapshotMemoryRepair,pipelineRepair:process.env.ADL_PIPELINE_REPAIR==='1',livePersistenceRepair:process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1',v8HeapOomRepair:process.env.ADL_LIVE_V8_HEAP_OOM_REPAIR==='1',pipelineMemoryEightGiB,snapshotMemoryEightGiB});
   if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!acceptedMemory.includes(String(pre.workerModel?.memoryLimitBytes))||!workerCapacityApproved(pre.workerModel,{repairSnapshot:args[4]==='--repair-snapshot',pipelineMemoryEightGiB}))throw Error('REMOTE_API_OR_CAPACITY_UNVERIFIED');
-  if(snapshotMemoryRepair&&pipelineMemoryEightGiB&&!snapshotMemoryHostHeadroomApproved(pre.workerModel,pre.capacity?.availableMemoryBytes))throw Error('SNAPSHOT_EIGHT_GIB_HOST_HEADROOM_INSUFFICIENT');
+  if(snapshotMemoryEightGiB&&!snapshotMemoryHostHeadroomApproved(pre.workerModel,pre.capacity?.availableMemoryBytes))throw Error('SNAPSHOT_EIGHT_GIB_HOST_HEADROOM_INSUFFICIENT');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
   if(['--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
    stage='validation_resume_gate';
@@ -290,6 +291,7 @@ export async function run(args){
     const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true}:distributionMode?{fixCommit:'2aa06f7'}:{};
     if(durableMode)repairOptions.durableIngress=true;
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
+    if(snapshotMemoryEightGiB)repairOptions.snapshotMemoryEightGiBRepair=true;
     if(snapshotMemoryRepair&&process.env.ADL_CHECKPOINT_REPAIR_BACKUP){const b=process.env.ADL_CHECKPOINT_REPAIR_BACKUP;if(!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(b)||process.env.ADL_RESUME_BACKUP)throw Error('DERIVED_REPAIR_BACKUP_UNVERIFIED');repairOptions.checkpointRepairBackup=b;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||''))throw Error('EXPECTED_CURRENT_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_V8_HEAP_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||'')||repairOptions.liveOomRepair)throw Error('EXPECTED_CURRENT_V8_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.v8HeapOomRepair=true;repairOptions.expectedOomPrefix=prefix;}

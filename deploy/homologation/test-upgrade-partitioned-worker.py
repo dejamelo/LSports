@@ -4,6 +4,17 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_stopped_snapshot_repair_preserves_measured_existing_eight_gib_and_heap(self):
+  mib=1024**2;gib=1024**3
+  p={'memoryLimitBytes':8*gib,'snapshotMemoryRepair':True,'snapshotMemoryEightGiBRepair':True,'snapshotMemoryEightGiBHeadroomBytes':12*gib,'heapBudgetPlan':{'preserveExisting':True,'evidenceVerified':True,'oldSpaceMiB':4608,'previousOldSpaceMiB':4608,'containerLimitUnchanged':True,'effectiveHeapLimitBytes':5*gib}}
+  self.assertEqual(NS['partition_memory'](p),8*gib);self.assertEqual(NS['candidate_memory'](p),8*gib);self.assertEqual(NS['partition_heap_mib'](p),4608)
+  self.assertEqual(NS['pre_stop_memory_floor_gib'](False,False,True),12);self.assertEqual(NS['pre_stop_memory_floor_gib'](True,False,True),6)
+  args=NS['partition_rehearsal_args'](['docker','run','--rm','--memory','4g','--entrypoint','node','image'],p)
+  self.assertEqual(args[args.index('--memory')+1],'8g');self.assertEqual(args[args.index('--memory-swap')+1],'8g')
+  for changed in ({'snapshotMemoryEightGiBHeadroomBytes':12*gib-1},{'memoryLimitBytes':6*gib},{'snapshotMemoryRepair':False}):
+   with self.assertRaises(Exception):NS['candidate_memory']({**p,**changed})
+  with self.assertRaises(Exception):NS['partition_heap_mib']({**p,'heapBudgetPlan':{**p['heapBudgetPlan'],'oldSpaceMiB':4096}})
+
  def test_activation_preserves_a_healthy_api_image_published_after_worker_prepare(self):
   saved={'services':{'api':{'image':'api-old'},'worker':{'image':'worker-old','mem_limit':'8589934592','environment':{'KEEP':'yes'}}},'networks':{'kept':{}},'volumes':{'kept':{}}}
   current=copy.deepcopy(saved);current['services']['api']['image']='api-current'

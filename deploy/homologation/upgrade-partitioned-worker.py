@@ -165,20 +165,24 @@ def partition_memory(progress):
     value=progress.get('memoryLimitBytes',4294967296)
     verified_six_gib=value==6442450944 and (progress.get('pipelineRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('snapshotPressureRepair') is True and progress.get('livePersistenceRepair') is True or progress.get('snapshotMemoryRepair') is True and progress.get('v8HeapOomRepair') is True)
     verified_existing_eight_gib=value==8589934592 and progress.get('pipelineRepair') is True and progress.get('pipelineMemoryEightGiB') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True
-    require(value==4294967296 or verified_six_gib or verified_existing_eight_gib,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
+    verified_snapshot_eight_gib=value==8589934592 and progress.get('snapshotMemoryEightGiBRepair') is True and progress.get('snapshotMemoryRepair') is True and progress.get('snapshotMemoryEightGiBHeadroomBytes',0)>=12*1024**3 and progress.get('heapBudgetPlan',{}).get('preserveExisting') is True
+    require(value==4294967296 or verified_six_gib or verified_existing_eight_gib or verified_snapshot_eight_gib,'UPGRADE_MEMORY_SCOPE_UNVERIFIED')
     return value
 
 def candidate_memory(progress):
+    if progress.get('snapshotMemoryEightGiBRepair') is True:
+        require(progress.get('snapshotMemoryRepair') is True and partition_memory(progress)==8589934592,'SNAPSHOT_EIGHT_GIB_PROFILE_SCOPE_UNVERIFIED')
+        return 8589934592
     if progress.get('pipelineMemoryEightGiB') is True:
         require(progress.get('pipelineRepair') is True and progress.get('snapshotMemoryRepair') is True and progress.get('livePersistenceRepair') is True,'EIGHT_GIB_PROFILE_SCOPE_UNVERIFIED')
         return 8192*1024**2
     return partition_memory(progress)
 
-def pre_stop_memory_floor_gib(worker_running,eight_gib_pipeline):
+def pre_stop_memory_floor_gib(worker_running,eight_gib_pipeline,snapshot_eight_gib=False):
     # The old worker's cgroup is expected to be released by the controlled
     # stop. The stronger 10 GiB floor is enforced after exit, before rehearsal
     # and activation; only the reversible copy/stop phase uses the 6 GiB floor.
-    return 6 if worker_running else (10 if eight_gib_pipeline else 6)
+    return 6 if worker_running else (12 if snapshot_eight_gib else 10 if eight_gib_pipeline else 6)
 
 def expected_partitioned_model(saved_model,progress,snapshot_memory_repair):
     expected=copy.deepcopy(saved_model)
@@ -215,6 +219,10 @@ def activation_base_model(saved_model,current_model,active_api_matches_current,e
 
 def partition_heap_mib(progress):
     plan=progress.get('heapBudgetPlan')
+    if progress.get('snapshotMemoryEightGiBRepair') is True:
+        memory=partition_memory(progress);old_space=plan.get('oldSpaceMiB') if plan else None
+        require(memory==8589934592 and plan.get('preserveExisting') is True and plan.get('evidenceVerified') is True and old_space==4608 and plan.get('previousOldSpaceMiB')==4608 and plan.get('containerLimitUnchanged') is True and 4608*1024**2<=plan.get('effectiveHeapLimitBytes',0)<=memory-512*1024**2,'SNAPSHOT_EIGHT_GIB_HEAP_PRESERVATION_UNVERIFIED')
+        return old_space
     if plan is None:return 2560
     if plan.get('v8HeapCompactionPreserve') is True:
         verified_origin=progress.get('v8HeapOomRepair') is True or progress.get('inheritedV8HeapCompactionPlan') is True
@@ -1451,9 +1459,11 @@ def upgrade_partitioned_unlocked(request):
             receipt_path,saved,files=resolve_prepared_upgrade(request,files);digest=saved['digest']
         meta=json.loads((SECURE/'deployment.json').read_bytes());base=partition_base(meta);before=model(base)
         require(control_status()==200,'API_NOT_HEALTHY')
-        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);eight_gib_pipeline=request.get('pipelineMemoryEightGiB') is True; six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;v8_heap_preserve=request.get('snapshotMemoryRepair') is True and request.get('v8HeapOomRepair') is True
+        memory_limit=snapshot_memory_bytes(before['services']['worker']['mem_limit']);eight_gib_pipeline=request.get('pipelineMemoryEightGiB') is True; snapshot_eight_gib=request.get('snapshotMemoryEightGiBRepair') is True; six_gib_pressure=request.get('snapshotMemoryRepair') is True and request.get('snapshotPressureRepair') is True and request.get('livePersistenceRepair') is True;v8_heap_preserve=request.get('snapshotMemoryRepair') is True and request.get('v8HeapOomRepair') is True
         verified_eight_gib_base=eight_gib_pipeline and request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and memory_limit==8589934592 and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608'
-        require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944 or v8_heap_preserve and memory_limit==6442450944 or verified_eight_gib_base,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
+        snapshot_headroom=snapshot_host_memory() if snapshot_eight_gib else 0
+        verified_snapshot_eight_gib=snapshot_eight_gib and request.get('snapshotMemoryRepair') is True and memory_limit==8589934592 and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608' and snapshot_headroom>=12*1024**3
+        require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944 or v8_heap_preserve and memory_limit==6442450944 or verified_eight_gib_base or verified_snapshot_eight_gib,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
         if eight_gib_pipeline:require(request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and memory_limit in (6442450944,8589934592) and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608','EIGHT_GIB_PROFILE_REQUIRES_VERIFIED_BASE_AND_PRESERVED_HEAP')
         inherited_heap_plan=None
         if request.get('pipelineRepair'):
@@ -1462,6 +1472,9 @@ def upgrade_partitioned_unlocked(request):
             if request.get('preservedHeapBudgetRepair') and request.get('resumeBackup'):
                 require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') in ('--max-old-space-size=2560','--max-old-space-size=3584'),'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
             else:inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'])
+        elif verified_snapshot_eight_gib:
+            inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'])
+            require(inherited_heap_plan and inherited_heap_plan.get('preserveExisting') is True and inherited_heap_plan.get('oldSpaceMiB')==4608 and snapshot_host_memory()>=12*1024**3,'SNAPSHOT_EIGHT_GIB_HEAP_OR_HOST_PROOF_FAILED')
         def save(p):
             tmp=SECURE/(receipt_path.name+'.tmp');private(tmp,json.dumps(p).encode());durable_replace(tmp,receipt_path)
         # A failed preserved-data rehearsal has already stopped distribution and
@@ -1537,7 +1550,7 @@ def upgrade_partitioned_unlocked(request):
             # its cgroup is part of the memory expected to be released. Require
             # 6 GiB while it is live, then keep the 10 GiB gate after confirmed
             # exit and before restore/rehearsal or starting its replacement.
-            pre_stop_floor=pre_stop_memory_floor_gib(workers[0]['running'],eight_gib_pipeline)
+            pre_stop_floor=pre_stop_memory_floor_gib(workers[0]['running'],eight_gib_pipeline,snapshot_eight_gib)
             require(snapshot_host_memory()>=pre_stop_floor*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT');require(shutil.disk_usage('/opt').free>=(4*1024**3 if request.get('pipelineRepair') else 1024**3),'UPGRADE_DISK_HEADROOM_INSUFFICIENT')
             original_image=before['services']['worker']['image'];base_info=json.loads(run(['docker','image','inspect',original_image]))[0]
             container=json.loads(run(['docker','inspect',workers[0]['id']]))[0];require(container['Image']==base_info['Id'],'UPGRADE_RUNNING_IMAGE_MISMATCH');require(snapshot_memory_bytes(container['HostConfig']['Memory'])==memory_limit,'UPGRADE_CONTAINER_MEMORY_LIMIT_MISMATCH')
@@ -1602,7 +1615,9 @@ def upgrade_partitioned_unlocked(request):
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',image,'--import','tsx','--input-type=module','-e',check],timeout=30)
             require(b'partitioned-offline-ok' in output,'UPGRADE_OFFLINE_TEST_FAILED')
             inherited_v8_compaction=bool(inherited_heap_plan and inherited_heap_plan.get('v8HeapCompactionPreserve') is True and request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True)
-            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineMemoryEightGiB':eight_gib_pipeline,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,'v8HeapOomRepair':request.get('v8HeapOomRepair') is True,'inheritedV8HeapCompactionPlan':inherited_v8_compaction,**({'expectedOomPrefix':request.get('expectedOomPrefix')} if request.get('v8HeapOomRepair') else {}),**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
+            snapshot_eight_headroom=snapshot_host_memory() if verified_snapshot_eight_gib else 0
+            if verified_snapshot_eight_gib:require(snapshot_eight_headroom>=12*1024**3,'SNAPSHOT_EIGHT_GIB_HOST_HEADROOM_CHANGED')
+            progress={'version':1,'digest':digest,'phase':'prepared','backup':str(backup),'image':image,'baseImage':original_image,'baseImageId':base_info['Id'],'memoryLimitBytes':memory_limit,'pipelineMemoryEightGiB':eight_gib_pipeline,'snapshotMemoryEightGiBRepair':verified_snapshot_eight_gib,'snapshotMemoryEightGiBHeadroomBytes':snapshot_eight_headroom,'pipelineRepair':request.get('pipelineRepair') is True,'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'snapshotPressureRepair':request.get('snapshotPressureRepair') is True,'livePersistenceRepair':request.get('livePersistenceRepair') is True,'v8HeapOomRepair':request.get('v8HeapOomRepair') is True,'inheritedV8HeapCompactionPlan':inherited_v8_compaction,**({'expectedOomPrefix':request.get('expectedOomPrefix')} if request.get('v8HeapOomRepair') else {}),**({'heapBudgetPlan':inherited_heap_plan} if inherited_heap_plan else {})};save(progress)
         if request.get('measuredSnapshotApplyHeapRepair'):
             require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('snapshotMemoryRepair') is True,'MEASURED_HEAP_REQUEST_SCOPE_UNVERIFIED')
             plan=measured_snapshot_apply_heap_plan(progress,backup,states('worker'))
@@ -1816,7 +1831,7 @@ def upgrade_partitioned_unlocked(request):
         worker_states=states('worker')
         if progress['phase']=='prepared':
             emit(operation='cutover.aws',stage='partitioned_upgrade.old_worker.inspect',status='collected',workerStates=worker_states,backup=str(backup),posnetChanged=False)
-            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');verify_stopped_upgrade_worker(worker_states[0],request,'OLD_WORKER_EXIT_REQUIRES_REVIEW',True,progress.get('oomContainerId'));pre_stop_floor=pre_stop_memory_floor_gib(worker_states[0]['running'],progress.get('pipelineMemoryEightGiB') is True);require(snapshot_host_memory()>=pre_stop_floor*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
+            require(len(worker_states)==1,'OLD_WORKER_COUNT_UNVERIFIED');verify_stopped_upgrade_worker(worker_states[0],request,'OLD_WORKER_EXIT_REQUIRES_REVIEW',True,progress.get('oomContainerId'));pre_stop_floor=pre_stop_memory_floor_gib(worker_states[0]['running'],progress.get('pipelineMemoryEightGiB') is True,progress.get('snapshotMemoryEightGiBRepair') is True);require(snapshot_host_memory()>=pre_stop_floor*1024**3,'UPGRADE_HOST_MEMORY_HEADROOM_INSUFFICIENT')
             old_container=json.loads(run(['docker','inspect',worker_states[0]['id']]))[0];
             if request.get('snapshotMemoryRepair') and not worker_states[0]['running']:
                 require(old_container.get('HostConfig',{}).get('RestartPolicy',{}).get('Name') in ('no',''),'OOM_RESTART_POLICY_UNSAFE')
@@ -2039,11 +2054,12 @@ def upgrade_partitioned_unlocked(request):
                     if spool:require(snapshot_file_hash(spool)==spool_hash,'PRESERVED_SPOOL_CHANGED_DURING_REHEARSAL')
                     progress['projectionReadbackVerified']=True;progress['oomRestoreVerified']=True;progress['rehearsalCopyVerified']=True;progress['preservedSpoolRehearsed']=spool is not None;save(progress)
             if not (backup/'migration.before.json').exists():private(backup/'migration.before.json',migration_receipt.read_bytes())
-            require(snapshot_host_memory()>=(10 if progress.get('pipelineMemoryEightGiB') else 6)*1024**3,'HOST_HEADROOM_CHANGED_DURING_UPGRADE')
+            required_host_gib=12 if progress.get('snapshotMemoryEightGiBRepair') else 10 if progress.get('pipelineMemoryEightGiB') else 6
+            require(snapshot_host_memory()>=required_host_gib*1024**3,'HOST_HEADROOM_CHANGED_DURING_UPGRADE')
             if request.get('verifyOnly'):
                 require(request.get('snapshotMemoryRepair') and progress.get('oomRestoreVerified'),'INVALID_VERIFY_ONLY_PHASE')
                 emit(operation='cutover.aws',stage='partitioned_upgrade.persistence_verified',status='ok',offlineRestoreVerified=True,projectionReadbackVerified=progress.get('projectionReadbackVerified',False),projectionReadbackBudget=progress.get('projectionReadbackBudget'),projectionReadbackMemory=progress.get('projectionReadbackMemory'),rehearsalMemory=progress.get('rehearsalMemory'),rehearsalCopyVerified=progress.get('rehearsalCopyVerified',False),preservedSpoolRehearsed=progress.get('preservedSpoolRehearsed',False),inboxes=progress.get('inboxIntegrity'),workerStarted=False,backup=str(backup),posnetChanged=False);return 0
-            overlay=SECURE/('compose.partitioned-'+digest[:24]+('-heap3584' if partition_heap_mib(progress)==3584 else '')+('-mem8g' if progress.get('pipelineMemoryEightGiB') else '')+'.json');content=json.dumps({'services':{'worker':{'image':progress['image'],**({'mem_limit':'8g'} if progress.get('pipelineMemoryEightGiB') is True else {}),'environment':{'LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT':'true','LSPORTS_INPLAY_STREAMED_SNAPSHOT':'true',**({'NODE_OPTIONS':'--max-old-space-size='+str(partition_heap_mib(progress))} if request.get('snapshotMemoryRepair') else {})}}}}).encode()
+            overlay=SECURE/('compose.partitioned-'+digest[:24]+('-heap3584' if partition_heap_mib(progress)==3584 else '')+('-mem8g' if progress.get('pipelineMemoryEightGiB') else '-preserve8g' if progress.get('snapshotMemoryEightGiBRepair') else '')+'.json');content=json.dumps({'services':{'worker':{'image':progress['image'],**({'mem_limit':'8g'} if progress.get('pipelineMemoryEightGiB') is True else {}),'environment':{'LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT':'true','LSPORTS_INPLAY_STREAMED_SNAPSHOT':'true',**({'NODE_OPTIONS':'--max-old-space-size='+str(partition_heap_mib(progress))} if request.get('snapshotMemoryRepair') else {})}}}}).encode()
             if overlay.exists():require(overlay.read_bytes()==content,'UPGRADE_OVERLAY_CHANGED')
             else:private(overlay,content)
             candidate=partition_base(meta) if str(overlay) in meta.get('composeOverrides',[]) else partition_base(meta)+['-f',str(overlay)]
@@ -2053,6 +2069,7 @@ def upgrade_partitioned_unlocked(request):
             progress['phase']='configured';save(progress)
         if progress['phase']=='configured':
             stage='partitioned_upgrade.start';require(not any(c['running'] for c in states('worker')),'CONSUMER_ALREADY_PRESENT')
+            if progress.get('snapshotMemoryEightGiBRepair') is True:require(snapshot_host_memory()>=candidate_memory(progress)+4*1024**3,'SNAPSHOT_EIGHT_GIB_HOST_HEADROOM_CHANGED_BEFORE_START')
             started=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z');progress['startAt']=started
             migration.setdefault('partitionedUpgrades',[]).append({'digest':digest,'previousStartRequestedAtUTC':migration['startRequestedAtUTC'],'backup':str(backup)});migration['startRequestedAtUTC']=started
             temporary=SECURE/(receipt_path.name+'.migration.tmp');private(temporary,json.dumps(migration).encode());durable_replace(temporary,migration_receipt)
