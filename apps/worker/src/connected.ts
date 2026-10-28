@@ -92,8 +92,12 @@ export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'conne
   return !!snapshot&&!snapshot.completedAt&&Number.isFinite(Date.parse(snapshot.startedAt||''));
  });
 }
-export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=32768;
-export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=120000;
+// The SQLite inbox is the replay journal: rows stay FULL-durable and unretired
+// until this compacted full-state checkpoint has been fsynced and atomically
+// installed. Four processing windows per compaction amortize the measured
+// multi-gigabyte write without weakening inbox durability or its byte cap.
+export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=131072;
+export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=600000;
 // Preserve the same processing/FIFO barriers; expose which one is actually awaited.
 export async function snapshotApplyTurn<T>(processing:Promise<unknown>,state:Pick<TradeState,'exclusive'|'publicationMutation'>,apply:()=>T|Promise<T>,observe:(phase:string,elapsedMs:number)=>void,intervalMs=10000):Promise<T>{
  let phase='processing_queue',completed=false;const began=performance.now();const report=(stage:string)=>{try{observe(stage,Math.ceil(performance.now()-began));}catch{/* Instrumentation must not replace an application failure. */}};const timer=setInterval(()=>report(phase),intervalMs);timer.unref();
@@ -453,7 +457,7 @@ export async function session(
   signal.addEventListener("abort", abort, { once: true });
   let processing = Promise.resolve();let backgroundCommit:Promise<void>|undefined;let checkpointPending=0;
   const checkpointBatchThreshold=dependencies.checkpointBatchThreshold??1,checkpointBatchFlushMs=dependencies.checkpointBatchFlushMs??120000;
-  if(!Number.isSafeInteger(checkpointBatchThreshold)||checkpointBatchThreshold<1||checkpointBatchThreshold>32768||!Number.isSafeInteger(checkpointBatchFlushMs)||checkpointBatchFlushMs<1||checkpointBatchFlushMs>120000)throw Error('INVALID_CHECKPOINT_BATCH_POLICY');
+  if(!Number.isSafeInteger(checkpointBatchThreshold)||checkpointBatchThreshold<1||checkpointBatchThreshold>131072||!Number.isSafeInteger(checkpointBatchFlushMs)||checkpointBatchFlushMs<1||checkpointBatchFlushMs>600000)throw Error('INVALID_CHECKPOINT_BATCH_POLICY');
   let buffered: ConsumeMessage[] = [];
   let bufferingForSnapshot = false;
   let retireAfterFinalSave:(()=>void)|undefined;
@@ -586,7 +590,7 @@ export async function session(
       processing=processing.then(async()=>{
         drainScheduled=false;
         if(snapshotApplicationActive)return; // raw reception/SQLite ACK continue in the separate actor
-        while(!closed&&durable&&stageDelivery&&pendingAcks.length+checkpointPending>=32768){
+        while(!closed&&durable&&stageDelivery&&pendingAcks.length+checkpointPending>=checkpointBatchThreshold){
           // A full-snapshot validation keeps already received rows durable in
           // SQLite. Do not spin on an intentionally deferred checkpoint when
           // that bounded prefix reaches its limit; resume after the snapshot
@@ -597,7 +601,7 @@ export async function session(
           else {commitPending(true);if(backgroundCommit)await backgroundCommit;else {drainScheduled=false;return;}}
         }
         if(closed)return;
-        const messages=buffered.splice(0,durable&&stageDelivery?Math.min(4096,Math.max(1,32768-pendingAcks.length-checkpointPending)):durable?4096:100);
+        const messages=buffered.splice(0,durable&&stageDelivery?Math.min(4096,Math.max(1,checkpointBatchThreshold-pendingAcks.length-checkpointPending)):durable?4096:100);
         for(const msg of messages){
           await processMessage(msg,false);if(closed)break;
           if(durable&&stageDelivery){
