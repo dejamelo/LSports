@@ -5,6 +5,13 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_heap_probe_accepts_only_a_verified_clean_or_non_oom_stopped_worker(self):
+  check=NS['verified_stopped_pipeline_probe_exit']
+  self.assertTrue(check({'Running':False,'ExitCode':0,'OOMKilled':False},True))
+  self.assertTrue(check({'Running':False,'ExitCode':137,'OOMKilled':False},True))
+  for state,verified in (({'Running':False,'ExitCode':0,'OOMKilled':False},False),({'Running':True,'ExitCode':0,'OOMKilled':False},True),({'Running':False,'ExitCode':0,'OOMKilled':True},True),({'Running':False,'ExitCode':1,'OOMKilled':False},True)):
+   self.assertFalse(check(state,verified))
+
  def test_live_upgrade_binds_active_container_to_its_immutable_image_sources(self):
   installed={'apps/worker/src/connected.ts':'original-connected','packages/feed-store/src/index.ts':'original-index'}
   candidates={**installed,'packages/feed-store/src/indexed-feed.ts':'new-indexed-module'}

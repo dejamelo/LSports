@@ -341,6 +341,14 @@ def verify_budgeted_worker_runtime(progress,worker_id,inspected,image_id):
     require(configured.get('cgroupLimitBytes')==expected_memory and expected_heap*1024**2<=configured.get('effectiveHeapLimitProbeBytes',0)<=expected_memory-512*1024**2,'BUDGETED_HEAP_CONFIGURATION_MISMATCH')
     return {'nodeOptions':'--max-old-space-size='+str(expected_heap),'dockerMemoryLimitBytes':expected_memory,**configured,'probeIsSeparateProcess':True}
 
+def verified_stopped_pipeline_probe_exit(state,verified_stopped_recovery):
+    # The verified recovery handoff normally shuts the old worker down cleanly
+    # (exit 0). A bounded external stop can leave 137 without Docker OOM. In
+    # either case the recorded container identity/stop proof is still required
+    # by the caller before running this networkless, read-only image probe.
+    return (verified_stopped_recovery is True and state.get('Running') is False
+        and state.get('OOMKilled') is False and state.get('ExitCode') in (0,137))
+
 def existing_pipeline_heap_plan(worker,verified_existing_snapshot_profile=False,verified_stopped_recovery=False,expected_container_id=None):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
     if options=='--max-old-space-size=2560':return None
@@ -368,7 +376,7 @@ def existing_pipeline_heap_plan(worker,verified_existing_snapshot_profile=False,
                 measured=json.loads(run(['docker','exec',workers[0]['id'],'node','-e',probe],timeout=30))
             else:
                 state=live.get('State',{})
-                require(verified_stopped_recovery is True and state.get('Running') is False and state.get('ExitCode')==137 and state.get('OOMKilled') is False,'PIPELINE_STOPPED_HEAP_PROBE_EXIT_UNVERIFIED')
+                require(verified_stopped_pipeline_probe_exit(state,verified_stopped_recovery),'PIPELINE_STOPPED_HEAP_PROBE_EXIT_UNVERIFIED')
                 measured=json.loads(run(['docker','run','--rm','--network','none','--read-only','--memory','8589934592','--memory-swap','8589934592','--cpus','2','-e','NODE_OPTIONS='+options,'--entrypoint','node',live.get('Image'),'-e',probe],timeout=30))
             limit=measured.get('heapLimitBytes')
             require(type(limit) is int and 4608*1024**2<=limit<=8589934592-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
