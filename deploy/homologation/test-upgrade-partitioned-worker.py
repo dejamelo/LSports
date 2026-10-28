@@ -4,6 +4,22 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_current_full_recovery_receipt_requires_immutable_backup_hashes(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);secure=root/'secure';secure.mkdir(mode=0o700);backups=root/'backups';backups.mkdir(mode=0o700);backup=backups/'adl-partitioned-upgrade-receipt';backup.mkdir(mode=0o700)
+   names=['trade-feed.json','trade-feed.json.regular-checkpoint.json','trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite','trade-feed.json.snapshot-'+'a'*16+'.json','trade-feed.json.snapshot-'+'b'*16+'.json'];hashes={}
+   for name in names:
+    data=('preserved:'+name).encode();path=backup/name;path.write_bytes(data);path.chmod(0o600);hashes[name]=hashlib.sha256(data).hexdigest()
+   digest='a'*64;image='adl-worker-partitioned:'+digest[:24];receipt={'digest':digest,'image':image,'backup':str(backup),'phase':'start_requested','fullRecoveryVerified':True,'dataBackupHashes':hashes}
+   self.assertTrue(NS['verify_current_source_receipt'](receipt,image,digest,True,backups))
+   with self.assertRaises(Exception):NS['verify_current_source_receipt'](receipt,image,digest,False,backups)
+   corrupt=dict(receipt,dataBackupHashes={**hashes,names[0]:'0'*64})
+   with self.assertRaises(Exception):NS['verify_current_source_receipt'](corrupt,image,digest,True,backups)
+   incomplete=dict(receipt,dataBackupHashes={names[0]:hashes[names[0]]})
+   with self.assertRaises(Exception):NS['verify_current_source_receipt'](incomplete,image,digest,True,backups)
+   legacy={**receipt,'oomRestoreVerified':True,'dataBackupHashes':{}}
+   self.assertTrue(NS['verify_current_source_receipt'](legacy,image,digest,False,backups))
+
  def test_snapshot_checkpoint_patch_is_pinned_to_installed_image_digest_and_exact_files(self):
   names=NS['PARTITION_FILES'];old={name:'installed:'+name for name in names};candidate=dict(old)
   for name in ('apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','packages/contracts/src/index.ts'):candidate[name]+='\ncorrected'

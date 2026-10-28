@@ -30,6 +30,26 @@ def verify_full_recovery_sources(old_files,files,old_digest):
     snapshot=old_files['apps/worker/src/full-snapshot.ts']
     require('transportComplete=res.complete===true' in snapshot and 'if(!transportComplete)' in snapshot and 'transportBytes!==contentLengthBytes' in snapshot and 'Snapshot HTTP Content-Length mismatch' in snapshot,'FULL_RECOVERY_TRANSPORT_GUARD_MISSING')
 
+def verify_current_source_receipt(receipt,image,digest,full_recovery,backups_root):
+    require(receipt.get('digest')==digest and receipt.get('image')==image,'CURRENT_SOURCE_RECEIPT_IDENTITY_MISMATCH')
+    if receipt.get('oomRestoreVerified') is True:return True
+    # New full-recovery receipts use a distinct proof field. Accept that schema
+    # only when its immutable recovery backup is still present and every
+    # recorded data file independently matches its SHA-256. This keeps the old
+    # OOM-specific receipt requirement while allowing a verified full-recovery
+    # source; it never treats the offline full-recovery flag alone as proof.
+    require(full_recovery is True and receipt.get('fullRecoveryVerified') is True and
+            receipt.get('phase') in ('stopped','start_requested','running'),'CURRENT_SOURCE_RECOVERY_RECEIPT_UNVERIFIED')
+    backup_value=receipt.get('backup');require(isinstance(backup_value,str) and re.fullmatch(r'.*/adl-partitioned-upgrade-[A-Za-z0-9_-]{1,80}',backup_value),'CURRENT_SOURCE_BACKUP_PATH_UNVERIFIED')
+    backup=Path(backup_value);require(backup.parent==Path(backups_root) and backup.is_dir() and not backup.is_symlink() and backup.stat().st_uid==os.geteuid() and backup.stat().st_mode&0o077==0,'CURRENT_SOURCE_BACKUP_UNSAFE')
+    hashes=receipt.get('dataBackupHashes');required={'trade-feed.json','trade-feed.json.regular-checkpoint.json','trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite'}
+    require(isinstance(hashes,dict) and len(hashes)>=6 and required.issubset(hashes),'CURRENT_SOURCE_BACKUP_MANIFEST_INCOMPLETE')
+    for name,digest_value in hashes.items():
+        require(isinstance(name,str) and (name=='trade-feed.json' or re.fullmatch(r'trade-feed\.json(?:\.regular-checkpoint\.json|\.snapshot-[0-9a-f]{16}\.json|\.(?:prematch|inplay)\.inbox\.sqlite)(?:-(?:wal|shm))?',name)),'CURRENT_SOURCE_BACKUP_ENTRY_UNSAFE')
+        require(re.fullmatch('[0-9a-f]{64}',str(digest_value)) is not None,'CURRENT_SOURCE_BACKUP_HASH_INVALID')
+        path=backup/name;require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and snapshot_file_hash(path)==digest_value,'CURRENT_SOURCE_BACKUP_HASH_MISMATCH')
+    return True
+
 def verify_projection_resume_artifacts(backup,progress,image_info,name):
     require(isinstance(name,str) and re.fullmatch(r'projection-resume-[0-9]{8}T[0-9]{4}Z',name),'PROJECTION_RESUME_DIRECTORY_UNVERIFIED')
     resume=backup/name;require(resume.parent==backup and resume.is_dir() and not resume.is_symlink() and resume.stat().st_mode&0o077==0,'PROJECTION_RESUME_DIRECTORY_UNSAFE')
@@ -1653,7 +1673,7 @@ def upgrade_partitioned_unlocked(request):
                     emit(operation='cutover.aws',stage='partitioned_upgrade.identity_comparison',status='verified',checks={'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'v8HeapExitIdentity':True,'workerImageMatchesCompose':container['Image']==base_info['Id'],'workerStopped':workers[0].get('running') is False},workerStarted=False,workerRestarted=False,providerRequests=0,posnetChanged=False)
                 old_digest=(base_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch');require(re.fullmatch('[0-9a-f]{64}',str(old_digest)),'CURRENT_OOM_IMAGE_LABEL_UNVERIFIED')
                 old_receipt=SECURE/('partitioned-upgrade-'+old_digest[:24]+'.json');require(old_receipt.is_file() and not old_receipt.is_symlink() and old_receipt.stat().st_uid==os.geteuid() and old_receipt.stat().st_mode&0o077==0,'CURRENT_OOM_SOURCE_RECEIPT_MISSING')
-                old=json.loads(old_receipt.read_bytes());require(old.get('digest')==old_digest and old.get('image')==original_image and old.get('oomRestoreVerified') is True,'CURRENT_OOM_SOURCE_RECEIPT_UNVERIFIED')
+                old=json.loads(old_receipt.read_bytes());verify_current_source_receipt(old,original_image,old_digest,request.get('fullRecovery') is True,BACKUPS)
                 export="const fs=require('node:fs');const names="+json.dumps(sorted(files))+";console.log(JSON.stringify(Object.fromEntries(names.map(n=>[n,fs.readFileSync('/app/'+n,'utf8')]))))"
                 old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',original_image,'-e',export],timeout=30))
                 if request.get('snapshotCheckpointMemoryRepair'):
