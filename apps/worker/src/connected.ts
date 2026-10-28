@@ -867,6 +867,11 @@ export async function session(
             },apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
             requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
+            // The snapshot is now fully applied and its fixture set finalized.
+            // Release queued persistence before the finite inbox handoff: that
+            // handoff may need save() to retire its durable prefix, so keeping
+            // this gate until after the handoff creates a wait cycle.
+            setSnapshotPersistenceDeferred(state,false,pkg.lane);
           }else if(lane==='prematch'&&api.snapshotPartitioned){
             regularSnapshotReady=false;state.set(lane,{recoveryProgress:{...state.connections[lane].recoveryProgress!,regularSnapshotReady:false}});
             let inventory=new Set<number>();

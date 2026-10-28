@@ -970,6 +970,24 @@ test('capacity pressure drains the durable inbox before snapshot and between app
  assert.equal(acks,2);assert.equal(staged,2);assert.equal(paused,false);
 });
 
+test('snapshot finalization releases persistence before handoff commits its durable prefix',{timeout:5000},async()=>{
+ const state=new TradeState(),abort=new AbortController();let deliver:(m:ConsumeMessage)=>void=()=>{},acks=0,persisted=0,writes=0;
+ const msg={content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'handoff-after-snapshot',ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'1',Price:'2.8',Status:1}]}]}]}})),properties:{headers:{}},fields:{inboxId:1,inboxReceived:Date.now(),redelivered:false}} as unknown as ConsumeMessage;
+ const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(_q:string,cb:typeof deliver){deliver=cb;return{consumerTag:'durable-handoff'};},stage(){},ack(){assert.equal(persisted,1,'handoff row must be captured before its durable ACK');acks++;},nack(){assert.fail('durable handoff row must remain recoverable');}});
+ const connection=Object.assign(new EventEmitter(),{async activateTransport(){},async createChannel(){return channel;},async close(){connection.emit('close');},quiesce(){}});
+ const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',port:5672,tls:false,queue:'_4511_'};
+ const save=coalescedPersistence(async()=>{writes++;persisted=state.feed().coverage?.prematch.messages??0;if(state.connections.prematch.phase==='connected')setTimeout(()=>abort.abort(),0);},()=>waitForSnapshotPersistence(state));
+ const api:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true,consumers:[],messagesPerSecond:0,numberMessagesInQueue:0};},async snapshot(){assert.fail('full snapshot path expected');},async catalog(){return[];},async snapshotFull(sink){
+  sink.progress?.({stage:'waiting_http',bytes:0,validatedRows:0,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  sink.progress?.({stage:'apply',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  deliver(msg);
+  await sink.apply({fixtureId:9,fixture:{status:1,sport:{name:'Football'}},markets:[]},Date.now());
+  return{ids:new Set([9]),rows:1,bytes:100};
+ }};
+ await session(pkg,{packages:[pkg],snapshotUrl:'http://isolated',customersUrl:'http://isolated',recoveryMs:300000,staleMs:90000},state,save,abort.signal,{clientFactory:()=>api,connect:(async()=>{throw Error('durable path expected');}) as any,durableConnect:(async()=>connection) as any},'/isolated/handoff.sqlite');
+ assert.equal(acks,1);assert.ok(writes>=2);assert.equal(state.connections.prematch.fullSnapshot?.completedAt!==undefined,true);
+});
+
 test('timestamp recovery reports parser stages and defers durable checkpoints only for validated apply',{timeout:10000},async()=>{
  const {inboxCheckpointDeferredDuringSnapshot}=await import('./connected.js');
  const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'unused',port:5672,tls:false,queue:'unused'};
