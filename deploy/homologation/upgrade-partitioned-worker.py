@@ -19,6 +19,17 @@ def verified_existing_snapshot_memory_profile(proof,worker,memory_limit):
     budget=proof.get('projectionReadbackBudgetBytes')
     return proof.get('status')=='ok' and all(proof.get(key) is True for key in ('offlineRestoreVerified','projectionReadbackVerified','rehearsalCopyVerified','preservedSpoolRehearsed')) and type(heap_limit) is int and type(heap_peak) is int and heap_limit-heap_peak>=512*1024**2 and type(rss_peak) is int and rss_peak<memory_limit and proof.get('readbackHeapLimitBytes')==heap_limit and type(budget) is int and budget>0 and memory_limit==8589934592 and worker.get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608'
 
+def verify_full_recovery_sources(old_files,files,old_digest):
+    require(set(old_files)==PARTITION_FILES and set(files)==PARTITION_FILES,'FULL_RECOVERY_SOURCE_MANIFEST_MISMATCH')
+    installed_digest=hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    require(installed_digest==old_digest,'FULL_RECOVERY_INSTALLED_SOURCE_DIGEST_MISMATCH')
+    changed={name for name in files if files[name]!=old_files[name]}
+    require(changed=={'apps/worker/src/connected.ts'},'FULL_RECOVERY_PATCH_SCOPE_UNVERIFIED')
+    connected=files['apps/worker/src/connected.ts']
+    require("lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.stage==='snapshot'&&c.recoveryProgress.regularSnapshotReady===false)" in connected,'FULL_RECOVERY_PROJECTION_DEFER_GUARD_UNVERIFIED')
+    snapshot=old_files['apps/worker/src/full-snapshot.ts']
+    require('transportComplete=res.complete===true' in snapshot and 'if(!transportComplete)' in snapshot and 'transportBytes!==contentLengthBytes' in snapshot and 'Snapshot HTTP Content-Length mismatch' in snapshot,'FULL_RECOVERY_TRANSPORT_GUARD_MISSING')
+
 def verify_projection_resume_artifacts(backup,progress,image_info,name):
     require(isinstance(name,str) and re.fullmatch(r'projection-resume-[0-9]{8}T[0-9]{4}Z',name),'PROJECTION_RESUME_DIRECTORY_UNVERIFIED')
     resume=backup/name;require(resume.parent==backup and resume.is_dir() and not resume.is_symlink() and resume.stat().st_mode&0o077==0,'PROJECTION_RESUME_DIRECTORY_UNSAFE')
@@ -1632,8 +1643,8 @@ def upgrade_partitioned_unlocked(request):
             # image-only probe instead.
             source_command=(['docker','exec',workers[0]['id'],'node','-e',probe] if workers[0].get('running') and workers[0].get('id') else ['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',original_image,'-e',probe])
             hashes=json.loads(run(source_command,timeout=30))
-            if request.get('liveOomRepair') or request.get('livePersistenceRepair'):
-                identity_proof=verify_current_worker_identity(workers[0],request,original_image)
+            if request.get('liveOomRepair') or request.get('livePersistenceRepair') or request.get('fullRecovery'):
+                identity_proof='verified_full_recovery_source' if request.get('fullRecovery') is True else verify_current_worker_identity(workers[0],request,original_image)
                 if identity_proof=='verified_v8_heap_exit':
                     emit(operation='cutover.aws',stage='partitioned_upgrade.identity_comparison',status='verified',checks={'snapshotMemoryRepair':request.get('snapshotMemoryRepair') is True,'v8HeapExitIdentity':True,'workerImageMatchesCompose':container['Image']==base_info['Id'],'workerStopped':workers[0].get('running') is False},workerStarted=False,workerRestarted=False,providerRequests=0,posnetChanged=False)
                 old_digest=(base_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch');require(re.fullmatch('[0-9a-f]{64}',str(old_digest)),'CURRENT_OOM_IMAGE_LABEL_UNVERIFIED')
@@ -1660,6 +1671,8 @@ def upgrade_partitioned_unlocked(request):
                 elif request.get('snapshotPressureRepair'):
                     require(request.get('livePersistenceRepair') is True and request.get('liveOomRepair') is not True,'PRESSURE_REPAIR_REQUIRES_VERIFIED_LIVE_WORKER')
                     verify_live_snapshot_pressure_sources(old_files,files,old_digest)
+                elif request.get('fullRecovery'):
+                    verify_full_recovery_sources(old_files,files,old_digest)
                 else:verify_live_oom_sources(old_files,files,old_digest)
             else:require(hashes==request['baseHashes'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH')
             backup=Path(tempfile.mkdtemp(prefix='adl-partitioned-upgrade-',dir=BACKUPS));os.chmod(backup,0o700)

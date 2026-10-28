@@ -10,7 +10,7 @@ import unittest
 
 SOURCE=Path(__file__).with_name('upgrade-partitioned-worker.py')
 tree=ast.parse(SOURCE.read_text())
-selected={'partition_memory','partition_heap_mib','candidate_memory','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime','existing_pipeline_heap_plan','pre_stop_copy_files','verified_existing_snapshot_memory_profile'}
+selected={'partition_memory','partition_heap_mib','candidate_memory','measured_snapshot_retry_heap_plan','verify_budgeted_worker_runtime','existing_pipeline_heap_plan','pre_stop_copy_files','verified_existing_snapshot_memory_profile','verify_full_recovery_sources'}
 functions=[node for node in tree.body if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in selected]
 
 def require(ok,reason):
@@ -27,6 +27,7 @@ def summary(_backup,_name):return {'signals':['node_heap_exhausted']}
 def host_memory():return 12*1024**3
 
 namespace={'require':require,'partition_memory':partition_memory,'read_tail':read_tail,'rehearsal_heap_evidence':rehearse,'oom_restore_log_summary':summary,'snapshot_host_memory':host_memory,'json':json,'os':os,'re':re,'hashlib':hashlib,'copy':copy,'snapshot_memory_bytes':lambda value:value}
+namespace['PARTITION_FILES']={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'}
 exec(compile(ast.Module(body=functions,type_ignores=[]),str(SOURCE),'exec'),namespace)
 
 class MeasuredSnapshotRetryHeap(unittest.TestCase):
@@ -43,6 +44,15 @@ class MeasuredSnapshotRetryHeap(unittest.TestCase):
         self.assertTrue(namespace['verified_existing_snapshot_memory_profile'](proof,worker,8589934592))
         self.assertFalse(namespace['verified_existing_snapshot_memory_profile']({**proof,'maxSampledHeapBytes':4700000000},worker,8589934592))
         self.assertFalse(namespace['verified_existing_snapshot_memory_profile'](proof,{'environment':{'NODE_OPTIONS':'--max-old-space-size=6144'}},8589934592))
+    def test_full_recovery_accepts_only_the_exact_projection_gate_delta_from_installed_image(self):
+        names={'apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','apps/worker/src/connected.ts','apps/worker/src/connection-closer.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/provider.ts','apps/worker/src/snapshot-scheduler.ts','apps/worker/src/state.ts','apps/worker/src/messages.ts','apps/worker/src/league-fixtures.ts','apps/worker/src/partitioned-snapshot.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'}
+        old={name:'unchanged' for name in names};old['apps/worker/src/full-snapshot.ts']='transportComplete=res.complete===true; if(!transportComplete) reject(); transportBytes!==contentLengthBytes; Snapshot HTTP Content-Length mismatch'
+        old['apps/worker/src/connected.ts']='previous verified connected implementation'
+        new=dict(old);new['apps/worker/src/connected.ts']="lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.stage==='snapshot'&&c.recoveryProgress.regularSnapshotReady===false)"
+        digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        namespace['verify_full_recovery_sources'](old,new,digest)
+        with self.assertRaises(RuntimeError):namespace['verify_full_recovery_sources'](old,{**new,'apps/worker/src/state.ts':'unrelated'},digest)
+        with self.assertRaises(RuntimeError):namespace['verify_full_recovery_sources'](old,new,'0'*64)
     def test_measured_heap_failure_selects_4608_mib_inside_same_six_gib_cgroup(self):
         plan=namespace['measured_snapshot_retry_heap_plan'](self.progress,self.backup,self.worker)
         self.assertEqual(plan['oldSpaceMiB'],4608);self.assertEqual(plan['outsideOldSpaceBytes'],1610612736)
