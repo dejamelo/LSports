@@ -1,20 +1,20 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {setTimeout as sleep} from 'node:timers/promises';
-import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,deferPublicProjectionDuringSnapshot,heartbeatPublicationDue,durableInboxBacklog,shouldDeferRoutineSnapshot,checkpointBatchThresholdForLane,INPLAY_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
+import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,deferPublicProjection,heartbeatPublicationDue,durableInboxBacklog,shouldDeferRoutineSnapshot,checkpointBatchThresholdForLane,INPLAY_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
 const pkg={lane:'prematch',packageId:4511,username:'test',password:'test',hostname:'unused',queue:'unused',vhost:'unused',tls:false,port:5672} as any;
 test('offline batch policy matches the controlled PreMatch compaction bounds',()=>{assert.equal(PREMATCH_CHECKPOINT_BATCH_THRESHOLD,131072);assert.equal(PREMATCH_CHECKPOINT_BATCH_FLUSH_MS,600000);});
 test('InPlay full checkpoint cadence does not rewrite the multi-GB state every 32 control rows',()=>{assert.equal(INPLAY_CHECKPOINT_BATCH_THRESHOLD,4096);assert.equal(checkpointBatchThresholdForLane('prematch'),131072);assert.equal(checkpointBatchThresholdForLane('inplay'),4096);});
 test('initial dual-feed recovery defers the full public projection until a baseline exists',async()=>{
  const state=new TradeState(),startedAt=new Date().toISOString();
  for(const lane of ['prematch','inplay'] as const)state.set(lane,{phase:'recovering',session:{id:`initial-${lane}`,startedAt},recoveryProgress:{stage:'snapshot',startedAt,regularSnapshotReady:false}});
- assert.equal(deferPublicProjectionDuringSnapshot(state),true);
+ assert.equal(deferPublicProjection(state),true);
  let projectionBuilt=false;
- await checkpointBeforeProjection(async()=>({saved:true}),()=>{projectionBuilt=true;return {};},deferPublicProjectionDuringSnapshot(state));
+ await checkpointBeforeProjection(async()=>({saved:true}),()=>{projectionBuilt=true;return {};},deferPublicProjection(state));
  assert.equal(projectionBuilt,false,'the first session save must not rebuild the multi-GB public graph before either snapshot');
  for(const lane of ['prematch','inplay'] as const)state.set(lane,{recoveryProgress:{stage:'waiting_retry',startedAt,regularSnapshotReady:false}});
- assert.equal(deferPublicProjectionDuringSnapshot(state),true,'rate-limited retries must keep the stale public projection gated while both lanes lack a validated baseline');
+ assert.equal(deferPublicProjection(state),true,'rate-limited retries must keep the stale public projection gated while both lanes lack a validated baseline');
  state.set('inplay',{phase:'connected',recoveryProgress:{stage:'idle',startedAt,regularSnapshotReady:true}});
- assert.equal(deferPublicProjectionDuringSnapshot(state),false,'a healthy feed keeps publishing while only the other lane is recovering');
+ assert.equal(deferPublicProjection(state),false,'a healthy feed keeps publishing while only the other lane is recovering');
 });
 test('durable backlog reserves full-state serialization for retireable checkpoint batches',()=>{
  const state=new TradeState();state.set('prematch',{ingressProgress:{received:20,acknowledged:0,processed:20,backlog:20,bytes:0,oldestAgeMs:0,receivedBytes:0,lastReceiveAt:null,lastAckAt:null,durableCommitMs:0,rssBytes:0,ingressMaxEventLoopDelayMs:0,metricWindowStartUTC:'',metricWindowEndUTC:'',headersByType:{}} as any});
@@ -62,18 +62,27 @@ test('durable inbox remains received but unprocessed while a full snapshot is va
  }finally{release();abort.abort();await task.catch(()=>{});await actor?.close();await rm(dir,{recursive:true,force:true});}
 });
 test('only active snapshot mutation defers public projection; a recovering lane remains individually blocked',()=>{
- const state=new TradeState();assert.equal(deferPublicProjectionDuringSnapshot(state),false);
+ const state=new TradeState();assert.equal(deferPublicProjection(state),false);
  const recoveryAt=new Date().toISOString();state.set('prematch',{phase:'recovering',session:{id:'isolated-recovery',startedAt:recoveryAt},recoveryProgress:{stage:'snapshot',startedAt:recoveryAt,regularSnapshotReady:false}});
- assert.equal(deferPublicProjectionDuringSnapshot(state),false,'the recovering lane is unavailable by phase and must not stall the other feed');
+ assert.equal(deferPublicProjection(state),false,'the recovering lane is unavailable by phase and must not stall the other feed');
  state.set('prematch',{session:undefined,recoveryProgress:undefined,phase:'starting'});
- state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
- state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
- state.set('prematch',{lastSnapshotErrorAt:new Date().toISOString()});assert.equal(deferPublicProjectionDuringSnapshot(state),false,'a rejected request before apply releases the projection gate');
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjection(state),true);
+ state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});assert.equal(deferPublicProjection(state),true);
+ state.set('prematch',{lastSnapshotErrorAt:new Date().toISOString()});assert.equal(deferPublicProjection(state),false,'a rejected request before apply releases the projection gate');
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'apply',bytes:10,validatedRows:1,appliedRows:1,lastProgressAt:new Date().toISOString()}});
- assert.equal(deferPublicProjectionDuringSnapshot(state),true);
- state.set('prematch',{fullSnapshot:{...state.connections.prematch.fullSnapshot!,stage:'complete'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
+ assert.equal(deferPublicProjection(state),true);
+ state.set('prematch',{fullSnapshot:{...state.connections.prematch.fullSnapshot!,stage:'complete'}});assert.equal(deferPublicProjection(state),true);
  state.set('prematch',{fullSnapshot:{...state.connections.prematch.fullSnapshot!,completedAt:new Date().toISOString()}});
- assert.equal(deferPublicProjectionDuringSnapshot(state),false);
+ assert.equal(deferPublicProjection(state),false);
+});
+test('stale durable backlog defers the masked public projection but a fresh nonempty tail does not',()=>{
+ const state=new TradeState(),startedAt=new Date().toISOString();
+ for(const lane of ['prematch','inplay'] as const)state.set(lane,{phase:'connected',recoveryProgress:{stage:'idle',startedAt,regularSnapshotReady:true}});
+ const ingress={received:1000,acknowledged:1000,processed:900,checkpointed:800,backlog:200,processingBacklog:100,oldestAgeMs:7000,oldestProcessingAgeMs:7000,bytes:0,receivedBytes:0,lastReceiveAt:null,lastAckAt:null,durableCommitMs:0,rssBytes:0,ingressMaxEventLoopDelayMs:0,metricWindowStartUTC:'',metricWindowEndUTC:'',headersByType:{}};
+ state.set('prematch',{ingressProgress:ingress as any});
+ assert.equal(deferPublicProjection(state),true,'all selections are already masked after the five-second freshness limit');
+ state.set('prematch',{ingressProgress:{...ingress,oldestProcessingAgeMs:5000} as any});
+ assert.equal(deferPublicProjection(state),false,'publication resumes at the freshness boundary without waiting for backlog zero');
 });
 for(const fail of [false,true])test(`queued checkpoint reserves the complete applied prefix before next capture; ${fail?'failed persistence retains all rows':'commit retires only durable captured rows'}`,{timeout:25000},async()=>{
  const dir=await mkdtemp(join(tmpdir(),'adl-capture-batch-')),path=join(dir,'feed.json'),dbPath=path+'.prematch.inbox.sqlite',state=new TradeState(),abort=new AbortController();

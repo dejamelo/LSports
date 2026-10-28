@@ -107,8 +107,19 @@ export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkp
 // projection after every private inbox checkpoint needlessly holds
 // publicationDone and starves snapshot mutations. The atomic regular sidecar
 // still advances before ACK; the verified snapshot triggers the next publish.
-export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'connections'>){
+export function deferPublicProjection(state:Pick<TradeState,'connections'>){
  const lanes=Object.values(state.connections);
+ // The public availability mask disables every selection once an unprocessed
+ // durable row is older than the same five-second freshness bound. Rewriting
+ // the full multi-gigabyte public projection in that state cannot publish
+ // usable odds and blocks the event loop needed to drain the inbox. Keep the
+ // private checkpoint path running, but resume public writes as soon as the
+ // oldest pending row is fresh; this does not require an empty inbox.
+ if(lanes.some(connection=>{
+  const ingress=connection.ingressProgress;
+  return !!ingress&&(ingress.processingBacklog??ingress.backlog)>0&&
+   (ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000;
+ }))return true;
  // The first save inside session() happens before recover() marks fullSnapshot.
  // When BOTH feeds are awaiting their new baselines there is no healthy lane
  // whose public updates need this multi-GB projection. Keep the previous public
@@ -270,7 +281,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         memoryStage('capture');
         const {regular,...saved}=streamCheckpoint(stable);
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();memoryStage('regular_checkpoint');
-        const deferProjection=deferPublicProjectionDuringSnapshot(stable);
+        const deferProjection=deferPublicProjection(stable);
         const durable=await checkpointBeforeProjection(
           ()=>persistRegularCheckpoint(path,stable,markStage),
           ()=>{markStage('projection.build');const feed=stable.projection(Date.now(),false);markStage('projection.availability');const capturedBlocks=state.availabilityBlocks();
