@@ -295,7 +295,7 @@ export async function run(args){
      repairOptions.snapshotMemoryEightGiBRepair=true;
      repairOptions.snapshotMemorySourceBackup=ledger.steps.throughput_image?.result?.backup;
      const stoppedOom=pre.awsWorkerContainers?.filter(c=>c.name==='/adl-homologation-worker-1'&&c.state==='exited'&&c.exitCode===137&&c.oomKilled===true);
-     if(stoppedOom?.length!==1||!/^([0-9a-f]{12,63})$/.test(stoppedOom[0].id||''))throw Error('SNAPSHOT_OOM_IDENTITY_CHANGED');
+     if(stoppedOom?.length!==1||!/^([0-9a-f]{64})$/.test(stoppedOom[0].id||''))throw Error('SNAPSHOT_OOM_IDENTITY_CHANGED');
      repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=stoppedOom[0].id.slice(0,12);repairOptions.snapshotCheckpointMemoryRepair=true;
     }
     if(snapshotMemoryRepair&&process.env.ADL_CHECKPOINT_REPAIR_BACKUP){const b=process.env.ADL_CHECKPOINT_REPAIR_BACKUP;if(snapshotMemoryEightGiB||!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(b)||process.env.ADL_RESUME_BACKUP)throw Error('DERIVED_REPAIR_BACKUP_UNVERIFIED');repairOptions.checkpointRepairBackup=b;}
