@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('8 GiB stopped-worker recovery distinguishes kernel and V8 OOM by exact worker identity',()=>{
  const base={name:'/adl-homologation-worker-1',state:'exited',id:'a'.repeat(64)};
@@ -19,6 +19,19 @@ test('snapshot memory recovery selects only a backup with verified restore and p
  assert.equal(verifiedSnapshotMemorySourceBackup(ledger),verified);
  assert.equal(verifiedSnapshotMemorySourceBackup({steps:{snapshot_memory_data:{status:'ok',result:{backup:verified,offlineRestoreVerified:true,projectionReadbackVerified:false}}}}),undefined);
  assert.equal(verifiedSnapshotMemorySourceBackup({steps:{snapshot_memory_data:{status:'ok',result:{backup:'/tmp/untrusted',offlineRestoreVerified:true,projectionReadbackVerified:true}}}}),undefined);
+});
+test('an installed 8 GiB profile is reusable only with its complete measured recovery proof',()=>{
+ const model={memoryLimitBytes:'8589934592',gates:{capacityApproved:true,macStopped:true,notBeforeConfigured:true}};
+ const result={status:'ok',offlineRestoreVerified:true,projectionReadbackVerified:true,rehearsalCopyVerified:true,preservedSpoolRehearsed:true,
+  rehearsalMemory:{effectiveHeapLimitBytes:5033164800,maxSampledHeapBytes:4374513640,maxObservedRSSBytes:4951400448},
+  projectionReadbackMemory:{effectiveHeapLimitBytes:5033164800},projectionReadbackBudget:{budgetBytes:335544320}};
+ const ledger={steps:{snapshot_memory_data:{status:'ok',result}}};
+ assert.equal(verifiedInstalledSnapshotMemoryProfile(ledger,model),true);
+ assert.equal(verifiedInstalledSnapshotMemoryProfile(ledger,{...model,memoryLimitBytes:'6442450944'}),false);
+ for(const change of [{projectionReadbackVerified:false},{rehearsalCopyVerified:false},{preservedSpoolRehearsed:false},{rehearsalMemory:{...result.rehearsalMemory,maxSampledHeapBytes:4800000000}},{rehearsalMemory:{...result.rehearsalMemory,maxObservedRSSBytes:9000000000}}]){
+  assert.equal(verifiedInstalledSnapshotMemoryProfile({steps:{snapshot_memory_data:{status:'ok',result:{...result,...change}}}},model),false);
+ }
+ assert.equal(verifiedInstalledSnapshotMemoryProfile({steps:{snapshot_memory_data:{status:'pending',result}}},model),false);
 });
 test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
  assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));

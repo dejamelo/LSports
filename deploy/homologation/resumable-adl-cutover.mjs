@@ -16,6 +16,15 @@ export function acceptedWorkerMemoryLimits({mode,snapshotMemoryRepair,pipelineRe
  if(snapshotMemoryRepair&&v8HeapOomRepair)return ['6442450944'];
  return ['4294967296'];
 }
+export function verifiedInstalledSnapshotMemoryProfile(ledger,model){
+ const result=ledger?.steps?.snapshot_memory_data?.status==='ok'?ledger.steps.snapshot_memory_data.result:undefined;
+ const memory=result?.rehearsalMemory,readback=result?.projectionReadbackMemory,budget=result?.projectionReadbackBudget;
+ const limit=Number(model?.memoryLimitBytes),heapLimit=Number(memory?.effectiveHeapLimitBytes),heapPeak=Number(memory?.maxSampledHeapBytes),rssPeak=Number(memory?.maxObservedRSSBytes);
+ return !!result&&result.status==='ok'&&result.offlineRestoreVerified===true&&result.projectionReadbackVerified===true&&result.rehearsalCopyVerified===true&&result.preservedSpoolRehearsed===true&&
+  model?.gates?.capacityApproved===true&&model?.gates?.macStopped===true&&model?.gates?.notBeforeConfigured===true&&limit===8589934592&&
+  Number.isSafeInteger(heapLimit)&&Number.isSafeInteger(heapPeak)&&heapLimit-heapPeak>=512*1024**2&&Number.isSafeInteger(rssPeak)&&rssPeak<limit&&
+  Number.isSafeInteger(Number(readback?.effectiveHeapLimitBytes))&&Number(readback.effectiveHeapLimitBytes)===heapLimit&&Number.isSafeInteger(Number(budget?.budgetBytes))&&Number(budget.budgetBytes)>0;
+}
 export function snapshotMemoryHostHeadroomApproved(model,availableMemoryBytes){
  const limit=Number(model?.memoryLimitBytes);
  return Number.isSafeInteger(limit)&&Number.isSafeInteger(availableMemoryBytes)&&limit===8589934592&&availableMemoryBytes>=limit+4*1024**3;
@@ -205,8 +214,10 @@ export async function run(args){
   stage='remote_consumer_gate';const pre=await remote('preflight');
   const pipelineMemoryEightGiB=process.env.ADL_PIPELINE_MEMORY_EIGHT_GIB==='1';
   const snapshotMemoryEightGiB=snapshotMemoryRepair&&process.env.ADL_SNAPSHOT_MEMORY_KEEP_EIGHT_GIB==='1';
+  const preserveVerifiedEightGiB=verifiedInstalledSnapshotMemoryProfile(ledger,pre.workerModel);
   const acceptedMemory=acceptedWorkerMemoryLimits({mode:args[4],snapshotMemoryRepair,pipelineRepair:process.env.ADL_PIPELINE_REPAIR==='1',livePersistenceRepair:process.env.ADL_LIVE_PERSISTENCE_REPAIR==='1',v8HeapOomRepair:process.env.ADL_LIVE_V8_HEAP_OOM_REPAIR==='1',pipelineMemoryEightGiB,snapshotMemoryEightGiB});
-  if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!acceptedMemory.includes(String(pre.workerModel?.memoryLimitBytes))||!workerCapacityApproved(pre.workerModel,{repairSnapshot:args[4]==='--repair-snapshot',pipelineMemoryEightGiB,snapshotMemoryEightGiB}))throw Error('REMOTE_API_OR_CAPACITY_UNVERIFIED');
+  if(preserveVerifiedEightGiB&&!acceptedMemory.includes('8589934592'))acceptedMemory.push('8589934592');
+  if(pre.status!=='collected'||pre.errors?.length||pre.controlHttpStatus!==200||!pre.providerCredentials?.primaryPresent||pre.providerCredentials?.fileMode!=='0o600'||pre.providerCredentials?.directoryMode!=='0o700'||!acceptedMemory.includes(String(pre.workerModel?.memoryLimitBytes))||!workerCapacityApproved(pre.workerModel,{repairSnapshot:args[4]==='--repair-snapshot',pipelineMemoryEightGiB,snapshotMemoryEightGiB:snapshotMemoryEightGiB||preserveVerifiedEightGiB}))throw Error('REMOTE_API_OR_CAPACITY_UNVERIFIED');
   if(snapshotMemoryEightGiB&&!snapshotMemoryHostHeadroomApproved(pre.workerModel,pre.capacity?.availableMemoryBytes))throw Error('SNAPSHOT_EIGHT_GIB_HOST_HEADROOM_INSUFFICIENT');
   if(ledger.steps.local_exit?.status!=='ok'&&pre.awsWorkerContainers?.some(c=>c.running))throw Error('AWS_CONSUMER_PRESENT_BEFORE_MAC_EXIT');
   if(['--validate-only','--repair-snapshot','--snapshot-report','--startup-report','--snapshot-validation-report','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery','--partitioned-recovery','--inventory-repair','--distribution-repair'].includes(args[4])){
