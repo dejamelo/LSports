@@ -195,6 +195,26 @@ class Cutover(unittest.TestCase):
     feed['connections']['prematch']['recoveryProgress']['regularSnapshotReady']=False
     self.assertEqual(check()['status'],'recovering')
    finally:NS['states']=prior;NS['feed_evidence']=prior_evidence
+ def test_cutover_status_prefers_readonly_index_metadata_to_stale_multigigabyte_checkpoint(self):
+  with tempfile.TemporaryDirectory() as temporary:
+   folder=Path(temporary);now=NS['datetime'].datetime.now(NS['datetime'].timezone.utc).isoformat().replace('+00:00','Z')
+   (folder/'trade-feed.json').write_text(json.dumps({'mode':'connected','updatedAt':'2026-01-01T00:00:00Z','connections':{},'events':[]}))
+   (folder/'trade-feed.public.sqlite').write_bytes(b'fixture-index')
+   lane={'phase':'connected','lastSnapshotAt':now,'session':{'startedAt':now},'recoveryProgress':{'regularSnapshotReady':True},'consumerProgress':{'active':True,'acknowledgedMessages':12,'lastAckAt':now}}
+   indexed={'revision':9,'updatedAt':now,'connections':{'prematch':copy.deepcopy(lane),'inplay':copy.deepcopy(lane)},'coverage':{},'counts':[{'lane':'prematch','events':11},{'lane':'inplay','events':2}],
+    'marketCount':27,'databaseBytes':1234,'pages':{name:{'events':2,'markets':3,'pricedSelections':4,'selectableSelections':2,'pagesQueried':1,'hasMore':True} for name in ('prematch','inplay')}}
+   old={key:NS.get(key) for key in ('states','feed_evidence','indexed_publication_status','diagnostic_checkpoint','diagnostic_available_memory_bytes')}
+   NS.update(states=lambda service:[{'running':True}],feed_evidence=lambda *args:{},indexed_publication_status=lambda directory:indexed,diagnostic_checkpoint=lambda *args:(_ for _ in ()).throw(AssertionError('stale checkpoint scanned')),diagnostic_available_memory_bytes=lambda:2*1024**3)
+   try:
+    output=io.StringIO()
+    with contextlib.redirect_stdout(output):NS['cutover_status'](folder,now)
+    result=json.loads(output.getvalue().splitlines()[-1])
+    self.assertEqual(result['status'],'snapshots_ready');self.assertEqual(result['events'],13);self.assertEqual(result['markets'],27)
+    self.assertEqual(result['checkpointReader']['reader'],'indexed_sqlite_readonly_paged');self.assertEqual(result['checkpointReader']['sqliteRevision'],9)
+    self.assertTrue(result['iframeAuthenticated'] is False)
+   finally:
+    for key,value in old.items():
+     if value is not None:NS[key]=value
  @unittest.skipUnless(os.geteuid() in (0,1000),'fixture requires UID 1000 or root')
  def test_import_start_preserves_existing_overrides_only_starts_worker_and_obeys_cooldown(self):
   with tempfile.TemporaryDirectory() as temporary:

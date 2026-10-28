@@ -834,6 +834,30 @@ def diagnostic_checkpoint(path,on_event):
         return metadata,count,initial.st_size
     finally:os.close(fd)
 
+def indexed_publication_status(directory):
+    database=directory/'trade-feed.public.sqlite'
+    if not database.exists():return None
+    require(database.is_file() and not database.is_symlink() and 0<database.stat().st_size<=64*1024**3,'INDEXED_FEED_DATABASE_UNVERIFIED')
+    apis=states('api');require(len(apis)==1 and apis[0].get('running') is True and apis[0].get('health')=='healthy','INDEXED_FEED_API_UNHEALTHY')
+    api=json.loads(run(['docker','inspect',apis[0]['id']]))[0]
+    mount=next((m for m in api.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed' and m.get('Type')=='volume'),None)
+    require(mount is not None and mount.get('RW') is False,'INDEXED_FEED_API_MOUNT_NOT_READ_ONLY')
+    volume=json.loads(run(['docker','volume','inspect',mount['Name']]))[0]
+    require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation' and os.path.realpath(volume['Mountpoint'])==os.path.realpath(directory),'INDEXED_FEED_API_VOLUME_MISMATCH')
+    script="""import{IndexedFeedStore,indexedFeedPath,statePath}from'@lsports/feed-store';import{DatabaseSync}from'node:sqlite';const state=statePath(),path=indexedFeedPath(state);if(!state.startsWith('/app/.runtime/feed/')||!path.startsWith('/app/.runtime/feed/'))throw Error('INDEXED_FEED_PATH_UNVERIFIED');const store=new IndexedFeedStore(path,true);const summary=store.summary();const sql=new DatabaseSync(path,{readOnly:true});sql.exec('PRAGMA query_only=ON');const marketCount=sql.prepare('SELECT count(*) AS n FROM feed_markets').get().n;const pages={};for(const lane of ['prematch','inplay']){let cursor,events=0,markets=0,pricedSelections=0,selectableSelections=0,newestEventUpdatedAt,pagesQueried=0,hasMore=false;for(let n=0;n<8;n++){const p=store.page({filter:{lane},scope:'cutover-indexed-status:'+lane,limit:100,cursor,now:Date.now()});pagesQueried++;hasMore=p.page.hasMore;events+=p.events.length;for(const e of p.events){if(e.updatedAt&&(!newestEventUpdatedAt||e.updatedAt>newestEventUpdatedAt))newestEventUpdatedAt=e.updatedAt;for(const m of e.markets||[]){markets++;for(const q of m.selections||[]){if(Number.isFinite(Number(q.odds))&&Number(q.odds)>1)pricedSelections++;if(q.available===true&&Number.isFinite(Number(q.odds))&&Number(q.odds)>1)selectableSelections++;}}}if(selectableSelections>0||!hasMore||!p.page.nextCursor||p.events.length===0)break;cursor=p.page.nextCursor;}pages[lane]={events,markets,pricedSelections,selectableSelections,newestEventUpdatedAt,pagesQueried,hasMore};}const meta=summary.metadata;console.log(JSON.stringify({revision:summary.revision,updatedAt:meta.updatedAt,connections:meta.connections,coverage:meta.coverage,counts:summary.counts,marketCount,pages,health:meta.health}));sql.close();store.close();"""
+    raw=run(['docker','exec',apis[0]['id'],'node','--import','tsx','--input-type=module','-e',script],timeout=60)
+    try:result=json.loads(raw)
+    except Exception:raise RuntimeError('INDEXED_FEED_STATUS_UNPARSEABLE')
+    require(type(result.get('revision')) is int and result['revision']>0 and isinstance(result.get('connections'),dict) and isinstance(result.get('counts'),list) and isinstance(result.get('pages'),dict),'INDEXED_FEED_STATUS_SCHEMA_UNVERIFIED')
+    result['databaseBytes']=database.stat().st_size
+    return result
+
+def diagnostic_available_memory_bytes():
+    try:
+        return int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))*1024
+    except FileNotFoundError:
+        return int(os.sysconf('SC_AVPHYS_PAGES'))*int(os.sysconf('SC_PAGE_SIZE'))
+
 def cutover_status(directory,start_requested,startup=False,expected_sources=None,recovery_expected=None,timeline_window=None):
     consumers=states('worker');path=directory/'trade-feed.json';result={'operation':'cutover.aws','stage':'status','readOnly':True,'workers':consumers,'posnetChanged':False}
     result['evidence']=feed_evidence(directory,consumers)
@@ -850,7 +874,8 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
     require(path.is_file() and not path.is_symlink(),'CHECKPOINT_NOT_REGULAR')
     reader_info={'file':str(path),'sizeBytes':path.stat().st_size,'previousWholeFileLimitBytes':268435456,'reader':'incremental_json','recordLimitBytes':16777216,'chunkBytes':65536}
     emit(operation='cutover.aws',stage='checkpoint_reader',status='reading',**reader_info,readOnly=True,workerRestarted=False,providerRequests=0)
-    available=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')))*1024
+    indexed=indexed_publication_status(directory)
+    available=diagnostic_available_memory_bytes()
     require(available>192*1024*1024,'DIAGNOSTIC_MEMORY_BUDGET')
     selectable=0;markets=0;prices=0;reasons={}
     per_lane={lane:{'events':0,'markets':0,'pricedSelections':0,'selectableSelections':0} for lane in ('prematch','inplay')}
@@ -872,7 +897,23 @@ def cutover_status(directory,start_requested,startup=False,expected_sources=None
                     if selection.get('available') is True:counts['selectableSelections']+=1
                 for reason in selection.get('unavailableReasons',[]):
                     if isinstance(reason,str) and re.fullmatch('[a-z_]{1,80}',reason):reasons[reason]=reasons.get(reason,0)+1
-    read_started=time.time();feed,event_count,read_size=diagnostic_checkpoint(path,count_event);lanes={}
+    read_started=time.time()
+    if indexed is not None:
+        feed={'mode':'connected','updatedAt':indexed.get('updatedAt'),'connections':indexed['connections'],'coverage':indexed.get('coverage',{})}
+        event_count=sum(row.get('events',0) for row in indexed['counts'] if row.get('lane') in ('prematch','inplay'))
+        markets=indexed.get('marketCount',0)
+        for lane in ('prematch','inplay'):
+            page=indexed['pages'].get(lane,{})
+            per_lane[lane]={'events':sum(row.get('events',0) for row in indexed['counts'] if row.get('lane')==lane),
+                'markets':page.get('markets',0),'pricedSelections':page.get('pricedSelections',0),
+                'selectableSelections':page.get('selectableSelections',0),'pageSampleEvents':page.get('events',0),
+                'pageCount':page.get('pagesQueried',0),'hasMore':page.get('hasMore',False)}
+            prices+=per_lane[lane]['pricedSelections'];selectable+=per_lane[lane]['selectableSelections']
+        read_size=path.stat().st_size
+        reader_info.update(reader='indexed_sqlite_readonly_paged',sqliteRevision=indexed['revision'],sqliteBytes=indexed['databaseBytes'],pageLimit=100,pagesPerLane=8)
+    else:
+        feed,event_count,read_size=diagnostic_checkpoint(path,count_event)
+    lanes={}
     reader_info['readDurationMs']=int((time.time()-read_started)*1000);reader_info['observedAtUTC']=datetime.datetime.fromtimestamp(read_started,datetime.timezone.utc).isoformat()
     consumers=states('worker');result['workers']=consumers
     if any(c.get('state')=='exited' for c in consumers):result['workerFailure']=inspect_worker_failure(consumers)[0]
