@@ -26,6 +26,13 @@ class Upgrade(unittest.TestCase):
   self.assertFalse(proof({**receipt,'shutdownObservation':{'samples':[receipt['shutdownObservation']['samples'][-1]]}},identity))
   self.assertFalse(proof({**receipt,'shutdownObservation':{'samples':receipt['shutdownObservation']['samples'][:-1]+[{**receipt['shutdownObservation']['samples'][-1],'signalsSent':1}]}},identity))
 
+ def test_existing_upgrade_receipt_defers_profile_probe_until_stop_proof_is_loaded(self):
+  defer=NS['should_defer_existing_profile_probe']
+  self.assertTrue(defer({},True,True))
+  self.assertTrue(defer({'resumeBackup':'/var/backups/adl-partitioned-upgrade-existing'},True,False))
+  self.assertFalse(defer({},True,False))
+  self.assertFalse(defer({'resumeBackup':'/var/backups/adl-partitioned-upgrade-existing'},False,True))
+
  def test_live_upgrade_binds_active_container_to_its_immutable_image_sources(self):
   installed={'apps/worker/src/connected.ts':'original-connected','packages/feed-store/src/index.ts':'original-index'}
   candidates={**installed,'packages/feed-store/src/indexed-feed.ts':'new-indexed-module'}

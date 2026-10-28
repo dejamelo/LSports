@@ -379,6 +379,12 @@ def verified_stopped_profile_proof(progress,expected_container_id):
             and proof['finalStoppedCleanly'] and proof['supplierStopPrecedesWorkerStop']
             and proof['workerExitObservedAfterStopRequest']))
 
+def should_defer_existing_profile_probe(request,verified_profile,receipt_exists):
+    # A prepared receipt makes this a resume even when the coordinator omitted
+    # resumeBackup. Load and validate that receipt before deriving the stop
+    # proof; otherwise the safe offline probe sees an empty in-memory progress.
+    return verified_profile is True and (bool(request.get('resumeBackup')) or receipt_exists is True)
+
 def existing_pipeline_heap_plan(worker,verified_existing_snapshot_profile=False,verified_stopped_recovery=False,expected_container_id=None):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
     if options=='--max-old-space-size=2560':return None
@@ -1809,7 +1815,7 @@ def upgrade_partitioned_unlocked(request):
             require(run(['systemctl','is-active','adl-worker-cache-reserve.service']).strip()==b'active','CACHE_RESERVE_NOT_ACTIVE_NO_WORKER_CHANGE')
             if request.get('preservedHeapBudgetRepair') and request.get('resumeBackup'):
                 require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') in ('--max-old-space-size=2560','--max-old-space-size=3584'),'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
-            elif request.get('resumeBackup') and verified_existing_snapshot_profile:
+            elif should_defer_existing_profile_probe(request,verified_existing_snapshot_profile,receipt_path.exists()):
                 # The original 8 GiB worker has already been finalized only
                 # after a hash-verified replay. Probe its exact profile after
                 # loading that receipt; there is no running process to exec.
