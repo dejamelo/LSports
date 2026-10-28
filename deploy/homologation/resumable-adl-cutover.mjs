@@ -103,6 +103,11 @@ export function recoveryMode(mode){
  const snapshotMemoryRepair=['--snapshot-memory-repair','--snapshot-memory-rollback'].includes(mode);
  return {snapshotMemoryRepair,durableMode:mode==='--durable-ingress-repair'||mode==='--durable-ingress-rollback'||snapshotMemoryRepair,durableRollback:mode==='--durable-ingress-rollback'||mode==='--snapshot-memory-rollback'};
 }
+export function remoteActionTimeout(action,extra={}){
+ if(action==='upgrade_partitioned'&&(extra.finalizeAfterRecovery||extra.fullRecovery))return 4500000;
+ if(action==='upgrade_partitioned'&&extra.snapshotMemoryRepair)return 1800000;
+ return 360000;
+}
 export function canonicalSourceDigest(files){
  const sorted=Object.fromEntries(Object.entries(files).sort(([a],[b])=>a<b?-1:a>b?1:0));
  const encoded=JSON.stringify(sorted).replace(/[\u007f-\uffff]/g,char=>'\\u'+char.charCodeAt(0).toString(16).padStart(4,'0'));
@@ -147,7 +152,7 @@ export async function run(args){
   const source=await assembleRemoteHelper(here);
   const remote=async(action,extra={},quiet=false)=>{
    const invocation=await helperInvocation(here,source,{action,...extra});
-   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,action==='upgrade_partitioned'&&extra.finalizeAfterRecovery?4500000:action==='upgrade_partitioned'&&extra.snapshotMemoryRepair?1800000:360000,false,quiet,{stage,action});
+   const rows=await command('ssh',['-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-i',path.join(os.homedir(),'Downloads',keys[0].name),'ubuntu@ec2-77-113-150-100.us-east-2.compute.amazonaws.com',invocation.command],invocation.input,remoteActionTimeout(action,extra),false,quiet,{stage,action});
    const result=rows.findLast(r=>['cutover.aws','cutover.image','cutover.complete_preflight.aws'].includes(r.operation));if(!result||result.status==='blocked'||result.status==='unverified')throw Error('REMOTE_OPERATION_FAILED_SEE_STAGE');return result;
   };
    if(args[4]==='--pipeline-report'){

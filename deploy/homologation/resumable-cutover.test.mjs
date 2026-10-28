@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile,remoteActionTimeout} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('8 GiB stopped-worker recovery distinguishes kernel and V8 OOM by exact worker identity',()=>{
  const base={name:'/adl-homologation-worker-1',state:'exited',id:'a'.repeat(64)};
@@ -35,6 +35,12 @@ test('an installed 8 GiB profile is reusable only with its complete measured rec
 });
 test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
  assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));
+});
+test('protected full recovery timeout covers the measured checkpoint and publication cycle',()=>{
+ assert.equal(remoteActionTimeout('upgrade_partitioned',{fullRecovery:true}),4500000);
+ assert.equal(remoteActionTimeout('upgrade_partitioned',{finalizeAfterRecovery:true}),4500000);
+ assert.equal(remoteActionTimeout('upgrade_partitioned',{snapshotMemoryRepair:true}),1800000);
+ assert.equal(remoteActionTimeout('status',{fullRecovery:true}),360000);
 });
 test('missing local checkpoint only counts as stopped for recovery when every process and lock is absent',()=>{
  const report={status:'blocked',matchingWorkerProcesses:0,workerLockAbsent:true,processes:{status:'ok',matching:0},locks:[],blockers:[{stage:'checkpoint',reason:'ENOENT'}],journalCount:1};
