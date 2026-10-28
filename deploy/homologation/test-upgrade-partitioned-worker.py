@@ -20,6 +20,8 @@ class Upgrade(unittest.TestCase):
     {'atUTC':'2026-10-28T20:39:29.528921Z','containerId':identity,'running':False,'exitCode':0,'oomKilled':False,'signalsSent':0}]}}
   proof=NS['verified_stopped_profile_proof']
   self.assertTrue(proof(receipt,identity))
+  self.assertTrue(proof({**receipt,'phase':'start_requested'},identity))
+  self.assertFalse(proof({**receipt,'phase':'activated'},identity))
   self.assertFalse(proof({**receipt,'oldContainer':'b'*64},identity))
   self.assertFalse(proof({**receipt,'shutdownObservation':{'samples':[receipt['shutdownObservation']['samples'][-1]]}},identity))
   self.assertFalse(proof({**receipt,'shutdownObservation':{'samples':receipt['shutdownObservation']['samples'][:-1]+[{**receipt['shutdownObservation']['samples'][-1],'signalsSent':1}]}},identity))

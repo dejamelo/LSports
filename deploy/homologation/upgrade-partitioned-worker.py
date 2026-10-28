@@ -350,7 +350,7 @@ def verified_stopped_pipeline_probe_exit(state,verified_stopped_recovery):
         and state.get('OOMKilled') is False and state.get('ExitCode') in (0,137))
 
 def verified_stopped_profile_proof(progress,expected_container_id):
-    if (progress.get('phase')!='stopped' or progress.get('oldContainer')!=expected_container_id
+    if (progress.get('phase') not in ('stopped','start_requested') or progress.get('oldContainer')!=expected_container_id
         or progress.get('supplierStoppedBeforeConsumer') is not True):return False
     if (progress.get('preExitProof',{}).get('verified') is True
         and progress.get('verifiedExitSignal',{}).get('containerId')==expected_container_id
