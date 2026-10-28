@@ -341,7 +341,9 @@ def preserved_snapshot_eight_gib_heap_plan(worker,container,worker_model,expecte
     image=worker_model.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'SNAPSHOT_EIGHT_GIB_IMAGE_UNVERIFIED')
     path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
     require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'SNAPSHOT_EIGHT_GIB_RECEIPT_UNVERIFIED')
-    old=json.loads(path.read_bytes());require(old.get('image')==image and old.get('backup')==expected_backup and old.get('oomRestoreVerified') is True and old.get('snapshotMemoryVerified') is True,'SNAPSHOT_EIGHT_GIB_RECOVERY_RECEIPT_UNVERIFIED')
+    source_backup=Path(str(expected_backup or ''))
+    require(source_backup.parent==BACKUPS and not source_backup.is_symlink() and source_backup.is_dir() and source_backup.stat().st_uid==os.geteuid() and source_backup.stat().st_mode&0o077==0,'SNAPSHOT_EIGHT_GIB_BACKUP_REFERENCE_UNVERIFIED')
+    old=json.loads(path.read_bytes());require(old.get('image')==image and old.get('backup')==str(source_backup) and old.get('oomRestoreVerified') is True and old.get('snapshotMemoryVerified') is True,'SNAPSHOT_EIGHT_GIB_RECOVERY_RECEIPT_UNVERIFIED')
     found=json.loads(run(['docker','image','inspect',image]))[0]
     require(found.get('Id')==container.get('Image') and (found.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==old.get('digest'),'SNAPSHOT_EIGHT_GIB_SOURCE_IMAGE_MISMATCH')
     require(snapshot_host_memory()>=12*1024**3,'SNAPSHOT_EIGHT_GIB_HOST_RESERVE_INSUFFICIENT')
@@ -1493,7 +1495,7 @@ def upgrade_partitioned_unlocked(request):
         elif verified_snapshot_eight_gib:
             current_workers=states('worker');require(len(current_workers)==1,'SNAPSHOT_EIGHT_GIB_WORKER_COUNT_UNVERIFIED')
             current_container=json.loads(run(['docker','inspect',current_workers[0]['id']]))[0]
-            inherited_heap_plan=preserved_snapshot_eight_gib_heap_plan(current_workers[0],current_container,before['services']['worker'],request.get('checkpointRepairBackup'))
+            inherited_heap_plan=preserved_snapshot_eight_gib_heap_plan(current_workers[0],current_container,before['services']['worker'],request.get('snapshotMemorySourceBackup'))
         def save(p):
             tmp=SECURE/(receipt_path.name+'.tmp');private(tmp,json.dumps(p).encode());durable_replace(tmp,receipt_path)
         # A failed preserved-data rehearsal has already stopped distribution and

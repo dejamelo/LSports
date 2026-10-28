@@ -17,15 +17,15 @@ class Upgrade(unittest.TestCase):
 
  def test_eight_gib_heap_preservation_probe_requires_exact_oom_receipt_and_measures_clean_image(self):
   with tempfile.TemporaryDirectory() as tmp:
-   secure=Path(tmp);image='adl-worker-partitioned:'+'a'*24;image_id='sha256:'+'b'*64;digest='a'*64;backup='/var/backups/adl-partitioned-upgrade-i5txgwjx'
+   secure=Path(tmp);backups=secure/'backups';backups.mkdir(mode=0o700);backup_dir=backups/'adl-partitioned-upgrade-i5txgwjx';backup_dir.mkdir(mode=0o700);image='adl-worker-partitioned:'+'a'*24;image_id='sha256:'+'b'*64;digest='a'*64;backup=str(backup_dir)
    receipt=secure/('partitioned-upgrade-'+'a'*24+'.json');receipt.write_text(json.dumps({'image':image,'backup':backup,'digest':digest,'oomRestoreVerified':True,'snapshotMemoryVerified':True}));receipt.chmod(0o600)
-   old={k:NS.get(k) for k in ('SECURE','run','snapshot_host_memory')};calls=[]
+   old={k:NS.get(k) for k in ('SECURE','BACKUPS','run','snapshot_host_memory')};calls=[]
    def run(args,**kwargs):
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':image_id,'Config':{'Labels':{'eu.adl.partitioned.patch':digest}}}]).encode()
     if args[:3]==['docker','run','--rm']:return json.dumps({'heapLimitBytes':5*1024**3}).encode()
     raise AssertionError(args[:3])
-   NS.update(SECURE=secure,run=run,snapshot_host_memory=lambda:14*1024**3)
+   NS.update(SECURE=secure,BACKUPS=backups,run=run,snapshot_host_memory=lambda:14*1024**3)
    worker={'id':'c'*64,'name':'/adl-homologation-worker-1','running':False,'oomKilled':True,'exitCode':137}
    container={'Id':worker['id'],'Image':image_id,'Config':{'Image':image},'State':{'OOMKilled':True,'ExitCode':137},'HostConfig':{'Memory':8589934592,'RestartPolicy':{'Name':'no'}}}
    model={'image':image,'mem_limit':'8589934592','environment':{'NODE_OPTIONS':'--max-old-space-size=4608'}}
