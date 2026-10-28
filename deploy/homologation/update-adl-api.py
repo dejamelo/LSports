@@ -36,6 +36,17 @@ def backup_db(source,destination):
         src.backup(dst,pages=256,sleep=.05)
         require(dst.execute('PRAGMA integrity_check').fetchone()==('ok',),'BACKUP_INTEGRITY_FAILED')
     os.chmod(destination,0o600)
+def prune_verified_compatibility_copy(backup,check):
+    require(check==backup/'compatibility' and check.parent==backup,'COMPATIBILITY_COPY_PATH_INVALID')
+    receipt=backup/'compatibility.json'
+    require(receipt.is_file() and not receipt.is_symlink(),'COMPATIBILITY_RECEIPT_REQUIRED')
+    require(json.loads(receipt.read_bytes()).get('compatible') is True,'COMPATIBILITY_NOT_VERIFIED')
+    require(check.is_dir() and not check.is_symlink(),'COMPATIBILITY_COPY_REQUIRED')
+    require(not any(p.is_symlink() for p in check.rglob('*')),'COMPATIBILITY_COPY_SYMLINK_REJECTED')
+    released=sum(p.stat().st_size for p in check.rglob('*') if p.is_file())
+    shutil.rmtree(check)
+    require(not check.exists(),'COMPATIBILITY_COPY_REMAINS')
+    return released
 def compare_models(before,after,image):
     expected=copy.deepcopy(before);expected['services']['api']['image']=image
     require(expected==after,'UNRELATED_COMPOSE_CHANGE')
@@ -168,6 +179,8 @@ def main():
                 added=compatible_schema(s,schema(db))
                 if added:additions[rel]=added
         private(backup/'compatibility.json',json.dumps({'compatible':True,'additiveTables':additions}).encode())
+        compatibility_bytes=prune_verified_compatibility_copy(backup,check)
+        emit(stage='offline_compatibility_copy',status='pruned',releasedBytes=compatibility_bytes,receiptPreserved=True,rollbackDataPreserved=True)
         with sqlite3.connect(data/'control.sqlite') as db:
             admins=db.execute("SELECT id,email,password,role,client_id FROM admins WHERE role='platform_admin' ORDER BY id").fetchall()
         stage='compose_gate';emit(stage=stage,status='running')

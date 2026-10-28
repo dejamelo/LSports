@@ -30,7 +30,10 @@ Não importa clientes, operações nem acessos do demo do Mac.
    continua liquidando. Não copia nem modifica volume do feed.
 5. Testa os construtores atuais sobre outra cópia dos bancos, sem rede ou feed.
    A única adição aprovada é `operation_terminals`, com definição exata e sem alteração nas tabelas existentes. Outras mudanças de esquema/conjunto de bancos bloqueiam ANTES de trocar a API. Isso
-   mantém compatibilidade com o worker antigo e rollback sem restaurar dados.
+   mantém compatibilidade com o worker antigo e rollback sem restaurar dados. Após
+   um resultado compatível, remove somente a cópia de ensaio `compatibility/`;
+   preserva a cópia íntegra `platform/`, seus hashes e o recibo de compatibilidade.
+   Uma falha conserva a cópia de ensaio para diagnóstico.
 6. Compara o Compose completo: única diferença permitida é `services.api.image`.
    Conserva todas as definições, volumes, redes, aliases, credenciais e overrides.
 7. Recria somente `api`, com `--no-deps --no-build --pull never`; verifica status

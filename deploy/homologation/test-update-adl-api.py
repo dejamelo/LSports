@@ -1,7 +1,29 @@
-import copy, importlib.util, sqlite3, tempfile, unittest, io, tarfile
+import copy, importlib.util, sqlite3, tempfile, unittest, io, tarfile, json
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('update',Path(__file__).with_name('update-adl-api.py'));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class UpdateTests(unittest.TestCase):
+    def test_verified_compatibility_copy_is_removed_but_recovery_backup_and_receipt_remain(self):
+        with tempfile.TemporaryDirectory() as d:
+            backup=Path(d);check=backup/'compatibility';check.mkdir();data=check/'tickets.sqlite';data.write_bytes(b'isolated test copy')
+            original=backup/'platform';original.mkdir();(original/'tickets.sqlite').write_bytes(b'recovery copy')
+            receipt=backup/'compatibility.json';receipt.write_text('{"compatible":true,"additiveTables":{}}')
+            released=m.prune_verified_compatibility_copy(backup,check)
+            self.assertEqual(released,len(b'isolated test copy'));self.assertFalse(check.exists())
+            self.assertEqual((original/'tickets.sqlite').read_bytes(),b'recovery copy')
+            self.assertTrue(json.loads(receipt.read_text())['compatible'])
+    def test_compatibility_copy_is_preserved_without_success_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            backup=Path(d);check=backup/'compatibility';check.mkdir();(check/'tickets.sqlite').write_bytes(b'copy')
+            with self.assertRaisesRegex(RuntimeError,'COMPATIBILITY_RECEIPT_REQUIRED'):
+                m.prune_verified_compatibility_copy(backup,check)
+            self.assertTrue((check/'tickets.sqlite').is_file())
+    def test_compatibility_copy_is_preserved_when_receipt_is_not_compatible(self):
+        with tempfile.TemporaryDirectory() as d:
+            backup=Path(d);check=backup/'compatibility';check.mkdir();(check/'tickets.sqlite').write_bytes(b'copy')
+            (backup/'compatibility.json').write_text('{"compatible":false}')
+            with self.assertRaisesRegex(RuntimeError,'COMPATIBILITY_NOT_VERIFIED'):
+                m.prune_verified_compatibility_copy(backup,check)
+            self.assertTrue((check/'tickets.sqlite').is_file())
     def test_native_allocation_hints_do_not_echo_raw_frames_or_secrets(self):
         raw=b'2026-10-23T01:12:31Z v8::internal::JsonParser<char>::ParseJson() private-token=secret'
         self.assertEqual(m.api_allocation_hints(raw),['json_parse'])
