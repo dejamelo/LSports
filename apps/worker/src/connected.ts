@@ -81,7 +81,16 @@ export async function checkpointBeforeProjection<TCheckpoint,TProjection>(checkp
 // publicationDone and starves snapshot mutations. The atomic regular sidecar
 // still advances before ACK; the verified snapshot triggers the next publish.
 export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'connections'>){
- return Object.values(state.connections).some(c=>{
+ const lanes=Object.values(state.connections);
+ // The first save inside session() happens before recover() marks fullSnapshot.
+ // When BOTH feeds are awaiting their new baselines there is no healthy lane
+ // whose public updates need this multi-GB projection. Keep the previous public
+ // file intact; its freshness guard already blocks stale odds until recovery.
+ // This avoids building and fsyncing the whole public graph immediately before
+ // the first snapshot, while preserving normal publication when either lane is
+ // already healthy.
+ if(lanes.length>0&&lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.stage==='snapshot'&&c.recoveryProgress.regularSnapshotReady===false))return true;
+ return lanes.some(c=>{
   // A lane without a verified baseline remains unavailable in projection via
   // its own `phase !== connected` guard. Do not let that lane suppress public
   // updates from another lane whose baseline is already verified.

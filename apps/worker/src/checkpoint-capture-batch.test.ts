@@ -3,6 +3,16 @@ import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';impor
 import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,deferPublicProjectionDuringSnapshot,heartbeatPublicationDue,durableInboxBacklog,shouldDeferRoutineSnapshot,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
 const pkg={lane:'prematch',packageId:4511,username:'test',password:'test',hostname:'unused',queue:'unused',vhost:'unused',tls:false,port:5672} as any;
 test('offline batch policy matches the controlled PreMatch compaction bounds',()=>{assert.equal(PREMATCH_CHECKPOINT_BATCH_THRESHOLD,131072);assert.equal(PREMATCH_CHECKPOINT_BATCH_FLUSH_MS,600000);});
+test('initial dual-feed recovery defers the full public projection until a baseline exists',async()=>{
+ const state=new TradeState(),startedAt=new Date().toISOString();
+ for(const lane of ['prematch','inplay'] as const)state.set(lane,{phase:'recovering',session:{id:`initial-${lane}`,startedAt},recoveryProgress:{stage:'snapshot',startedAt,regularSnapshotReady:false}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),true);
+ let projectionBuilt=false;
+ await checkpointBeforeProjection(async()=>({saved:true}),()=>{projectionBuilt=true;return {};},deferPublicProjectionDuringSnapshot(state));
+ assert.equal(projectionBuilt,false,'the first session save must not rebuild the multi-GB public graph before either snapshot');
+ state.set('inplay',{phase:'connected',recoveryProgress:{stage:'idle',startedAt,regularSnapshotReady:true}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),false,'a healthy feed keeps publishing while only the other lane is recovering');
+});
 test('durable backlog reserves full-state serialization for retireable checkpoint batches',()=>{
  const state=new TradeState();state.set('prematch',{ingressProgress:{received:20,acknowledged:0,processed:20,backlog:20,bytes:0,oldestAgeMs:0,receivedBytes:0,lastReceiveAt:null,lastAckAt:null,durableCommitMs:0,rssBytes:0,ingressMaxEventLoopDelayMs:0,metricWindowStartUTC:'',metricWindowEndUTC:'',headersByType:{}} as any});
  assert.equal(durableInboxBacklog(state),20);assert.equal(heartbeatPublicationDue(state,0,120000),false);
