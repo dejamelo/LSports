@@ -224,10 +224,10 @@ export async function run(args){
    stage='validation_resume_gate';
    if(!['local_exit','journal_export','journal_import','aws_start'].every(k=>ledger.steps[k]?.status==='ok'))throw Error('VALIDATION_REQUIRES_COMPLETED_CUTOVER');
    if(!['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--full-recovery'].includes(args[4])&&(pre.awsWorkerContainers?.length!==1||!pre.awsWorkerContainers[0].running))throw Error('VALIDATION_WORKER_NOT_RUNNING_NO_RESTART');
-   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair||fullMode?[2]:[]});
+   const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair||args[4]==='--full-recovery'?[2]:[]});
    const mac=rows.find(r=>r.operation==='cutover.audit');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
-   if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:snapshotMemoryRepair||fullMode}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+   if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:snapshotMemoryRepair||args[4]==='--full-recovery'}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    if(args[4]==='--startup-report'){
     stage='startup_report';
     const {createHash}=await import('node:crypto');
