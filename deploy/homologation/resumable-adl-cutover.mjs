@@ -20,6 +20,14 @@ export function snapshotMemoryHostHeadroomApproved(model,availableMemoryBytes){
  const limit=Number(model?.memoryLimitBytes);
  return Number.isSafeInteger(limit)&&Number.isSafeInteger(availableMemoryBytes)&&limit===8589934592&&availableMemoryBytes>=limit+4*1024**3;
 }
+export function stoppedEightGiBWorkerFailure(containers){
+ const candidates=(containers||[]).filter(c=>c?.name==='/adl-homologation-worker-1'&&c?.state==='exited'&&/^[0-9a-f]{64}$/.test(c?.id||''));
+ if(candidates.length!==1)return undefined;
+ const worker=candidates[0];
+ if(worker.exitCode===137&&worker.oomKilled===true)return {kind:'kernel_oom',id:worker.id};
+ if(worker.exitCode===134&&worker.oomKilled===false)return {kind:'v8_heap_oom',id:worker.id};
+ return undefined;
+}
 export function macAuditProvesStopped(audit,{allowMissingCheckpoint=false}={}){
  if(audit?.status==='ok'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true)return true;
  return allowMissingCheckpoint&&audit?.status==='blocked'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true&&audit.processes?.status==='ok'&&audit.processes?.matching===0&&Array.isArray(audit.locks)&&audit.locks.length===0&&audit.blockers?.length===1&&audit.blockers[0]?.stage==='checkpoint'&&audit.blockers[0]?.reason==='ENOENT'&&audit.journalCount>=1;
@@ -294,9 +302,11 @@ export async function run(args){
     if(snapshotMemoryEightGiB){
      repairOptions.snapshotMemoryEightGiBRepair=true;
      repairOptions.snapshotMemorySourceBackup=ledger.steps.throughput_image?.result?.backup;
-     const stoppedOom=pre.awsWorkerContainers?.filter(c=>c.name==='/adl-homologation-worker-1'&&c.state==='exited'&&c.exitCode===137&&c.oomKilled===true);
-     if(stoppedOom?.length!==1||!/^([0-9a-f]{64})$/.test(stoppedOom[0].id||''))throw Error('SNAPSHOT_OOM_IDENTITY_CHANGED');
-     repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=stoppedOom[0].id.slice(0,12);repairOptions.snapshotCheckpointMemoryRepair=true;
+     const stoppedFailure=stoppedEightGiBWorkerFailure(pre.awsWorkerContainers);
+     if(!stoppedFailure)throw Error('SNAPSHOT_OOM_IDENTITY_CHANGED');
+     repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=stoppedFailure.id.slice(0,12);repairOptions.snapshotCheckpointMemoryRepair=true;
+     if(stoppedFailure.kind==='v8_heap_oom')repairOptions.v8HeapOomRepair=true;
+     emit({stage:'stopped_worker_failure_identity',status:'verified',kind:stoppedFailure.kind,memoryLimitBytes:pre.workerModel.memoryLimitBytes,workerStarted:false,workerRestarted:false,providerRequests:0,posnetChanged:false});
     }
     if(snapshotMemoryRepair&&process.env.ADL_CHECKPOINT_REPAIR_BACKUP){const b=process.env.ADL_CHECKPOINT_REPAIR_BACKUP;if(snapshotMemoryEightGiB||!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(b)||process.env.ADL_RESUME_BACKUP)throw Error('DERIVED_REPAIR_BACKUP_UNVERIFIED');repairOptions.checkpointRepairBackup=b;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||''))throw Error('EXPECTED_CURRENT_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=prefix;}

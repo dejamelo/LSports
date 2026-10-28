@@ -45,6 +45,19 @@ class Upgrade(unittest.TestCase):
     with self.assertRaises(Exception):NS['preserved_snapshot_eight_gib_heap_plan']({**worker,'oomKilled':False},container,model,backup)
     NS['snapshot_host_memory']=lambda:11*1024**3
     with self.assertRaises(Exception):NS['preserved_snapshot_eight_gib_heap_plan'](worker,container,model,backup)
+    v8_worker={'id':'d'*64,'name':'/adl-homologation-worker-1','running':False,'oomKilled':False,'exitCode':134}
+    v8_container={**container,'Id':v8_worker['id'],'State':{'OOMKilled':False,'ExitCode':134}}
+    NS['snapshot_host_memory']=lambda:14*1024**3
+    old_run=NS['subprocess'].run
+    try:
+     NS['subprocess'].run=lambda *args,**kwargs:types.SimpleNamespace(returncode=0,stdout=b'Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory',stderr=b'')
+     request={'v8HeapOomRepair':True,'expectedOomPrefix':v8_worker['id'][:12]}
+     plan=NS['preserved_snapshot_eight_gib_heap_plan'](v8_worker,v8_container,model,backup,request)
+     self.assertTrue(plan['preserveExisting']);self.assertTrue(plan['snapshotMemoryEightGiBRepair']);self.assertEqual(plan['oldSpaceMiB'],4608)
+     with self.assertRaises(Exception):NS['preserved_snapshot_eight_gib_heap_plan'](v8_worker,v8_container,model,backup+'-different',request)
+     NS['subprocess'].run=lambda *args,**kwargs:types.SimpleNamespace(returncode=0,stdout=b'no heap failure evidence',stderr=b'')
+     with self.assertRaises(Exception):NS['preserved_snapshot_eight_gib_heap_plan'](v8_worker,v8_container,model,backup,request)
+    finally:NS['subprocess'].run=old_run
    finally:
     for key,value in old.items():NS[key]=value
 
