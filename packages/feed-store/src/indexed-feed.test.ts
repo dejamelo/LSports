@@ -1,0 +1,114 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import type { EventFeed, SportEvent } from "@lsports/contracts";
+import { IndexedFeedStore } from "./indexed-feed.js";
+
+const metadata = (at: number): Omit<EventFeed, "events"> => ({ mode: "connected", health: "ok", notice: "test", updatedAt: new Date(at).toISOString(),
+  connections: { prematch: { phase: "connected", message: "ok" }, inplay: { phase: "connected", message: "ok" } } });
+const event = (id: string, updatedAt: number, odds = 1.8): SportEvent => ({ id, sport: "futbol", source: id.startsWith("inplay:") ? "inplay" : "prematch", league: "league", home: "A", away: "B", time: "now", live: id.startsWith("inplay:"), market: "winner", status: 1, available: true, updatedAt: new Date(updatedAt).toISOString(), selections: [{ id: `${id}:1:1`, label: "A", odds, available: true }], markets: [{ id: `${id}:1`, name: "winner", status: 1, selections: [{ id: `${id}:1:1`, label: "A", odds, available: true }] }] });
+
+test("indexed feed atomically pages committed revisions and rejects cross-scope/stale cursors", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-feed-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  try {
+    writer.rebuild([event("prematch:1", now), event("prematch:2", now), event("inplay:1", now)], metadata(now));
+    const first = writer.page({ limit: 1, scope: "client-a", now });
+    assert.equal(first.events.length, 1);
+    assert.ok(first.page.nextCursor);
+    assert.throws(() => writer.page({ limit: 1, cursor: first.page.nextCursor, scope: "client-b", now }), /INDEX_CURSOR_STALE/);
+    const second = writer.page({ limit: 1, cursor: first.page.nextCursor, scope: "client-a", now });
+    assert.equal(second.events.length, 1);
+    const oldCursor = second.page.nextCursor;
+    writer.applyDelta([event("prematch:2", now, 2.1)], [], metadata(now));
+    if (oldCursor) assert.throws(() => writer.page({ limit: 1, cursor: oldCursor, scope: "client-a", now }), /INDEX_CURSOR_STALE/);
+    const metaCursor = writer.page({ limit: 1, scope: "meta", now });
+    writer.applyDelta([], [], { ...metadata(now), notice: "health metadata changed" });
+    if (metaCursor.page.nextCursor) assert.throws(() => writer.page({ limit: 1, cursor: metaCursor.page.nextCursor, scope: "meta", now }), /INDEX_CURSOR_STALE/);
+    const stale = writer.page({ limit: 20, scope: "client-a", now: now + 21_000 });
+    assert.equal(stale.events.length, 0);
+    const masked = writer.page({ limit: 20, scope: "client-a", now });
+    assert.equal(masked.events.filter(e => e.id === "inplay:1").length, 1);
+    // PM is hidden only when a live InPlay fixture with the same provider ID exists.
+    assert.equal(masked.events.some(e => e.id === "prematch:1"), false);
+    const marketOnly=writer.page({limit:5,scope:"market",now,filter:{eventId:"prematch:2",marketId:"prematch:2:1"}});
+    assert.equal(marketOnly.events[0].markets?.length,1);
+    assert.equal(marketOnly.events[0].selections[0].id,"prematch:2:1:1");
+  } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("page budget counts UTF-8 bytes so a multibyte market cannot exceed the HTTP response ceiling", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-bytes-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  try {
+    const large = event("prematch:1", now);
+    large.markets![0].selections[0].label = "😀".repeat(1_100_000);
+    writer.rebuild([large], metadata(now));
+    assert.throws(() => writer.page({ limit: 1, scope: "utf8", now }), /INDEX_EVENT_EXCEEDS_PAGE_LIMIT/);
+  } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an interrupted delta rolls back rows and revision; the last committed page remains recoverable", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-recovery-")), path = join(dir, "public.sqlite"), now = Date.now();
+  let writer = new IndexedFeedStore(path);
+  try {
+    writer.rebuild([event("prematch:1", now)], metadata(now));
+    const committed = writer.page({ limit: 10, scope: "test", now });
+    function* interrupted() { yield event("prematch:2", now); throw Error("simulated_process_interruption"); }
+    assert.throws(() => writer.applyDelta(interrupted(), [], metadata(now)), /simulated_process_interruption/);
+    writer.close();
+    writer = new IndexedFeedStore(path, true);
+    const recovered = writer.page({ limit: 10, scope: "test", now });
+    assert.equal(recovered.page.revision, committed.page.revision);
+    assert.deepEqual(recovered.events.map(item => item.id), ["prematch:1"]);
+  } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("read-only API sees the last committed revision while the worker has an open WAL transaction", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-wal-reader-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  let reader: IndexedFeedStore | undefined;
+  try {
+    writer.rebuild([event("prematch:1", now)], metadata(now));
+    reader = new IndexedFeedStore(path, true);
+    const before = reader.page({ limit: 10, scope: "api", now });
+    assert.deepEqual(before.events.map(row => row.id), ["prematch:1"]);
+
+    // A committed WAL write remains readable without blocking the API. A
+    // subsequent uncommitted transaction must remain invisible to the reader.
+    writer.applyDelta([event("prematch:2", now)], [], metadata(now));
+    assert.deepEqual(reader.page({ limit: 10, scope: "api", now }).events.map(row => row.id), ["prematch:1", "prematch:2"]);
+    const activeWriter = new DatabaseSync(path);
+    activeWriter.exec("BEGIN IMMEDIATE");
+    activeWriter.prepare("UPDATE feed_meta SET revision=revision+1 WHERE id=1").run();
+    assert.deepEqual(reader.page({ limit: 10, scope: "api", now }).events.map(row => row.id), ["prematch:1", "prematch:2"]);
+    activeWriter.exec("ROLLBACK");
+    activeWriter.close();
+  } finally { reader?.close(); writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("40,864 representative fixtures are indexed and paged with live-duplicate suppression", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-volume-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  try {
+    function* fixtures() {
+      for (let i = 1; i <= 40_864; i++) yield event(`prematch:${i}`, now);
+      for (let i = 1; i <= 4_096; i++) yield event(`inplay:${i}`, now);
+    }
+    writer.rebuild(fixtures(), metadata(now));
+    let cursor: string | undefined, total = 0, pages = 0;
+    do {
+      const result = writer.page({ limit: 200, cursor, scope: "volume", now });
+      assert.ok(Buffer.byteLength(JSON.stringify(result)) < 8 * 1024 * 1024);
+      total += result.events.length; pages++;
+      cursor = result.page.nextCursor;
+      if (!result.page.hasMore) break;
+      assert.ok(cursor);
+    } while (pages < 300);
+    assert.equal(total, 40_864);
+    assert.ok(pages > 200);
+  } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});

@@ -11,7 +11,7 @@ import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
 import { acquireWorkerLock } from "./worker-lock.js";
 import { setTimeout as delay, setImmediate as nextTurn } from "node:timers/promises";
-import { createPublisher, statePath } from "@lsports/feed-store";
+import { IndexedFeedStore, indexedFeedPath, statePath } from "@lsports/feed-store";
 import { loadConfig } from "./config.js";
 import type { PackageConfig } from "./config.js";
 import { TradeState, classifySport } from "./state.js";
@@ -22,7 +22,7 @@ import {
   formatDiagnostic,
   OperationError,
 } from "./diagnostics.js";
-import { checkpoint,streamCheckpoint, restore, persistRegularCheckpoint } from "./persistence.js";
+import { checkpoint, restore, persistCheckpointDelta, compactCheckpointJournal } from "./persistence.js";
 import { connectMq } from "./mq.js";
 
 // Retain the first terminal cause, even when close/cleanup and retry replace phase/diagnostic.
@@ -251,6 +251,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
   const path = dependencies.path ?? statePath();
   const releaseLock = await acquireWorkerLock(`${path}.lock`);
   let tickets: TicketStore | undefined;
+  let indexedFeed: IndexedFeedStore | undefined;
   let platform: PlatformStore | undefined;
   let tenantTickets: TenantTickets | undefined;
   let completed = false;
@@ -269,7 +270,8 @@ export async function runConnected(signal: AbortSignal, dependencies: {
       platform = new PlatformStore(undefined, true);
       tenantTickets = new TenantTickets(platform);
     }
-    const publish = createPublisher(path);
+    indexedFeed = new IndexedFeedStore(indexedFeedPath(path));
+    let indexedReady=false;
     const loopDelay=monitorEventLoopDelay({resolution:20});loopDelay.enable();
     let writes=0,lastPersistLog=0,lastCompletedPublication=0,lastPersistedMutationGeneration=-1,loopWindowStart=Date.now();
     const save = coalescedPersistence(publicationId=>publicationCaptureTurn(state,stable=>operation("file.persist", "local", async () => {
@@ -279,30 +281,43 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         const started=performance.now();
         try{
         memoryStage('capture');
-        const {regular,...saved}=streamCheckpoint(stable);
+        const changes=stable.projectionChanges();
         const captureDurationMs=Math.ceil(performance.now()-started),regularStarted=performance.now();memoryStage('regular_checkpoint');
-        const deferProjection=deferPublicProjection(stable);
         const durable=await checkpointBeforeProjection(
-          ()=>persistRegularCheckpoint(path,stable,markStage),
-          ()=>{markStage('projection.build');const feed=stable.projection(Date.now(),false);markStage('projection.availability');const capturedBlocks=state.availabilityBlocks();
-            if(tenantTickets){markStage('projection.tenant_tickets_reconcile');tenantTickets.reconcile(feed);}
-            markStage('projection.ticket_reconcile');ticketStore.reconcile(feed); // Durable settlement before projection publication and processed-inbox retirement.
-            return {feed,capturedBlocks};},
-          deferProjection,
+          ()=>persistCheckpointDelta(path,stable,changes),
+          ()=>undefined,
+          true,
           markStage,
         );
         const checkpointIo=durable.checkpointResult;
-        const regularDurationMs=Math.ceil(performance.now()-regularStarted),publishStarted=performance.now();
-        let projectionIo:Awaited<ReturnType<typeof publish>>|undefined;
-        if(!deferProjection){
-          const {feed,capturedBlocks}=durable.projection!;
-          const currentBlocks=state.availabilityBlocks();for(const lane of ['prematch','inplay'] as const)capturedBlocks[lane]=[...new Set([...(capturedBlocks[lane]||[]),...(currentBlocks[lane]||[])])];
-          memoryStage('projection');projectionIo=await publish(feed,{...saved,regularExternal:true},capturedBlocks,phase=>state.setPublicationPhase(phase));
-        }else memoryStage('snapshot_projection_deferred');
+        const regularDurationMs=Math.ceil(performance.now()-regularStarted),indexStarted=performance.now();
+        let indexRows=0,indexRebuild=false;
+        if(!indexedReady){
+          memoryStage('indexed_projection.rebuild');
+          const feed=stable.projection(Date.now(),false);
+          indexedFeed!.rebuild(feed.events,stable.projectionMetadata());
+          indexedReady=true;indexRebuild=true;
+          if(tenantTickets)tenantTickets.reconcile(feed);
+          ticketStore.reconcile(feed);
+          indexRows=stable.rows.prematch.size+stable.rows.inplay.size;
+        }else{
+          memoryStage('indexed_projection.delta');
+          const ticketOutcomes:NonNullable<import('@lsports/contracts').EventFeed['ticketOutcomes']>=[];
+          const ticketVersionRecoveries:NonNullable<import('@lsports/contracts').EventFeed['ticketVersionRecoveries']>=[];
+          const upserts=(function*(){for(const change of changes){const delta=stable.projectDelta(change.lane,change.key);ticketOutcomes.push(...(delta.ticketOutcomes||[]));ticketVersionRecoveries.push(...(delta.ticketVersionRecoveries||[]));const event=delta.events[0];if(event)yield event;}})();
+          const deleted=(function*(){for(const change of changes)if(!stable.rows[change.lane].has(change.key))yield `${change.lane}:${String(change.key)}`;})();
+          indexRows=changes.length;
+          indexedFeed!.applyDelta(upserts,deleted,stable.projectionMetadata());
+          state.acknowledgeProjectionChanges(changes);
+          const deltaFeed={...stable.projectionMetadata(),events:[],ticketOutcomes,ticketVersionRecoveries};
+          if(tenantTickets)tenantTickets.reconcile(deltaFeed);
+          ticketStore.reconcile(deltaFeed);
+        }
+        if(durable.checkpointResult.compactDue){memoryStage('checkpoint.compact');const compacted=await compactCheckpointJournal(path,stable);console.info(JSON.stringify({operation:'checkpoint.compaction',status:'ok',...compacted,atUTC:new Date().toISOString()}));}
+        const indexDurationMs=Math.ceil(performance.now()-indexStarted);
         lastCompletedPublication=Date.now();
         lastPersistedMutationGeneration=stable.mutationGeneration;
-        const projectionMetrics=projectionIo&&{bytes:projectionIo.bytes,serializeMs:projectionIo.serializeMs,writeAwaitMs:projectionIo.writeAwaitMs,fsyncAwaitMs:projectionIo.fsyncAwaitMs,closeAwaitMs:projectionIo.closeAwaitMs,renameAwaitMs:projectionIo.renameAwaitMs,directorySyncAwaitMs:projectionIo.directorySyncAwaitMs,totalWallMs:projectionIo.totalWallMs,otherWallMs:projectionIo.otherWallMs};
-        const metric={publicationId,checkpointIo,projectionIo:projectionMetrics,writes:++writes,publicProjectionDeferredForSnapshot:deferProjection,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:deferProjection?0:Math.ceil(performance.now()-publishStarted),maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
+        const metric={publicationId,checkpointIo,indexedProjection:{rows:indexRows,rebuild:indexRebuild,durationMs:indexDurationMs},writes:++writes,publicProjectionDeferredForSnapshot:false,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:indexDurationMs,maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
         }catch(error){
@@ -418,7 +433,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
     try {
       try { tenantTickets?.close(); } finally { platform?.close(); }
     } finally {
-      try { tickets?.close(); }
+      try { tickets?.close(); indexedFeed?.close(); }
       finally {
         const released = await releaseLock();
         console.info(JSON.stringify({ operation: "worker.shutdown", status: completed ? "ok" : "error", lock: released ? "released" : "ownership_changed_preserved" }));

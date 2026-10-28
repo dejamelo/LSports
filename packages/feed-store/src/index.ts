@@ -160,3 +160,5 @@ export function createPublisher(path = statePath()) {
     return operation;
   };
 }
+export { IndexedFeedStore, indexedFeedPath } from "./indexed-feed.js";
+export type { IndexedFeedPage, IndexedFeedFilter } from "./indexed-feed.js";

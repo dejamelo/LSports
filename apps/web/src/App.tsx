@@ -77,7 +77,10 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
       controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
       try {
-        const response = await (readOnlyPreview?fetch("/api/control/feed-preview",{credentials:"same-origin",signal:controller.signal}):sportsbookApi("/events", {
+        const params=new URLSearchParams({limit:"200",sport,lane:tab==="En vivo"?"inplay":"prematch"});
+        if(tab==="Hípica")params.delete("lane");
+        const suffix=`?${params}`;
+        const response = await (readOnlyPreview?fetch(`/api/control/feed-preview${suffix}`,{credentials:"same-origin",signal:controller.signal}):sportsbookApi(`/events${suffix}`, {
           signal: controller.signal,
         }));
         if(response.status===401)throw Error("Sesión vencida. Cerrá esta vista y pedí una nueva sesión al casino o desde el panel.");
@@ -107,7 +110,7 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
       clearTimeout(timer);
       controller?.abort();
     };
-  }, [attempt]);
+  }, [attempt,sport,tab]);
   useEffect(() => {
     setPicks([]);
     setMessage("");

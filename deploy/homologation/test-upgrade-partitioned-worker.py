@@ -1,9 +1,42 @@
-import ast,contextlib,copy,datetime,hashlib,io,json,os,subprocess,tempfile,types,unittest
+import ast,contextlib,copy,datetime,hashlib,io,json,os,sqlite3,subprocess,tempfile,types,unittest
+from unittest.mock import patch
 from pathlib import Path
 HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_sqlite_recovery_copy_uses_online_backup_and_captures_committed_wal(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);source=root/'trade-feed.public.sqlite';target=root/'backup.sqlite';writer=sqlite3.connect(source)
+   writer.execute('PRAGMA journal_mode=WAL');writer.execute('CREATE TABLE odds(id INTEGER PRIMARY KEY,value TEXT)');writer.execute('INSERT INTO odds(value) VALUES (?)',('committed-in-wal',));writer.commit()
+   self.assertTrue(Path(str(source)+'-wal').exists());result=NS['sqlite_consistent_backup'](source,target)
+   self.assertEqual(result['integrity'],'ok');self.assertTrue(result['walIncludedBySQLiteBackupApi']);self.assertTrue(NS['sqlite3_integrity'](target))
+   self.assertFalse(Path(str(target)+'-wal').exists());self.assertFalse(Path(str(target)+'-shm').exists())
+   recovered=sqlite3.connect(f'file:{target}?mode=ro',uri=True);self.assertEqual(recovered.execute('SELECT value FROM odds').fetchone(),('committed-in-wal',));recovered.close();writer.close()
+
+ def test_indexed_worker_requires_healthy_api_at_the_same_immutable_commit(self):
+  commit='a'*40;old_states,old_run=NS['states'],NS['run']
+  NS['states']=lambda service:[{'id':'api-id','running':True,'health':'healthy'}] if service=='api' else []
+  NS['run']=lambda args,**kwargs:(json.dumps([{'Config':{'Image':'adl-api:'+commit}}]).encode() if args[:2]==['docker','inspect'] else json.dumps([{'Config':{'Labels':{'org.opencontainers.image.revision':commit}}}]).encode())
+  try:
+   self.assertEqual(NS['verify_api_compatibility'](commit)['apiCommit'],commit)
+   with self.assertRaisesRegex(RuntimeError,'INDEXED_API_WORKER_VERSION_MISMATCH'):NS['verify_api_compatibility']('b'*40)
+   NS['states']=lambda service:[]
+   with self.assertRaisesRegex(RuntimeError,'INDEXED_API_NOT_HEALTHY'):NS['verify_api_compatibility'](commit)
+  finally:NS['states'],NS['run']=old_states,old_run
+
+ def test_full_recovery_accepts_only_measured_stale_projection_gate(self):
+  names=NS['PARTITION_FILES'];old={name:'installed:'+name for name in names}
+  old['apps/worker/src/full-snapshot.ts']='transportComplete=res.complete===true; if(!transportComplete) throw Error(); transportBytes!==contentLengthBytes; Snapshot HTTP Content-Length mismatch'
+  connected='lanes.length>0&&lanes.every(c=>c.phase===\'recovering\'&&c.recoveryProgress?.regularSnapshotReady===false)'
+  candidate=dict(old);candidate['apps/worker/src/connected.ts']=connected+'; ingress.processingBacklog??ingress.backlog; ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000'
+  digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  self.assertEqual(NS['verify_full_recovery_sources'](old,candidate,digest),None)
+  unsafe=dict(candidate);unsafe['apps/worker/src/connected.ts']=connected+'; true'
+  with self.assertRaises(Exception):NS['verify_full_recovery_sources'](old,unsafe,digest)
+  extra=dict(candidate);extra['apps/worker/src/state.ts']+='; unexpected'
+  with self.assertRaises(Exception):NS['verify_full_recovery_sources'](old,extra,digest)
+
  def test_current_full_recovery_receipt_requires_immutable_backup_hashes(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);secure=root/'secure';secure.mkdir(mode=0o700);backups=root/'backups';backups.mkdir(mode=0o700);backup=backups/'adl-partitioned-upgrade-receipt';backup.mkdir(mode=0o700)
@@ -106,11 +139,24 @@ class Upgrade(unittest.TestCase):
   self.assertEqual(NS['activation_base_model'](saved,prepared,True,NS['expected_partitioned_model'](saved,{'image':'worker-new','memoryLimitBytes':8589934592,'pipelineMemoryEightGiB':True,'pipelineRepair':True,'snapshotMemoryRepair':True,'livePersistenceRepair':True},True)),prepared)
 
  def test_pipeline_dependency_pin_matches_current_source_manifest(self):
-  path=HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts'
-  digest=hashlib.sha256(path.read_bytes()).hexdigest()
-  source_ns={'__name__':'tested_upgrade_manifest'}
+  path=HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts';indexed=HERE.parent.parent/'packages/feed-store/src/indexed-feed.ts'
+  digest=hashlib.sha256(path.read_bytes()).hexdigest();indexed_digest=hashlib.sha256(indexed.read_bytes()).hexdigest()
+  source_ns={'__name__':'tested_upgrade_manifest','require':NS['require'],'hashlib':hashlib,'json':json}
   exec((HERE/'upgrade-partitioned-worker.py').read_text().split("if __name__=='__main__':")[0],source_ns)
   self.assertEqual(source_ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256'][str(path.relative_to(HERE.parent.parent))],digest)
+  self.assertEqual(source_ns['INDEXED_PUBLICATION_SOURCE_SHA256'][str(indexed.relative_to(HERE.parent.parent))],indexed_digest)
+  old={name:'installed:'+name for name in source_ns['PARTITION_FILES']}
+  added={'apps/worker/src/snapshot-capacity.ts':(HERE.parent.parent/'apps/worker/src/snapshot-capacity.ts').read_text(),
+   'packages/feed-store/src/tenant-tickets.ts':(HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts').read_text()}
+  base={**old,**added};candidate={**base,'apps/worker/src/connected.ts':'new IndexedFeedStore indexed_projection.rebuild indexed_projection.delta',
+   'apps/worker/src/persistence.ts':'persistCheckpointDelta compactCheckpointJournal await file.sync()',
+   'packages/feed-store/src/index.ts':'export { IndexedFeedStore, indexedFeedPath } from "./indexed-feed.js";',
+   str(indexed.relative_to(HERE.parent.parent)):indexed.read_text()}
+  oldSubset={name:value for name,value in old.items() if name in source_ns['PIPELINE_BASE_FILES']|source_ns['PIPELINE_AUXILIARY_FILES']}
+  digest=hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,candidate,digest,added))
+  with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,str(indexed.relative_to(HERE.parent.parent)):'changed'},digest,added)
+  with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,'packages/feed-store/src/index.ts':'no export'},digest,added)
 
  def test_measured_restore_serialization_window_includes_return_readback(self):
   self.assertEqual(NS['OOM_REHEARSAL_TIMEOUT_SECONDS'],1200)
@@ -353,22 +399,30 @@ class Upgrade(unittest.TestCase):
    root=Path(tmp);secure=root/'secure';secure.mkdir();backups=root/'backups';backups.mkdir();releases=root/'releases';release=releases/('a'*40);release.mkdir(parents=True);volume=root/'volume';volume.mkdir()
    evidence=backups/'adl-snapshot-shape-example';evidence.mkdir(mode=0o700);raw=json.dumps({'FixtureId':20563979,'Fixture':{'Status':1},'Markets':None}).encode();(evidence/'rejected-row.private.json').write_bytes(raw);(evidence/'rejected-row.private.json').chmod(0o600);(evidence/'report.json').write_text(json.dumps({'rawRowSha256':hashlib.sha256(raw).hexdigest(),'rawRowBytes':len(raw),'rejection':{'path':'Markets','actualType':'null'},'sdk':{'conversion':'succeeded','markets':{'type':'null'}}}));(evidence/'report.json').chmod(0o600)
    original=secure/'old.json';original.write_text('{}');meta={'release':str(release),'composeOverrides':[str(original)]};(secure/'deployment.json').write_text(json.dumps(meta))
-   (volume/'trade-feed.json').write_text('{"preserved":"checkpoint"}');(volume/'trade-feed.json.prematch.inbox.sqlite').write_bytes(b'prematch inbox');(volume/'trade-feed.json.inplay.inbox.sqlite').write_bytes(b'inplay inbox');journal=volume/'trade-feed.json.snapshot-aaaaaaaaaaaaaaaa.json';journal.write_text('{"nextAt":9999999999999,"due":{},"failures":{}}');journal_before=journal.read_bytes();regular=volume/'trade-feed.json.regular-checkpoint.json';regular.write_text('PRIVATE_REGULAR_PRESERVED');regular_before=regular.read_bytes()
+   (volume/'trade-feed.json').write_text('{"preserved":"checkpoint"}')
+   for inbox_name in ('trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite'):
+    db=sqlite3.connect(volume/inbox_name);db.execute('CREATE TABLE fixture(id INTEGER PRIMARY KEY,payload TEXT)');db.execute('INSERT INTO fixture(payload) VALUES (?)',('preserved',));db.commit();db.close()
+   journal=volume/'trade-feed.json.snapshot-aaaaaaaaaaaaaaaa.json';journal.write_text('{"nextAt":9999999999999,"due":{},"failures":{}}');journal_before=journal.read_bytes();regular=volume/'trade-feed.json.regular-checkpoint.json';regular.write_text('PRIVATE_REGULAR_PRESERVED');regular_before=regular.read_bytes()
    handoff={'audit':{'status':'ok','workerLockAbsent':True,'matchingWorkerProcesses':0}};d=hashlib.sha256(json.dumps(handoff,sort_keys=True,separators=(',',':')).encode()).hexdigest();migration=secure/('cutover-'+d+'.json');migration.write_text(json.dumps({'digest':d,'startRequestedAtUTC':'2026-01-01T00:00:00Z','notBeforeUTC':'2026-01-01T00:00:00Z','journals':['preserved']}))
-   files={path:'export const isolated=true;' for path in NS['PARTITION_FILES']};hashes={path:None for path in files};digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();image='adl-worker-partitioned:'+digest[:24]
-   images={'base':{'Id':'sha256:'+('b'*64),'Config':{'User':'node','Labels':{}}}};running=not oom;selected='base';calls=[]
+   old_files={path:'installed:'+path for path in NS['PARTITION_FILES']}
+   old_files['apps/worker/src/full-snapshot.ts']='transportComplete=res.complete===true; if(!transportComplete) throw Error(); transportBytes!==contentLengthBytes; Snapshot HTTP Content-Length mismatch'
+   files=dict(old_files);files['apps/worker/src/connected.ts']="lanes.length>0&&lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.regularSnapshotReady===false); ingress.processingBacklog??ingress.backlog; ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000"
+   hashes={path:hashlib.sha256(value.encode()).hexdigest() for path,value in old_files.items()};digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();old_digest=hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest();image='adl-worker-partitioned:'+digest[:24]
+   old_backup=backups/'adl-partitioned-upgrade-existing';old_backup.mkdir(mode=0o700);old_receipt={'digest':old_digest,'image':'base','oomRestoreVerified':True};receipt_path=secure/('partitioned-upgrade-'+old_digest[:24]+'.json');receipt_path.write_text(json.dumps(old_receipt));receipt_path.chmod(0o600)
+   images={'base':{'Id':'sha256:'+('b'*64),'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':old_digest}}}};running=not oom;selected='base';calls=[]
    def model(args):
     result={'services':{'api':{'image':'api-unchanged'},'worker':{'image':'base','mem_limit':'4294967296','environment':{'NODE_OPTIONS':'--max-old-space-size=3072','LSPORTS_PASSWORD':'MUST_NEVER_PRINT','LSPORTS_INPLAY_SNAPSHOT_MAX_RESPONSE_MB':'128'}}},'networks':{'preserved':{}},'volumes':{'preserved':{}}}
     for arg in args:
      if str(arg).startswith(str(secure/'compose.partitioned-')) or str(arg).startswith(str(secure/'compose.worker-rollback-')):patch=json.loads(Path(arg).read_bytes())['services']['worker'];result['services']['worker']['image']=patch['image'];result['services']['worker']['environment'].update(patch.get('environment',{}))
     return result
-   def states(service):return [{'id':'old-worker' if selected=='base' else 'new-worker','running':running,**({'exitCode':137,'oomKilled':True} if oom and not running and selected=='base' else {})}] if service=='worker' else [{'id':'api','health':'healthy'}]
+   def states(service):return [{'id':'old-worker' if selected=='base' else 'new-worker','running':running,**({'exitCode':137,'oomKilled':True} if oom and not running and selected=='base' else {'exitCode':0,'oomKilled':False} if not running and selected=='base' else {})}] if service=='worker' else [{'id':'api','health':'healthy'}]
    def run(args,**kw):
     nonlocal running,selected
     calls.append(args)
     if args[:3]==['docker','image','inspect']:return json.dumps([images[args[3]]]).encode()
     if args[:2]==['docker','tag']:images[args[3]]=images['base'];return b''
     if args[:2]==['docker','exec'] and any('readFileSync' in str(a) for a in args):return json.dumps(hashes).encode()
+    if args[:2]==['docker','run'] and any("Object.fromEntries(names.map(n=>[n,fs.existsSync" in str(a) for a in args):return json.dumps(old_files).encode()
     if args[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in args):return json.dumps({'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000],'opened':not read_access_fails,'readBytes':0 if read_access_fails else 1,'code':'EACCES' if read_access_fails else None,'chain':[]}).encode()
     if args[:2]==['docker','run'] and readback_fails and any('verifyProjectionFile' in str(v) for v in args):raise subprocess.CalledProcessError(1,args)
     if args[:2]==['docker','run'] and any('projection-serialize-ok' in str(v) for v in args):
@@ -396,7 +450,12 @@ class Upgrade(unittest.TestCase):
     if durable:request['durableIngress']=True
     if oom:request['snapshotMemoryRepair']=True
     if verify_only:request['verifyOnly']=True
-    with contextlib.redirect_stdout(out):code=NS['upgrade_partitioned'](request)
+    real_stat=Path.stat
+    def root_owned_receipt(path,*args,**kwargs):
+     stat=real_stat(path,*args,**kwargs)
+     if Path(path)==receipt_path:return os.stat_result((stat.st_mode,stat.st_ino,stat.st_dev,stat.st_nlink,0,stat.st_gid,stat.st_size,stat.st_atime,stat.st_mtime,stat.st_ctime))
+     return stat
+    with patch.object(Path,'stat',root_owned_receipt),contextlib.redirect_stdout(out):code=NS['upgrade_partitioned'](request)
     self.assertNotIn('MUST_NEVER_PRINT',out.getvalue());return code,json.loads(out.getvalue().splitlines()[-1])
    try:
     code,result=invoke('prepare',{**hashes,next(iter(hashes)):'bad'});self.assertEqual(code,2);self.assertEqual(result['reason'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH');self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))

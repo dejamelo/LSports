@@ -447,6 +447,9 @@ export interface EventFeed {
 }
 export interface EventSource {
   getEvents(): Promise<EventFeed>;
+  getEventsPage?(input: { limit?: number; cursor?: string; lane?: Lane; sport?: Sport; competitionId?: number; eventId?: string; marketId?: string; scope: string }): Promise<{ feed: Omit<EventFeed, "events">; events: SportEvent[]; page: { revision: number; limit: number; nextCursor?: string; hasMore: boolean } }>;
+  getEventsByIds?(input: { ids: string[]; scope: string }): Promise<EventFeed>;
+  getFeedSummary?(): Promise<{ metadata: Omit<EventFeed, "events">; counts: { lane: string; events: number }[]; revision: number }>;
 }
 
 export type { TicketRequest, TicketLeg, TestTicket, TicketStatus, TicketOutcome } from './tickets.js';

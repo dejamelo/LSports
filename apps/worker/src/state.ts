@@ -154,6 +154,51 @@ export class TradeState {
   private mutationGenerationValue = 0;
   get mutationGeneration() { return this.mutationGenerationValue; }
   private noteMutation() { this.mutationGenerationValue++; }
+  private projectionSequence = 0;
+  private projectionDirtyRows = new Map<string, { lane: Lane; key: number | string; sequence: number }>();
+  private markProjectionDirty(lane: Lane, key: number | string) {
+    const sequence = ++this.projectionSequence;
+    this.projectionDirtyRows.set(`${lane}:${String(key)}`, { lane, key, sequence });
+  }
+  projectionChanges() { return [...this.projectionDirtyRows.values()]; }
+  acknowledgeProjectionChanges(changes: readonly { lane: Lane; key: number | string; sequence: number }[]) {
+    for (const change of changes) {
+      const id = `${change.lane}:${String(change.key)}`;
+      if (this.projectionDirtyRows.get(id)?.sequence === change.sequence) this.projectionDirtyRows.delete(id);
+    }
+  }
+  projectEvent(lane: Lane, key: number | string, now = Date.now()) {
+    return this.projectDelta(lane,key,now).events[0];
+  }
+  projectDelta(lane: Lane, key: number | string, now = Date.now()): import('@lsports/contracts').EventFeed {
+    const row = this.rows[lane].get(key);
+    if (!row) return {mode:'connected',notice:'',events:[]};
+    const captured = Object.create(this) as TradeState;
+    captured.rows = { prematch: new Map(), inplay: new Map() };
+    captured.rows[lane].set(key, row);
+    captured.connections = this.connections;
+    captured.metrics = this.metrics;
+    return captured.feed(now, false, false, true);
+  }
+  projectionMetadata(now = Date.now()): Omit<import('@lsports/contracts').EventFeed, 'events'> {
+    const lanes = Object.values(this.connections);
+    const health = lanes.every(c => c.phase === 'connected') && !lanes.some(c => ['partial', 'rate_limited'].includes(c.outrightRecovery?.status || '') || c.diagnostic?.category === 'rate_limited')
+      ? 'ok' as const : lanes.some(c => c.phase === 'connected') ? 'degraded' as const : 'unavailable' as const;
+    const marketTimes = (['prematch', 'inplay'] as const).flatMap(lane => [this.metrics[lane].activity?.lastMarketReceivedAt].filter((v): v is string => !!v));
+    const latestMarket = marketTimes.map(value => Date.parse(value)).filter(Number.isFinite).reduce((max, value) => Math.max(max, value), 0);
+    const checked = lanes.every(c => !!c.lastSnapshotAt);
+    return {
+      mode: 'connected', health,
+      notice: health === 'ok' ? 'LSports TRADE · Test · Billete de simulación, sin dinero real.' : 'Integración con fallas o en recuperación. Las cuotas afectadas están bloqueadas.',
+      updatedAt: latestMarket ? new Date(latestMarket).toISOString() : undefined,
+      connections: structuredClone(this.connections),
+      coverage: Object.fromEntries((['prematch', 'inplay'] as const).map(lane => [lane, {
+        ...structuredClone(this.metrics[lane]), rowsStored: this.rows[lane].size,
+      }])) as import('@lsports/contracts').EventFeed['coverage'],
+      restoration: this.restoration,
+      horseRacing: { status: checked ? 'not_observed' : 'unknown', message: checked ? 'Sin eventos de Hípica en los snapshots consultados. Esto no confirma ni descarta la habilitación del paquete.' : 'Hípica: disponibilidad pendiente de consulta autenticada.' },
+    };
+  }
   // Opt-in worker publication cache: immutable event projections; never raw SDK rows.
   private mutationTail:Promise<void>=Promise.resolve();
   exclusive<T>(operation:()=>T|Promise<T>):Promise<T>{
@@ -187,6 +232,8 @@ export class TradeState {
     this.publicationStarted=Date.now();this.publicationPhase='capture';
     const captured=Object.create(this) as TradeState;
     captured.mutationGenerationValue=this.mutationGenerationValue;
+    captured.projectionDirtyRows = new Map(this.projectionDirtyRows);
+    captured.projectionSequence = this.projectionSequence;
     captured.rows={prematch:new Map(this.rows.prematch),inplay:new Map(this.rows.inplay)};
     captured.connections=structuredClone(this.connections);captured.metrics=structuredClone(this.metrics);
     for(const lane of ['prematch','inplay'] as const)for(const row of captured.rows[lane].values())this.publicationCaptured.add(row);
@@ -279,6 +326,7 @@ export class TradeState {
       const snapshotObservations=new Map<string,import("@lsports/contracts").SnapshotQuoteObservation>();
       const isoTimes=new Map<number,string>();const isoTime=(n:number)=>{let value=isoTimes.get(n);if(value===undefined){value=new Date(n).toISOString();if(isoTimes.size<1024)isoTimes.set(n,value);}return value;};
       const key = event.outright ? `outright:${event.outright.competitionId}:${event.fixtureId}` : event.fixtureId;
+      this.markProjectionDirty(lane, key);
       let row = this.rows[lane].get(key);
       if (!row) {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
@@ -468,16 +516,20 @@ export class TradeState {
   }
   beginPartitionedSnapshot(lane:Lane){
     // Keep prior outcomes/versions, but never release prices absent from this baseline.
-    const snapshotEpoch={};for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;if(row!==original)transferPreciseBetOrders(original,row);this.rows[lane].set(key,row);snapshotEpochByRow.set(row,snapshotEpoch);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();}
+    const snapshotEpoch={};for(const [key,original] of this.rows[lane])if(!original.outright){const row=(this.projectionCaptured.has(original)||this.publicationCaptured.has(original))?structuredClone(original):original;if(row!==original)transferPreciseBetOrders(original,row);this.rows[lane].set(key,row);snapshotEpochByRow.set(row,snapshotEpoch);this.projectionCache.delete(row);row.restored=true;row.freshBets=new Set();row.snapshotBets=new Map();this.markProjectionDirty(lane,key);}
   }
   finishPartitionedSnapshot(lane:Lane,ids:Set<number>,audit?:SnapshotAudit,liveSince?:number){
-    this.rows[lane]=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));
+    const kept=new Map([...this.rows[lane]].filter(([id,row])=>!!row.outright||typeof id==='number'&&(ids.has(id)||liveSince!==undefined&&Date.parse(row.observation?.amqpEventReceivedAt||'')>=liveSince)));
+    for(const id of this.rows[lane].keys())if(!kept.has(id))this.markProjectionDirty(lane,id);
+    this.rows[lane]=kept;
     this.metrics[lane].snapshot=audit;
     this.set(lane,{lastSnapshotAt:new Date().toISOString(),snapshotEvents:ids.size});
   }
   replace(lane: Lane, events: TradeEvent[], at: number, audit?: SnapshotAudit) {
     this.metrics[lane].snapshot = audit;
-    this.rows[lane] = new Map([...this.rows[lane]].filter(([, row]) => !!row.outright));
+    const kept=new Map([...this.rows[lane]].filter(([, row]) => !!row.outright));
+    for(const id of this.rows[lane].keys())if(!kept.has(id))this.markProjectionDirty(lane,id);
+    this.rows[lane] = kept;
     this.apply(lane, events, at,{source:"snapshot",receivedAt:Date.now()});
     this.set(lane, {
       lastSnapshotAt: new Date().toISOString(),
@@ -560,7 +612,7 @@ export class TradeState {
     const blocks=this.availabilityBlocks();
     const ticketVersionRecoveries: NonNullable<EventFeed["ticketVersionRecoveries"]> = [];
     const ticketOutcomes: NonNullable<EventFeed["ticketOutcomes"]> = [];
-    if(!projectionPart)for (const lane of ["prematch", "inplay"] as const) {
+    for (const lane of ["prematch", "inplay"] as const) {
       for (const [key,row] of this.rows[lane]) for(const [betKey,recovery] of row.timestampRecovery || []) {
         const marketId=betKey.slice(0,betKey.indexOf(':'));
         ticketVersionRecoveries.push({auditId:recovery.auditId,eventId:`${lane}:${key}`,marketId:`${lane}:${key}:${marketId}`,selectionId:`${lane}:${key}:${betKey}`,previousVersion:recovery.previousVersion,baselineVersion:recovery.baselineVersion});
@@ -740,7 +792,7 @@ export class TradeState {
         if(useCache&&!row.outright){const base=events[events.length-1];this.projectionCache.set(row,{context,event:base});if(!deferAvailability)events[events.length-1]=maskEventAvailability(base,blocks[lane]);}
       }
     }
-    if(projectionPart)return {mode:"connected",events,outrightDiagnostics} as EventFeed;
+    if(projectionPart)return {mode:"connected",events,outrightDiagnostics,ticketOutcomes,ticketVersionRecoveries} as EventFeed;
     // Prefer InPlay when a fixture exists in both packages; never merge their prices.
     const inplayIds = new Set(
       events

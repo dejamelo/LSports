@@ -6,6 +6,8 @@ PIPELINE_AUXILIARY_FILES={'packages/feed-store/src/operation-risk.ts'}
 OOM_REHEARSAL_TIMEOUT_SECONDS=1200
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
 PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256={'packages/feed-store/src/tenant-tickets.ts':'56bc1ee5debef412fd571439d9980ef065275ea141692aa58858278401103ad2'}
+INDEXED_PUBLICATION_FILES={'packages/feed-store/src/indexed-feed.ts'}
+INDEXED_PUBLICATION_SOURCE_SHA256={'packages/feed-store/src/indexed-feed.ts':'c26e30fc2697fd844ec627c3725f7fc0c19945a96f268a9da1effe3e4845eafc'}
 PIPELINE_BASE_FILES=PARTITION_DIGEST_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
 PROJECTION_RESUME_DRIVER_SHA256='b2f7cd58ee386c3855b9225088d112fef51a8b442bd0369848fab626fa0c8034'
 
@@ -19,6 +21,19 @@ def verified_existing_snapshot_memory_profile(proof,worker,memory_limit):
     budget=proof.get('projectionReadbackBudgetBytes')
     return proof.get('status')=='ok' and all(proof.get(key) is True for key in ('offlineRestoreVerified','projectionReadbackVerified','rehearsalCopyVerified','preservedSpoolRehearsed')) and type(heap_limit) is int and type(heap_peak) is int and heap_limit-heap_peak>=512*1024**2 and type(rss_peak) is int and rss_peak<memory_limit and proof.get('readbackHeapLimitBytes')==heap_limit and type(budget) is int and budget>0 and memory_limit==8589934592 and worker.get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608'
 
+def pipeline_memory_identity_verified(memory_limit,eight_gib_pipeline,verified_existing_snapshot_profile):
+    return memory_limit==6442450944 or memory_limit==8589934592 and (eight_gib_pipeline or verified_existing_snapshot_profile)
+
+def verify_api_compatibility(required_commit):
+    require(isinstance(required_commit,str) and re.fullmatch('[0-9a-f]{40}',required_commit),'INDEXED_API_COMMIT_REQUIRED')
+    apis=states('api');require(len(apis)==1 and apis[0].get('running') is True and apis[0].get('health')=='healthy','INDEXED_API_NOT_HEALTHY')
+    info=json.loads(run(['docker','inspect',apis[0]['id']]))[0]
+    ref=info.get('Config',{}).get('Image');require(isinstance(ref,str),'INDEXED_API_IMAGE_UNVERIFIED')
+    image=json.loads(run(['docker','image','inspect',ref]))[0]
+    revision=(image.get('Config',{}).get('Labels') or {}).get('org.opencontainers.image.revision')
+    require(revision==required_commit,'INDEXED_API_WORKER_VERSION_MISMATCH')
+    return {'apiCommit':revision,'apiImage':ref,'apiContainerId':apis[0]['id'],'healthy':True}
+
 def verify_full_recovery_sources(old_files,files,old_digest):
     require(set(old_files)==PARTITION_FILES and set(files)==PARTITION_FILES,'FULL_RECOVERY_SOURCE_MANIFEST_MISMATCH')
     installed_digest=hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -26,7 +41,10 @@ def verify_full_recovery_sources(old_files,files,old_digest):
     changed={name for name in files if files[name]!=old_files[name]}
     require(changed=={'apps/worker/src/connected.ts'},'FULL_RECOVERY_PATCH_SCOPE_UNVERIFIED')
     connected=files['apps/worker/src/connected.ts']
-    require("lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.stage==='snapshot'&&c.recoveryProgress.regularSnapshotReady===false)" in connected,'FULL_RECOVERY_PROJECTION_DEFER_GUARD_UNVERIFIED')
+    snapshot_gate="lanes.length>0&&lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.regularSnapshotReady===false)" in connected
+    stale_backlog_gate=("ingress.processingBacklog??ingress.backlog" in connected and
+                        "ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000" in connected)
+    require(snapshot_gate and (changed==set() or stale_backlog_gate),'FULL_RECOVERY_PROJECTION_DEFER_GUARD_UNVERIFIED')
     snapshot=old_files['apps/worker/src/full-snapshot.ts']
     require('transportComplete=res.complete===true' in snapshot and 'if(!transportComplete)' in snapshot and 'transportBytes!==contentLengthBytes' in snapshot and 'Snapshot HTTP Content-Length mismatch' in snapshot,'FULL_RECOVERY_TRANSPORT_GUARD_MISSING')
 
@@ -45,7 +63,7 @@ def verify_current_source_receipt(receipt,image,digest,full_recovery,backups_roo
     hashes=receipt.get('dataBackupHashes');required={'trade-feed.json','trade-feed.json.regular-checkpoint.json','trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite'}
     require(isinstance(hashes,dict) and len(hashes)>=6 and required.issubset(hashes),'CURRENT_SOURCE_BACKUP_MANIFEST_INCOMPLETE')
     for name,digest_value in hashes.items():
-        require(isinstance(name,str) and (name=='trade-feed.json' or re.fullmatch(r'trade-feed\.json(?:\.regular-checkpoint\.json|\.snapshot-[0-9a-f]{16}\.json|\.(?:prematch|inplay)\.inbox\.sqlite)(?:-(?:wal|shm))?',name)),'CURRENT_SOURCE_BACKUP_ENTRY_UNSAFE')
+        require(isinstance(name,str) and (name in ('trade-feed.json','trade-feed.public.sqlite') or re.fullmatch(r'trade-feed\.json(?:\.regular-checkpoint\.json|\.checkpoint-journal\.jsonl|\.pre-indexed-compaction\.bak|\.checkpoint-compaction\.tmp|\.checkpoint-journal\.jsonl\.empty\.tmp|\.snapshot-[0-9a-f]{16}\.json|\.(?:prematch|inplay)\.inbox\.sqlite)',name)),'CURRENT_SOURCE_BACKUP_ENTRY_UNSAFE')
         require(re.fullmatch('[0-9a-f]{64}',str(digest_value)) is not None,'CURRENT_SOURCE_BACKUP_HASH_INVALID')
         path=backup/name;require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and snapshot_file_hash(path)==digest_value,'CURRENT_SOURCE_BACKUP_HASH_MISMATCH')
     return True
@@ -317,7 +335,7 @@ def verify_budgeted_worker_runtime(progress,worker_id,inspected,image_id):
     require(configured.get('cgroupLimitBytes')==expected_memory and expected_heap*1024**2<=configured.get('effectiveHeapLimitProbeBytes',0)<=expected_memory-512*1024**2,'BUDGETED_HEAP_CONFIGURATION_MISMATCH')
     return {'nodeOptions':'--max-old-space-size='+str(expected_heap),'dockerMemoryLimitBytes':expected_memory,**configured,'probeIsSeparateProcess':True}
 
-def existing_pipeline_heap_plan(worker):
+def existing_pipeline_heap_plan(worker,verified_existing_snapshot_profile=False,verified_stopped_recovery=False,expected_container_id=None):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
     if options=='--max-old-space-size=2560':return None
     if options=='--max-old-space-size=3840' and snapshot_memory_bytes(worker.get('mem_limit'))==6442450944:
@@ -333,6 +351,22 @@ def existing_pipeline_heap_plan(worker):
         require(type(limit) is int and 3840*1024**2<=limit<=6442450944-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
         return {'evidenceVerified':True,'oldSpaceMiB':3840,'previousOldSpaceMiB':3840,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':limit}
     if options=='--max-old-space-size=4608' and snapshot_memory_bytes(worker.get('mem_limit'))==8589934592:
+        if verified_existing_snapshot_profile:
+            require(worker.get('environment',{}).get('NODE_OPTIONS')==options,'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
+            workers=states('worker');require(len(workers)==1 and (expected_container_id is None or workers[0].get('id')==expected_container_id),'PIPELINE_WORKER_HEAP_PROBE_COUNT_UNVERIFIED')
+            live=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
+            live_env=dict(item.split('=',1) for item in live.get('Config',{}).get('Env',[]) if '=' in item)
+            require(live.get('Config',{}).get('Image')==worker.get('image') and live.get('HostConfig',{}).get('Memory')==8589934592 and live_env.get('NODE_OPTIONS')==options,'PIPELINE_LIVE_WORKER_HEAP_PROBE_CONFIGURATION_UNVERIFIED')
+            probe="const s=require('node:v8').getHeapStatistics();console.log(JSON.stringify({heapLimitBytes:s.heap_size_limit}))"
+            if workers[0].get('running') is True:
+                measured=json.loads(run(['docker','exec',workers[0]['id'],'node','-e',probe],timeout=30))
+            else:
+                state=live.get('State',{})
+                require(verified_stopped_recovery is True and state.get('Running') is False and state.get('ExitCode')==137 and state.get('OOMKilled') is False,'PIPELINE_STOPPED_HEAP_PROBE_EXIT_UNVERIFIED')
+                measured=json.loads(run(['docker','run','--rm','--network','none','--read-only','--memory','8589934592','--memory-swap','8589934592','--cpus','2','-e','NODE_OPTIONS='+options,'--entrypoint','node',live.get('Image'),'-e',probe],timeout=30))
+            limit=measured.get('heapLimitBytes')
+            require(type(limit) is int and 4608*1024**2<=limit<=8589934592-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
+            return {'evidenceVerified':True,'oldSpaceMiB':4608,'previousOldSpaceMiB':4608,'containerLimitUnchanged':True,'preserveExisting':True,'effectiveHeapLimitBytes':limit}
         image=worker.get('image','');require(re.fullmatch('adl-worker-partitioned:[0-9a-f]{24}',image),'PIPELINE_HEAP_IMAGE_UNVERIFIED')
         path=SECURE/('partitioned-upgrade-'+image.split(':')[1]+'.json')
         require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and path.stat().st_size<2*1024**2,'PIPELINE_HEAP_RECEIPT_UNVERIFIED')
@@ -525,7 +559,7 @@ def partition_rehearsal_args(args,progress):
     return args
 
 def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
-    require(set(files)==PARTITION_FILES and set(old_files)==PIPELINE_BASE_FILES|PIPELINE_AUXILIARY_FILES and set(added_old_files)==set(PIPELINE_ADDED_DEPENDENCY_SHA256)|set(PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_SOURCE_MANIFEST_MISMATCH')
+    require(set(files)==PARTITION_FILES|INDEXED_PUBLICATION_FILES and set(old_files)==PIPELINE_BASE_FILES|PIPELINE_AUXILIARY_FILES and set(added_old_files)==set(PIPELINE_ADDED_DEPENDENCY_SHA256)|set(PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_SOURCE_MANIFEST_MISMATCH')
     require({name:hashlib.sha256(added_old_files[name].encode()).hexdigest() for name in PIPELINE_ADDED_DEPENDENCY_SHA256}==PIPELINE_ADDED_DEPENDENCY_SHA256,'PIPELINE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     require(verify_pinned_added_dependencies(added_old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_PINNED_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     verified_base={**old_files,**added_old_files}
@@ -534,8 +568,12 @@ def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
     # hashing only the historical core subset rejects every full-set image.
     digest_base={name:verified_base[name] for name in PARTITION_FILES}
     require(hashlib.sha256(json.dumps(digest_base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
-    changed={n for n in files if files[n]!=verified_base[n]}
-    require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'},'PIPELINE_PATCH_SCOPE_UNVERIFIED')
+    require({name:hashlib.sha256(files[name].encode()).hexdigest() for name in INDEXED_PUBLICATION_FILES}==INDEXED_PUBLICATION_SOURCE_SHA256,'INDEXED_PUBLICATION_SOURCE_HASH_UNVERIFIED')
+    require('export { IndexedFeedStore, indexedFeedPath } from "./indexed-feed.js";' in files['packages/feed-store/src/index.ts'],'INDEXED_PUBLICATION_EXPORT_MISSING')
+    changed={n for n in files if n not in verified_base or files[n]!=verified_base[n]}
+    require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/persistence.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'}|INDEXED_PUBLICATION_FILES,'PIPELINE_PATCH_SCOPE_UNVERIFIED')
+    require('indexed_projection.rebuild' in files['apps/worker/src/connected.ts'] and 'indexed_projection.delta' in files['apps/worker/src/connected.ts'] and 'new IndexedFeedStore' in files['apps/worker/src/connected.ts'],'INDEXED_PUBLICATION_WORKER_WIRING_MISSING')
+    require('persistCheckpointDelta' in files['apps/worker/src/persistence.ts'] and 'compactCheckpointJournal' in files['apps/worker/src/persistence.ts'] and 'await file.sync()' in files['apps/worker/src/persistence.ts'],'INDEXED_PUBLICATION_DURABILITY_GUARD_MISSING')
 
 def verify_publication_reserve_sources(old_files,files,old_digest):
     # The installed image label covers the historical full source set. The
@@ -566,8 +604,10 @@ def verify_checkpoint_buffer_sources(old_files,files,old_digest):
     require('apps/worker/src/persistence.ts' in changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/persistence.ts'},'CHECKPOINT_BUFFER_PATCH_SCOPE_UNVERIFIED')
 
 def verify_transport_lifecycle_sources(old_files,files,old_digest):
-    base={name:old_files[name] for name in PARTITION_DIGEST_FILES if name in old_files}
-    require(set(old_files)==set(files) and set(base)==PARTITION_DIGEST_FILES and hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'TRANSPORT_LIFECYCLE_BASE_DIGEST_MISMATCH')
+    # Image labels are created from the complete PARTITION_FILES manifest.
+    # Hash that exact set here; hashing only the historical subset can never
+    # match a full-set image label and blocks valid, pinned lifecycle repairs.
+    require(set(old_files)==set(files)==PARTITION_FILES and hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'TRANSPORT_LIFECYCLE_BASE_DIGEST_MISMATCH')
     require(verify_pinned_added_dependencies(old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'TRANSPORT_LIFECYCLE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     changed={n for n in files if files[n]!=old_files[n]}
     # Actor lifetime/join, durable post-disconnect retirement and actor identity.
@@ -1115,7 +1155,7 @@ def staged_recovery_disk_preflight(directory,backup,progress,digest,spool):
     recovery=pre_stop_copy_files(directory)
     journals=[p for p in directory.glob('trade-feed.json.snapshot-*.json') if re.fullmatch(r'trade-feed\.json\.snapshot-[0-9a-f]{16}\.json',p.name)]
     backup_sources=[*recovery,*journals]
-    backup_missing=sum(p.stat().st_size for p in backup_sources if not (backup/p.name).exists())
+    backup_missing=sum(recovery_source_bytes(p) for p in backup_sources if not (backup/p.name).exists())
     rehearsal_name=progress.get('rehearsalDirectory') or 'rehearsal-'+digest[:24]
     require(re.fullmatch(r'rehearsal-[0-9a-f]{24}',rehearsal_name),'REHEARSAL_DIRECTORY_NAME_UNVERIFIED')
     rehearsal=backup/rehearsal_name
@@ -1134,20 +1174,83 @@ def staged_recovery_disk_preflight(directory,backup,progress,digest,spool):
 
 def pre_stop_copy_files(directory):
     checkpoint=directory/'trade-feed.json';regular=directory/'trade-feed.json.regular-checkpoint.json'
-    inboxes=sorted(directory.glob('trade-feed.json.*.inbox.sqlite*'))
+    inboxes=sorted(directory.glob('trade-feed.json.*.inbox.sqlite'))
+    sidecars=sorted(directory.glob('trade-feed.json.*.inbox.sqlite-*'))
     databases=[p for p in inboxes if re.fullmatch(r'trade-feed\.json\.(prematch|inplay)\.inbox\.sqlite',p.name)]
     require(checkpoint.is_file() and not checkpoint.is_symlink() and regular.is_file() and not regular.is_symlink(),'PRE_STOP_CHECKPOINT_COPY_SET_UNVERIFIED')
     require(len(databases)==2 and {p.name for p in databases}=={'trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite'},'PRE_STOP_INBOX_COPY_SET_UNVERIFIED')
     paths=[checkpoint,regular,*inboxes]
-    require(all(p.is_file() and not p.is_symlink() for p in paths),'PRE_STOP_PERSISTED_COPY_FILE_UNVERIFIED')
+    # These are part of the authoritative recovery state for incremental
+    # checkpoints and the public index. SQLite files are captured with the
+    # SQLite backup API after the writer stops; WAL/SHM are never copied as
+    # independent files.
+    for name in ('trade-feed.json.checkpoint-journal.jsonl','trade-feed.json.pre-indexed-compaction.bak','trade-feed.json.checkpoint-compaction.tmp','trade-feed.json.checkpoint-journal.jsonl.empty.tmp','trade-feed.public.sqlite'):
+        candidate=directory/name
+        if candidate.exists():paths.append(candidate)
+    require(all(p.is_file() and not p.is_symlink() for p in paths+sidecars),'PRE_STOP_PERSISTED_COPY_FILE_UNVERIFIED')
     return paths
+
+def sqlite_consistent_backup(source,target):
+    """Create a standalone, verified SQLite snapshot, including committed WAL pages."""
+    import sqlite3
+    require(source.is_file() and not source.is_symlink() and not target.is_symlink(),'SQLITE_BACKUP_SOURCE_UNVERIFIED')
+    temporary=target.with_name(target.name+'.consistent.tmp')
+    require(not temporary.exists() and not temporary.is_symlink(),'SQLITE_BACKUP_TEMP_EXISTS')
+    src=sqlite3.connect(source.as_uri()+'?mode=ro',uri=True,timeout=30)
+    dst=sqlite3.connect(temporary,timeout=30)
+    try:
+        try:
+            src.backup(dst,pages=4096,sleep=0.05)
+            check=dst.execute('PRAGMA integrity_check').fetchone()
+            require(check and check[0]=='ok','SQLITE_BACKUP_INTEGRITY_FAILED')
+            # The source may itself be in WAL mode. Normalize only the private
+            # backup destination so the artifact is a single standalone DB.
+            if dst.execute('PRAGMA journal_mode').fetchone()[0].lower()=='wal':
+                dst.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                require(dst.execute('PRAGMA journal_mode=DELETE').fetchone()[0].lower()=='delete','SQLITE_BACKUP_WAL_CLOSE_FAILED')
+            dst.commit()
+        finally:dst.close();src.close()
+    except Exception:
+        try:temporary.unlink()
+        except FileNotFoundError:pass
+        raise
+    for suffix in ('-wal','-shm'):
+        sidecar=Path(str(temporary)+suffix)
+        if sidecar.exists():require(sidecar.is_file() and not sidecar.is_symlink(),'SQLITE_BACKUP_TEMP_SIDECAR_UNSAFE');sidecar.unlink()
+    with temporary.open('rb') as copied:os.fsync(copied.fileno())
+    os.chmod(temporary,0o600);os.replace(temporary,target)
+    directory_fd=os.open(target.parent,os.O_RDONLY)
+    try:os.fsync(directory_fd)
+    finally:os.close(directory_fd)
+    verify=sqlite3.connect(target.as_uri()+'?mode=ro',uri=True,timeout=30)
+    try:
+        result=verify.execute('PRAGMA integrity_check').fetchone()
+        require(result and result[0]=='ok','SQLITE_BACKUP_READBACK_FAILED')
+        pages=verify.execute('PRAGMA page_count').fetchone()[0];page_size=verify.execute('PRAGMA page_size').fetchone()[0]
+    finally:verify.close()
+    return {'sha256':snapshot_file_hash(target),'bytes':target.stat().st_size,'logicalBytes':pages*page_size,'integrity':'ok','walIncludedBySQLiteBackupApi':True}
+
+def sqlite3_integrity(path):
+    import sqlite3
+    if not path.is_file() or path.is_symlink():return False
+    db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=30)
+    try:return db.execute('PRAGMA integrity_check').fetchone()==('ok',)
+    except sqlite3.DatabaseError:return False
+    finally:db.close()
+
+def recovery_source_bytes(path):
+    size=path.stat().st_size
+    if path.name.endswith('.sqlite'):
+        wal=path.with_name(path.name+'-wal')
+        if wal.is_file() and not wal.is_symlink():size+=wal.stat().st_size
+    return size
 
 def storage_before_stop(backup,container,progress,digest):
     mounts=[m for m in container.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed']
     require(len(mounts)==1,'PRE_STOP_FEED_MOUNT_UNVERIFIED')
     directory=Path(mounts[0]['Source'])
     files=pre_stop_copy_files(directory)
-    total=sum(p.stat().st_size for p in files)
+    total=sum(recovery_source_bytes(p) for p in files)
     # Run the same phased peak plan before stopping the only writer. The old
     # total*10 estimate counted many copies that never coexist and could block
     # every cutover despite a smaller, explicitly budgeted recovery sequence.
@@ -1240,9 +1343,23 @@ def mark_old_container_if_exited(progress,save):
     else:progress['phase']='stopped';save(progress)
     return True
 
-def recover_completed_shutdown(progress,save,backup,evidence):
+def incomplete_shutdown_recovery_eligible(progress,evidence,previous,current):
+    logs=evidence.get('shutdownLogs',[])
+    return (progress.get('pipelineRepair') is True and progress.get('supplierStoppedBeforeConsumer') is True and
+        evidence.get('running') is True and evidence.get('applicationStoppingObserved') is True and
+        not evidence.get('eventsReadFailed') and not evidence.get('distributionRestartAfterRecordedStop') and
+        not evidence.get('shutdownErrors') and any(r.get('status')=='stopping' for r in logs) and
+        not any(r.get('status')=='error' for r in logs) and
+        isinstance(previous,dict) and previous.get('observationElapsedSeconds',0)>=90 and
+        previous.get('progressSincePreviousSample') is False and current.get('running') is True and
+        current.get('files')==previous.get('files') and
+        current.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence') and
+        not work_counter_progress(previous.get('containerWork'),current.get('containerWork'),sample_elapsed_seconds(previous,current)))
+
+def recover_completed_shutdown(progress,save,backup,evidence,allow_incomplete=False,previous=None,current=None):
     cid=progress['oldContainer'];require(progress.get('supplierStoppedBeforeConsumer') is True and not evidence.get('distributionRestartAfterRecordedStop'),'PRE_EXIT_DISTRIBUTION_STOP_UNVERIFIED')
-    require(any(r.get('status')=='ok' for r in evidence.get('shutdownLogs',[])),'PRE_EXIT_APPLICATION_SHUTDOWN_NOT_COMPLETED')
+    completed=any(r.get('status')=='ok' for r in evidence.get('shutdownLogs',[]))
+    require(completed or allow_incomplete and incomplete_shutdown_recovery_eligible(progress,evidence,previous,current),'PRE_EXIT_APPLICATION_SHUTDOWN_NOT_COMPLETED')
     if mark_old_container_if_exited(progress,save):return
     try:tree=container_process_tree(cid)
     except subprocess.CalledProcessError:
@@ -1321,6 +1438,23 @@ def recover_completed_shutdown(progress,save,backup,evidence):
     progress['verifiedExitSignal']['status']='docker_accepted';save(progress)
     confirm_pre_exit_finalization(progress,save)
     emit(operation='cutover.aws',stage='partitioned_upgrade.old_container_finalized',status='verified',containerId=cid,originalHashesUnchanged=True,forceStopEvidenceVerified=True,workerStarted=False,posnetChanged=False)
+
+def recover_incomplete_shutdown_safely(progress,save,backup,evidence,previous,current):
+    try:
+        recover_completed_shutdown(progress,save,backup,evidence,allow_incomplete=True,previous=previous,current=current)
+    except Exception:
+        # A failed read-only restore rehearsal must leave the original worker
+        # able to resume. Never strand a live container paused on a failed proof.
+        workers=states('worker')
+        if len(workers)==1 and workers[0].get('id')==progress.get('oldContainer') and workers[0].get('running'):
+            info=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
+            if info.get('State',{}).get('Paused'):
+                run(['docker','unpause',workers[0]['id']])
+                restored=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
+                require(restored.get('State',{}).get('Running') and not restored.get('State',{}).get('Paused'),'PRE_EXIT_FAILED_PROOF_UNPAUSE_UNCONFIRMED')
+                progress['recoveryFreeze']={'containerId':workers[0]['id'],'imageId':progress['baseImageId'],'status':'unpaused_after_failed_proof'};save(progress)
+                emit(operation='cutover.aws',stage='partitioned_upgrade.pre_exit_unpause',status='restored_after_failed_proof',workerStarted=False,posnetChanged=False)
+        raise
 
 def collect_graceful_signal_evidence(progress):
     workers=states('worker');require(len(workers)==1 and workers[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
@@ -1407,8 +1541,8 @@ def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None
     now=now or time.monotonic;sleep=sleep or time.sleep;began=now();observations=[];previous=None;last_change=began
     while True:
         point=sample();require(type(point.get('running')) is bool,'STOP_OBSERVATION_STATE_UNVERIFIED');point['observationElapsedSeconds']=round(now()-began,1)
-        fingerprint=json.dumps({'files':point.get('files'),'records':point.get('records')},sort_keys=True)
-        counter_progress=bool(observations and work_counter_progress(observations[-1].get('containerWork'),point.get('containerWork')))
+        fingerprint=json.dumps(stop_observation_fingerprint(point),sort_keys=True)
+        counter_progress=bool(observations and work_counter_progress(observations[-1].get('containerWork'),point.get('containerWork'),interval))
         changed=previous is not None and (fingerprint!=previous or counter_progress)
         if changed:last_change=now()
         point['progressSincePreviousSample']=changed;point['progressKind']='checkpoint_or_log' if previous is not None and fingerprint!=previous else 'container_cpu_or_io' if counter_progress else 'none';point['assessment']='exited' if not point['running'] else 'observable_progress' if changed else 'no_new_observable_progress'
@@ -1455,11 +1589,25 @@ def resumed_stop_budget(progress, measured_full_recovery=False, current_sample=N
     # No repeated signal; inactivity and identity checks remain unchanged.
     return 600 if previous and previous[-1].get('progressSincePreviousSample') is True else 180
 
-def work_counter_progress(previous,current):
+def stop_observation_fingerprint(point):
+    records=point.get('records') or []
+    # The diagnostic returns a rolling window. Comparing the whole list makes
+    # dropping its oldest row look like progress even when no new event arrived.
+    return {'files':point.get('files'),'latestRecord':records[-1] if records else None}
+
+def sample_elapsed_seconds(previous,current):
+    try:
+        a=datetime.datetime.fromisoformat(previous['atUTC'].replace('Z','+00:00'))
+        b=datetime.datetime.fromisoformat(current['atUTC'].replace('Z','+00:00'))
+        return max(1.0,(b-a).total_seconds())
+    except (KeyError,TypeError,ValueError):return 15.0
+
+def work_counter_progress(previous,current,elapsed_seconds=15.0):
     if not isinstance(previous,dict) or not isinstance(current,dict):return False
     cpu=current.get('cpuUsageUsec',0)-previous.get('cpuUsageUsec',0)
     io=sum(current.get(k,0)-previous.get(k,0) for k in ('readBytes','writeBytes'))
-    return cpu>=500000 or io>=1024*1024
+    scale=max(1.0,elapsed_seconds/15.0)
+    return cpu>=500000*scale or io>=1024*1024*scale
 
 def upgrade_stop_sample(progress):
     workers=states('worker');require(len(workers)==1 and workers[0]['id']==progress.get('oldContainer'),'STOP_CONTAINER_IDENTITY_CHANGED')
@@ -1527,7 +1675,8 @@ def resolve_prepared_upgrade(request,candidate_files):
     image_id=image_info['Id'];require(re.fullmatch('sha256:[0-9a-f]{64}',image_id),'RESUME_PREPARED_IMAGE_ID_UNVERIFIED')
     export="const f=require('node:fs');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(PARTITION_FILES))+".map(n=>[n,f.readFileSync('/app/'+n,'utf8')]))));"
     files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',image_id,'-e',export],timeout=30))
-    require(isinstance(files,dict) and set(files)==PARTITION_FILES and all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'RESUME_PREPARED_SOURCES_UNVERIFIED')
+    expected_sources=PARTITION_FILES|(INDEXED_PUBLICATION_FILES if request.get('pipelineRepair') is True else set())
+    require(isinstance(files,dict) and set(files)==expected_sources and all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'RESUME_PREPARED_SOURCES_UNVERIFIED')
     require(hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()==digest,'RESUME_PREPARED_SOURCE_DIGEST_MISMATCH')
     emit(operation='cutover.aws',stage='partitioned_upgrade.resume_resolved',status='verified',receipt=str(found),backup=str(expected),image=image,imageId=image_id,digest=digest,progressPhase=record['phase'],candidateFilesMatchPrepared=files==candidate_files,preparedSourceReused=True,workerStarted=False,imageRebuilt=False,posnetChanged=False)
     return found,record,files
@@ -1548,7 +1697,8 @@ def upgrade_partitioned_unlocked(request):
     stage='partitioned_upgrade.input';backup=None
     try:
         require(os.geteuid()==0,'ROOT_REQUIRED');phase=request['phase'];require(phase in ('prepare','activate','rollback'),'INVALID_UPGRADE_PHASE')
-        files=request['files'];require(set(files)==PARTITION_FILES,'UPGRADE_FILE_LIST_UNVERIFIED')
+        files=request['files'];expected_sources=PARTITION_FILES|(INDEXED_PUBLICATION_FILES if request.get('pipelineRepair') is True else set());require(set(files)==expected_sources,'UPGRADE_FILE_LIST_UNVERIFIED')
+        api_compatibility=verify_api_compatibility(request['requiredApiCommit']) if request.get('pipelineRepair') is True else None
         require(all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'UPGRADE_SOURCE_SIZE_LIMIT')
         digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt_path=SECURE/('partitioned-upgrade-'+digest[:24]+'.json')
         if request.get('resumeBackup'):
@@ -1562,13 +1712,19 @@ def upgrade_partitioned_unlocked(request):
         verified_snapshot_eight_gib=snapshot_eight_gib and request.get('snapshotMemoryRepair') is True and memory_limit==8589934592 and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608' and snapshot_headroom>=12*1024**3
         require(memory_limit==4294967296 or request.get('pipelineRepair') is True and memory_limit==6442450944 or six_gib_pressure and memory_limit==6442450944 or v8_heap_preserve and memory_limit==6442450944 or verified_eight_gib_base or verified_snapshot_eight_gib or verified_existing_snapshot_profile,'UPGRADE_REQUIRES_VERIFIED_EXISTING_MEMORY_LIMIT')
         if eight_gib_pipeline:require(request.get('pipelineRepair') is True and request.get('snapshotMemoryRepair') is True and request.get('livePersistenceRepair') is True and memory_limit in (6442450944,8589934592) and before['services']['worker'].get('environment',{}).get('NODE_OPTIONS')=='--max-old-space-size=4608','EIGHT_GIB_PROFILE_REQUIRES_VERIFIED_BASE_AND_PRESERVED_HEAP')
-        inherited_heap_plan=None
+        inherited_heap_plan=None;defer_existing_profile_probe=False
         if request.get('pipelineRepair'):
-            require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and (memory_limit==6442450944 or verified_eight_gib_base),'PIPELINE_REQUIRES_VERIFIED_MEMORY_IDENTITY')
+            require((request.get('livePersistenceRepair') is True or request.get('stoppedRetentionRepair') is True and request.get('checkpointRepairBackup') and not request.get('resumeBackup')) and request.get('snapshotMemoryRepair') is True and pipeline_memory_identity_verified(memory_limit,verified_eight_gib_base,verified_existing_snapshot_profile),'PIPELINE_REQUIRES_VERIFIED_MEMORY_IDENTITY')
             require(run(['systemctl','is-active','adl-worker-cache-reserve.service']).strip()==b'active','CACHE_RESERVE_NOT_ACTIVE_NO_WORKER_CHANGE')
             if request.get('preservedHeapBudgetRepair') and request.get('resumeBackup'):
                 require(before['services']['worker'].get('environment',{}).get('NODE_OPTIONS') in ('--max-old-space-size=2560','--max-old-space-size=3584'),'PIPELINE_EXISTING_HEAP_OPTIONS_CHANGED_NO_DEPLOYMENT')
-            else:inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'])
+            elif request.get('resumeBackup') and verified_existing_snapshot_profile:
+                # The original 8 GiB worker has already been finalized only
+                # after a hash-verified replay. Probe its exact profile after
+                # loading that receipt; there is no running process to exec.
+                defer_existing_profile_probe=True
+            else:
+                inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'],verified_existing_snapshot_profile)
         elif verified_snapshot_eight_gib:
             current_workers=states('worker');require(len(current_workers)==1,'SNAPSHOT_EIGHT_GIB_WORKER_COUNT_UNVERIFIED')
             current_container=json.loads(run(['docker','inspect',current_workers[0]['id']]))[0]
@@ -1635,6 +1791,13 @@ def upgrade_partitioned_unlocked(request):
             save(progress)
         if receipt_path.exists():
             require(receipt_path.is_file() and not receipt_path.is_symlink(),'UPGRADE_RECEIPT_UNVERIFIED');progress=json.loads(receipt_path.read_bytes());require(progress['digest']==digest,'UPGRADE_DIGEST_MISMATCH');backup=Path(progress['backup'])
+            if defer_existing_profile_probe:
+                stopped_profile_proof=(progress.get('preExitProof',{}).get('verified') is True and
+                    progress.get('phase')=='stopped' and progress.get('oldContainer')==progress.get('verifiedExitContainerId') and
+                    progress.get('verifiedExitSignal',{}).get('containerId')==progress.get('oldContainer') and
+                    progress.get('verifiedExitSignal',{}).get('status') in ('docker_accepted','exit_observed_after_intent'))
+                inherited_heap_plan=existing_pipeline_heap_plan(before['services']['worker'],verified_existing_snapshot_profile,stopped_profile_proof,progress.get('oldContainer'))
+                progress['heapBudgetPlan']=inherited_heap_plan;save(progress)
             if verified_existing_snapshot_profile:
                 require(request.get('fullRecovery') is True and progress.get('memoryLimitBytes')==memory_limit and progress.get('image')=='adl-worker-partitioned:'+digest[:24],'EXISTING_SNAPSHOT_MEMORY_PROFILE_RECEIPT_MISMATCH')
                 progress['verifiedExistingSnapshotMemoryProfile']=True;progress['existingSnapshotMemoryNodeOptions']=before['services']['worker'].get('environment',{}).get('NODE_OPTIONS');save(progress)
@@ -1673,6 +1836,10 @@ def upgrade_partitioned_unlocked(request):
             # image-only probe instead.
             source_command=(['docker','exec',workers[0]['id'],'node','-e',probe] if workers[0].get('running') and workers[0].get('id') else ['docker','run','--rm','--network','none','--memory','128m','--cpus','0.5','--read-only','--entrypoint','node',original_image,'-e',probe])
             hashes=json.loads(run(source_command,timeout=30))
+            # Fail on the exact changed source set before image-identity and
+            # recovery-receipt checks. This is a safety preflight, not a test
+            # shortcut: every patch still has to pass its mode-specific proof.
+            require(hashes==request['baseHashes'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH')
             if request.get('liveOomRepair') or request.get('livePersistenceRepair') or request.get('fullRecovery'):
                 identity_proof='verified_full_recovery_source' if request.get('fullRecovery') is True else verify_current_worker_identity(workers[0],request,original_image)
                 if identity_proof=='verified_v8_heap_exit':
@@ -1680,8 +1847,10 @@ def upgrade_partitioned_unlocked(request):
                 old_digest=(base_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch');require(re.fullmatch('[0-9a-f]{64}',str(old_digest)),'CURRENT_OOM_IMAGE_LABEL_UNVERIFIED')
                 old_receipt=SECURE/('partitioned-upgrade-'+old_digest[:24]+'.json');require(old_receipt.is_file() and not old_receipt.is_symlink() and old_receipt.stat().st_uid==os.geteuid() and old_receipt.stat().st_mode&0o077==0,'CURRENT_OOM_SOURCE_RECEIPT_MISSING')
                 old=json.loads(old_receipt.read_bytes());verify_current_source_receipt(old,original_image,old_digest,request.get('fullRecovery') is True,BACKUPS)
-                export="const fs=require('node:fs');const names="+json.dumps(sorted(files))+";console.log(JSON.stringify(Object.fromEntries(names.map(n=>[n,fs.readFileSync('/app/'+n,'utf8')]))))"
+                base_source_names=sorted(PARTITION_FILES if request.get('pipelineRepair') is True else files)
+                export="const fs=require('node:fs');const names="+json.dumps(base_source_names)+";console.log(JSON.stringify(Object.fromEntries(names.map(n=>[n,fs.existsSync('/app/'+n)?fs.readFileSync('/app/'+n,'utf8'):null]))))"
                 old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',original_image,'-e',export],timeout=30))
+                old_files={name:value for name,value in old_files.items() if value is not None}
                 if request.get('snapshotCheckpointMemoryRepair'):
                     require(request.get('snapshotMemoryRepair') is True and request.get('liveOomRepair') is True and re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))),'SNAPSHOT_CHECKPOINT_REPAIR_IDENTITY_REQUIRED')
                     verify_snapshot_checkpoint_memory_sources(old_files,files,old_digest)
@@ -1788,7 +1957,7 @@ def upgrade_partitioned_unlocked(request):
         if request.get('throughputFix') and not progress.get('throughputVerified'):
             stage='partitioned_upgrade.offline_throughput'
             require(progress.get('nullableMarketsVerified') is True,'THROUGHPUT_REQUIRES_CAPTURED_NULLABLE_ROW_TEST')
-            check="import{session,coalescedPersistence}from'/app/apps/worker/src/connected.ts';import{TradeState}from'/app/apps/worker/src/state.ts';import{EventEmitter}from'node:events';let version=1,captures=[],release=[];const save=coalescedPersistence(async()=>{captures.push(version);await new Promise(r=>release.push(r))});const one=save();await new Promise(r=>setImmediate(r));version=2;const two=save();version=3;const three=save();if(two!==three||one===two)throw Error('unsafe coalescing');release.shift()();await one;await new Promise(r=>setImmediate(r));if(captures.join(',')!=='1,3')throw Error('capture order');release.shift()();await two;const state=new TradeState(),abort=new AbortController();let writes=0;const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(){return{consumerTag:'offline'}}}),connection=Object.assign(new EventEmitter(),{async createChannel(){return channel},async close(){connection.emit('close')}});const pkg={lane:'prematch',packageId:4511,username:'isolated',password:'isolated',hostname:'unused',queue:'unused',vhost:'unused',tls:false,port:5672};const api={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true}},async snapshot(){throw Error('unexpected')},async catalog(){return[]},async snapshotFull(sink){for(let i=1;i<=1600;i++)await sink.apply({fixtureId:i,fixture:{status:1},markets:null},Date.now());return{ids:new Set(Array.from({length:1600},(_,i)=>i+1)),rows:1600,bytes:1}}};await session(pkg,{packages:[pkg],staleMs:90000,recoveryMs:300000},state,async()=>{writes++;if(state.connections.prematch.phase==='connected')abort.abort()},abort.signal,{clientFactory:()=>api,connect:async()=>connection});if(writes>=15)throw Error('redundant full checkpoints');console.log('throughput-offline-ok');"
+            check="import{session,coalescedPersistence}from'/app/apps/worker/src/connected.ts';import{TradeState}from'/app/apps/worker/src/state.ts';import{EventEmitter}from'node:events';let version=1,captures=[],release=[];const save=coalescedPersistence(async()=>{captures.push(version);await new Promise(r=>release.push(r))});const one=save();await new Promise(r=>setImmediate(r));version=2;const two=save();version=3;const three=save();if(two!==three||one===two)throw Error('unsafe coalescing');release.shift()();await one;await new Promise(r=>setImmediate(r));if(captures.join(',')!=='1,3')throw Error('capture order');release.shift()();await two;const state=new TradeState(),abort=new AbortController();let writes=0;const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(){return{consumerTag:'offline'}}}),connection=Object.assign(new EventEmitter(),{async createChannel(){return channel},async close(){connection.emit('close')}});const pkg={lane:'prematch',packageId:4511,username:'isolated',password:'isolated',hostname:'unused',queue:'unused',vhost:'unused',tls:false,port:5672};const api={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true}},async snapshot(){throw Error('unexpected')},async catalog(){return[]},async snapshotFull(sink){const now=new Date().toISOString();await sink.progress({stage:'waiting_http',lastProgressAt:now,bytes:1,validatedRows:1600,appliedRows:0});await sink.progress({stage:'apply',lastProgressAt:now,bytes:1,validatedRows:1600,appliedRows:0});for(let i=1;i<=1600;i++)await sink.apply({fixtureId:i,fixture:{status:1},markets:null},Date.now());await sink.progress({stage:'complete',lastProgressAt:new Date().toISOString(),bytes:1,validatedRows:1600,appliedRows:1600});return{ids:new Set(Array.from({length:1600},(_,i)=>i+1)),rows:1600,bytes:1}}};await session(pkg,{packages:[pkg],staleMs:90000,recoveryMs:300000},state,async()=>{writes++;if(state.connections.prematch.phase==='connected')abort.abort()},abort.signal,{clientFactory:()=>api,connect:async()=>connection});if(writes>=15)throw Error('redundant full checkpoints');console.log('throughput-offline-ok');"
             output=run(['docker','run','--rm','--network','none','--memory','384m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--import','tsx','--input-type=module','-e',check],timeout=45)
             require(b'throughput-offline-ok' in output,'THROUGHPUT_OFFLINE_VALIDATION_FAILED');progress['throughputVerified']=True;save(progress)
         if request.get('durableIngress') and not progress.get('durableIngressVerified'):
@@ -1864,7 +2033,7 @@ def upgrade_partitioned_unlocked(request):
                 check="import{writeFile,mkdtemp,rm}from'node:fs/promises';import{walkSnapshot,convertSnapshotRow}from'/app/apps/worker/src/full-snapshot.ts';const d=await mkdtemp('/tmp/parser-'),p=d+'/body';let ticks=0,rows=0;const timer=setInterval(()=>ticks++,1);try{const bets=Array.from({length:300},(_,i)=>({Id:String(i+1),Price:'2.00',Status:1}));await writeFile(p,JSON.stringify({Body:Array.from({length:200},(_,i)=>({FixtureId:i+1,Fixture:{Status:1},Markets:[{Id:1,Bets:bets}]})),Header:{}}));await walkSnapshot(p,async raw=>{convertSnapshotRow(raw);rows++});if(rows!==200||ticks<2)throw Error('parser did not yield');console.log('snapshot-throughput-offline-ok')}finally{clearInterval(timer);await rm(d,{recursive:true,force:true})}"
                 output=run(['docker','run','--rm','--network','none','--memory','512m','--cpus','0.5','--read-only','--tmpfs','/tmp:size=33554432,mode=1777','--entrypoint','node',progress['image'],'--max-old-space-size=384','--import','tsx','--input-type=module','-e',check],timeout=60,log=backup/'snapshot-throughput-test.private.log')
                 require(b'snapshot-throughput-offline-ok' in output,'SNAPSHOT_THROUGHPUT_OFFLINE_FAILED');progress['snapshotThroughputVerified']=True;save(progress)
-            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlinePipelineLoadVerified=progress.get('pipelineLoadVerified',False),offlineType38Verified=True,offlinePartitionsVerified=True,offlineRestoreVerified=progress.get('oomRestoreVerified',False),offlineSnapshotMemoryVerified=progress.get('snapshotMemoryVerified',False),offlineDurableIngressVerified=progress.get('durableIngressVerified',False),offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),offlineNullableMarketsVerified=progress.get('nullableMarketsVerified',False),offlineThroughputVerified=progress.get('throughputVerified',False),offlineSpoolMemoryVerified=progress.get('spoolMemoryVerified',False),offlineSnapshotThroughputVerified=progress.get('snapshotThroughputVerified',False),offlineSnapshotPressureVerified=progress.get('snapshotPressureVerified',False),workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
+            emit(operation='cutover.aws',stage='partitioned_upgrade.prepared',status='ok',image=progress['image'],progressPhase=progress['phase'],offlinePipelineLoadVerified=progress.get('pipelineLoadVerified',False),offlineType38Verified=True,offlinePartitionsVerified=True,offlineRestoreVerified=progress.get('oomRestoreVerified',False),offlineSnapshotMemoryVerified=progress.get('snapshotMemoryVerified',False),offlineDurableIngressVerified=progress.get('durableIngressVerified',False),offlinePropagationVerified=progress.get('distributionFixVerified',False),offlineFullRecoveryVerified=progress.get('fullRecoveryVerified',False),offlineSupplierOrderVerified=progress.get('supplierOrderVerified',False),offlineNullableMarketsVerified=progress.get('nullableMarketsVerified',False),offlineThroughputVerified=progress.get('throughputVerified',False),offlineSpoolMemoryVerified=progress.get('spoolMemoryVerified',False),offlineSnapshotThroughputVerified=progress.get('snapshotThroughputVerified',False),offlineSnapshotPressureVerified=progress.get('snapshotPressureVerified',False),apiCompatibility=api_compatibility,workerRestarted=False,backup=str(backup),posnetChanged=False);return 0
         stage='partitioned_upgrade.fresh_mac_gate'
         handoff=request['handoff'];audit=handoff['audit'];require(audit['status']=='ok' and audit['workerLockAbsent'] and audit['matchingWorkerProcesses']==0,'MAC_SHUTDOWN_UNPROVEN')
         require(request['freshAuditAt'].endswith('Z') and -5<=time.time()-datetime.datetime.fromisoformat(request['freshAuditAt'].replace('Z','+00:00')).timestamp()<60,'MAC_REAUDIT_EXPIRED')
@@ -1989,12 +2158,16 @@ def upgrade_partitioned_unlocked(request):
                     measured_work=False
                     if fresh['running'] and previous.get('observationElapsedSeconds',0)>=90 and fresh.get('files')==previous.get('files') and fresh.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence'):
                         if previous.get('containerWork') is not None:
-                            measured_work=work_counter_progress(previous['containerWork'],fresh.get('containerWork'))
+                            measured_work=work_counter_progress(previous['containerWork'],fresh.get('containerWork'),sample_elapsed_seconds(previous,fresh))
                         elif fresh.get('containerWork') is not None:
                             time.sleep(8);later=upgrade_stop_sample(progress);measured_work=work_counter_progress(fresh.get('containerWork'),later.get('containerWork'));fresh=later
                     if fresh['running'] and not previous.get('progressSincePreviousSample') and not measured_work and previous.get('observationElapsedSeconds',0)>=90 and fresh.get('files')==previous.get('files') and fresh.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence'):
-                        emit(operation='cutover.aws',stage='partitioned_upgrade.stop_diagnosis',status='blocked',reason='SHUTDOWN_ALREADY_REQUESTED_RECOVERY_PROOF_REQUIRED',applicationStoppingObserved=evidence.get('applicationStoppingObserved'),process=evidence.get('process'),lastPersistence=fresh.get('lastCompletedPersistence'),persistenceStage=fresh.get('persistenceStage'),backup=str(backup),forceStopEvidenceVerified=False,posnetChanged=False)
-                        raise RuntimeError('SHUTDOWN_ALREADY_REQUESTED_RECOVERY_PROOF_REQUIRED')
+                        if request.get('pipelineRepair') and request.get('finalizeAfterRecovery') and incomplete_shutdown_recovery_eligible(progress,evidence,previous,fresh):
+                            emit(operation='cutover.aws',stage='partitioned_upgrade.stop_diagnosis',status='recovery_proof_required',reason='GRACEFUL_SHUTDOWN_STALLED_REPLAY_BEFORE_FINALIZE',applicationStoppingObserved=True,persistenceStage=fresh.get('persistenceStage'),checkpointFilesStable=True,distributionStayedOff=True,forceStopEvidenceVerified=False,backup=str(backup),posnetChanged=False)
+                            stage='partitioned_upgrade.pre_exit_recovery';recover_incomplete_shutdown_safely(progress,save,backup,evidence,previous,fresh)
+                        else:
+                            emit(operation='cutover.aws',stage='partitioned_upgrade.stop_diagnosis',status='blocked',reason='SHUTDOWN_ALREADY_REQUESTED_RECOVERY_PROOF_REQUIRED',applicationStoppingObserved=evidence.get('applicationStoppingObserved'),process=evidence.get('process'),lastPersistence=fresh.get('lastCompletedPersistence'),persistenceStage=fresh.get('persistenceStage'),backup=str(backup),forceStopEvidenceVerified=False,posnetChanged=False)
+                            raise RuntimeError('SHUTDOWN_ALREADY_REQUESTED_RECOVERY_PROOF_REQUIRED')
                     if measured_work:emit(operation='cutover.aws',stage='partitioned_upgrade.stop_diagnosis',status='measured_process_work',cpuOrIoAdvanced=True,containerWork=fresh.get('containerWork'),backup=str(backup),signalsSent=0,forceStopEvidenceVerified=False,posnetChanged=False)
                 stage='partitioned_upgrade.stop_observation'
                 def observed(report):
@@ -2011,6 +2184,24 @@ def upgrade_partitioned_unlocked(request):
                         latest=collect_graceful_signal_evidence(progress)
                         if request.get('pipelineRepair') and request.get('finalizeAfterRecovery') and any(r.get('status')=='ok' for r in latest.get('shutdownLogs',[])):
                             recover_completed_shutdown(progress,save,backup,latest)
+                        elif request.get('pipelineRepair') and request.get('finalizeAfterRecovery') and progress.get('shutdownObservation',{}).get('samples'):
+                            # A stopping application can remain alive after its
+                            # bounded observation. Continue only if the saved
+                            # samples and a fresh counter delta prove quiescence;
+                            # then verify exact copied state by replay before any
+                            # final signal. Never treat timeout alone as proof.
+                            previous=progress['shutdownObservation']['samples'][-1]
+                            fresh=upgrade_stop_sample(progress)
+                            elapsed=sample_elapsed_seconds(previous,fresh)
+                            no_work=not work_counter_progress(previous.get('containerWork'),fresh.get('containerWork'),elapsed)
+                            if (fresh.get('running') and previous.get('observationElapsedSeconds',0)>=90 and
+                                previous.get('progressSincePreviousSample') is False and
+                                fresh.get('files')==previous.get('files') and
+                                fresh.get('lastCompletedPersistence')==previous.get('lastCompletedPersistence') and no_work and
+                                incomplete_shutdown_recovery_eligible(progress,latest,previous,fresh)):
+                                emit(operation='cutover.aws',stage='partitioned_upgrade.stop_diagnosis',status='recovery_proof_required',reason='GRACEFUL_SHUTDOWN_QUIESCENT_REPLAY_BEFORE_FINALIZE',checkpointFilesStable=True,distributionStayedOff=True,containerWorkElapsedSeconds=round(elapsed,1),forceStopEvidenceVerified=False,backup=str(backup),posnetChanged=False)
+                                stage='partitioned_upgrade.pre_exit_recovery';recover_incomplete_shutdown_safely(progress,save,backup,latest,previous,fresh)
+                            else:raise
                         else:raise
             else:
                 if progress.get('preExitProof',{}).get('verified') and progress.get('verifiedExitSignal'):confirm_pre_exit_finalization(progress,save)
@@ -2036,12 +2227,18 @@ def upgrade_partitioned_unlocked(request):
             for source in [*recovery_files,*scheduler_journals]:
                 if not source.exists():continue
                 require(source.is_file() and not source.is_symlink(),'PERSISTENCE_SOURCE_UNVERIFIED');target=backup/source.name
+                sqlite_source=source.name.endswith('.sqlite')
                 if not target.exists():
-                    shutil.copyfile(source,target);os.chmod(target,0o600)
-                    with target.open('rb') as copied:os.fsync(copied.fileno())
+                    if sqlite_source:
+                        sqlite_meta=sqlite_consistent_backup(source,target)
+                        progress.setdefault('sqliteBackupReceipts',{})[source.name]=sqlite_meta
+                    else:
+                        shutil.copyfile(source,target);os.chmod(target,0o600)
+                        with target.open('rb') as copied:os.fsync(copied.fileno())
                 # Preserve and verify the first backup even if SQLite later updates only SHM.
                 recorded=progress.get('dataBackupHashes',{}).get(source.name)
-                require((snapshot_file_hash(target)==recorded and (snapshot_file_hash(source)==recorded or request.get('snapshotMemoryRepair') and source.name.endswith('.inbox.sqlite-shm'))) if recorded else snapshot_file_hash(source)==snapshot_file_hash(target),'UPGRADE_BACKUP_HASH_MISMATCH')
+                if sqlite_source:require(sqlite3_integrity(target),'SQLITE_BACKUP_READBACK_FAILED')
+                require((snapshot_file_hash(target)==recorded and (sqlite_source or snapshot_file_hash(source)==recorded)) if recorded else sqlite_source or snapshot_file_hash(source)==snapshot_file_hash(target),'UPGRADE_BACKUP_HASH_MISMATCH')
                 progress.setdefault('dataBackupHashes',{})[source.name]=snapshot_file_hash(target)
             save(progress)
             if request.get('snapshotMemoryRepair'):
@@ -2157,7 +2354,11 @@ def upgrade_partitioned_unlocked(request):
                     for name,sha in progress.get('dataBackupHashes',{}).items():
                         saved=backup/name
                         require(saved.is_file() and not saved.is_symlink() and snapshot_file_hash(saved)==sha,'RECOVERY_BACKUP_CHANGED_DURING_REHEARSAL')
-                        if not name.endswith('.inbox.sqlite-shm'):
+                        if name.endswith('.sqlite'):
+                            require(sqlite3_integrity(saved),'RECOVERY_SQLITE_BACKUP_INVALID')
+                            original=directory/name
+                            if original.exists():require(sqlite3_integrity(original),'ACTIVE_SQLITE_STATE_INVALID')
+                        else:
                             original=directory/name
                             require(original.is_file() and not original.is_symlink() and snapshot_file_hash(original)==sha,'ACTIVE_SOURCE_CHANGED_DURING_REHEARSAL')
                     if spool:require(snapshot_file_hash(spool)==spool_hash,'PRESERVED_SPOOL_CHANGED_DURING_REHEARSAL')

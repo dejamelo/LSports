@@ -39,6 +39,11 @@ export function verifiedSnapshotMemorySourceBackup(ledger){
  }
  return undefined;
 }
+export function verifiedExistingSnapshotMemoryProfileOption(proof){
+ // Any repair that reuses the installed 8 GiB profile must carry its verified
+ // evidence to the remote gate, including snapshot-memory repair mode.
+ return proof?{verifiedExistingSnapshotMemoryProfile:proof}:{};
+}
 export function stoppedEightGiBWorkerFailure(containers){
  const candidates=(containers||[]).filter(c=>c?.name==='/adl-homologation-worker-1'&&c?.state==='exited'&&/^[0-9a-f]{64}$/.test(c?.id||''));
  if(candidates.length!==1)return undefined;
@@ -162,6 +167,7 @@ export async function run(args){
     if(mac?.status!=='ok'||mac.matchingWorkerProcesses!==0||mac.workerLockAbsent!==true)throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
     const names=partitionWorkerSourceNames.map(n=>'apps/worker/src/'+n);names.push(...partitionPackageSourceNames);
+    if(process.env.ADL_PIPELINE_REPAIR==='1')names.push('packages/feed-store/src/indexed-feed.ts');
     const {createHash}=await import('node:crypto');const sourceSets={};
     for(const ref of ['6f6b8928aee8dadab7b9be1f9dd2755f7c8fa46f',runtimeRef]){const full=(await command('git',['rev-parse',ref],undefined,10000,true)).trim();sourceSets[full]={};for(const name of names)sourceSets[full][name]=createHash('sha256').update(await command('git',['show',full+':'+name],undefined,10000,true)).digest('hex');}
     const {writeProtectedReport}=await import('./distribution-validation.mjs');const {observeRecovery}=await import('./recovery-progress.mjs');
@@ -299,6 +305,7 @@ export async function run(args){
      emit({stage:'inventory_evidence',status:'saved',providerRequests:0,progressFile:progress,workerRestarted:false});
     }
     const names=partitionWorkerSourceNames.map(name=>'apps/worker/src/'+name);names.push(...partitionPackageSourceNames);
+    if(process.env.ADL_PIPELINE_REPAIR==='1')names.push('packages/feed-store/src/indexed-feed.ts');
     const {createHash}=await import('node:crypto'),files={},baseHashes={};
     const baseRef=snapshotMemoryRepair?'7248e39':durableMode?'789707f':args[4]==='--snapshot-throughput-repair'?'043af2e':['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?'dcd644b':throughputMode?'b63e735':nullableMode?'db4c193':supplierMode?'3425f72':fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
     for(const name of names){files[name]=await command('git',['show',runtimeRef+':'+name],undefined,10000,true);baseHashes[name]=existing.includes(name)?createHash('sha256').update(await command('git',['show',baseRef+':'+name],undefined,10000,true)).digest('hex'):null;}
@@ -335,7 +342,8 @@ export async function run(args){
      readbackHeapLimitBytes:snapshotMemoryResult.projectionReadbackMemory.effectiveHeapLimitBytes,
      projectionReadbackBudgetBytes:snapshotMemoryResult.projectionReadbackBudget.budgetBytes
     }:undefined;
-    const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true,...(existingSnapshotMemoryProof?{verifiedExistingSnapshotMemoryProfile:existingSnapshotMemoryProof}:{})}:distributionMode?{fixCommit:'2aa06f7'}:{};
+    const memoryProfileOption=verifiedExistingSnapshotMemoryProfileOption(existingSnapshotMemoryProof);
+    const repairOptions=supplierMode?{fullRecovery:true,...memoryProfileOption,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true,...memoryProfileOption}:distributionMode?{fixCommit:'2aa06f7'}:{};
     if(durableMode)repairOptions.durableIngress=true;
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;if(!snapshotMemoryEightGiB)repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryEightGiB){
@@ -371,6 +379,19 @@ export async function run(args){
     if(process.env.ADL_PRESERVED_HEAP_BUDGET_REPAIR==='1'){if(!snapshotMemoryRepair||!repairOptions.snapshotPressureRepair||!repairOptions.livePersistenceRepair||repairOptions.pipelineRepair||!repairOptions.resumeBackup)throw Error('HEAP_REPAIR_REQUIRES_PINNED_PRESSURE_RESUME');repairOptions.preservedHeapBudgetRepair=true;}
     if(snapshotMemoryRepair&&process.env.ADL_FINALIZE_VERIFIED_SHUTDOWN==='1'){if(!repairOptions.resumeBackup)throw Error('FINALIZATION_REQUIRES_PINNED_PREPARATION');repairOptions.finalizeAfterRecovery=true;}
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
+    if(repairOptions.pipelineRepair){
+     const apiCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();
+     repairOptions.requiredApiCommit=apiCommit;
+     const apiDeployment=await step(ledger,'indexed_api_compatibility',save,async()=>{
+      stage='indexed_api_compatibility';
+      const output=await command(process.execPath,[path.join(here,'update-adl-api.mjs'),'--repo',root,'--commit',apiCommit,'--preserve-local-changes'],undefined,1800000,true,false,{stage});
+      const rows=output.split('\n').filter(Boolean).flatMap(line=>{try{return[JSON.parse(line)]}catch{return[]}});
+      const complete=rows.findLast(row=>row.operation==='adl.api_update'&&row.stage==='complete'&&row.status==='ok');
+      if(!complete||complete.installedCommit!==apiCommit||complete.installedSourceVerified!==true||complete.workersUnchanged!==true||complete.posnetChanged!==false)throw Error('INDEXED_API_DEPLOYMENT_NOT_VERIFIED');
+      return {commit:apiCommit,imageId:complete.installedImageId,sourceFilesVerified:complete.installedSourceVerified,workersUnchanged:true,posnetChanged:false};
+     });
+     if(apiDeployment.commit!==apiCommit||apiDeployment.sourceFilesVerified!==true||apiDeployment.workersUnchanged!==true||apiDeployment.posnetChanged!==false)throw Error('INDEXED_API_DEPLOYMENT_RECEIPT_MISMATCH');
+    }
     const sourceDigest=canonicalSourceDigest(files);
     const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup,sourceDigest}):undefined;
     const prepared=reusedPrepared?(emit({stage:'prepared_image_reuse',status:'reused',image:reusedPrepared.image,backup:reusedPrepared.backup,workerStarted:false,workerRestarted:false}),reusedPrepared):await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});

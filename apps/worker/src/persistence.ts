@@ -1,10 +1,11 @@
 import { validTrace, validMarketEvidence } from "./settlement-evidence.js";
 import { constants } from 'node:fs';
-import { copyFile, open, rename, mkdir, lstat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { copyFile, open, rename, mkdir, lstat, stat } from 'node:fs/promises';
 import {getHeapStatistics} from 'node:v8';
 import {dirname} from 'node:path';
 import {walkSnapshot} from './full-snapshot.js';
-import {jsonItems,writeJsonObject} from '@lsports/feed-store';
+import {jsonItems,writeJsonObject,writeJsonRecord} from '@lsports/feed-store';
 import type { EventFeed, Lane } from '@lsports/contracts';
 import type { Fixture, Market } from 'trade360-nodejs-sdk';
 import { TradeState, compactBetAt, persistedBetOrders, restorePreciseBetOrders, type Row } from './state.js';
@@ -40,7 +41,7 @@ export function checkpoint(state: TradeState, includeRegular=true) {
 
 // Internal writer payload: emitted arrays are lazy; wire/checkpoint schema is unchanged.
 const mapItems=(value:Map<any,any>|undefined)=>value?jsonItems(function*(){yield* value;}):undefined;
-function streamedRow(lane:Lane,key:string|number,row:Row,outright=false){return {
+export function streamedRow(lane:Lane,key:string|number,row:Row,outright=false){return {
  lane,fixtureId:outright?Number(String(key).split(':').at(-1)):Number(key),fixture:row.fixture,
  ...(outright?{outright:row.outright,outrightScore:row.outrightScore}:{}),livescore:row.livescore,
  markets:mapItems(row.markets),marketAt:mapItems(row.marketAt),betAt:mapItems(row.betAt),betOrder:jsonItems(function*(){yield* persistedBetOrders(row);}),marketReceipt:row.marketReceipt,
@@ -50,6 +51,45 @@ function streamedRow(lane:Lane,key:string|number,row:Row,outright=false){return 
 export function streamCheckpoint(state:TradeState){
  const rows={prematch:new Map(state.rows.prematch),inplay:new Map(state.rows.inplay)};
  return {version:1,regular:[],outright:jsonItems(function*(){for(const lane of ['prematch','inplay'] as const)for(const[key,row]of rows[lane])if(row.outright)yield streamedRow(lane,key,row,true);})};
+}
+
+export const checkpointJournalPath=(path:string)=>path+'.checkpoint-journal.jsonl';
+export const CHECKPOINT_JOURNAL_COMPACT_BYTES=1024**3;
+export async function persistCheckpointDelta(path:string,state:TradeState,changes:readonly {lane:Lane;key:number|string}[]){
+ const journal=checkpointJournalPath(path);await mkdir(dirname(path),{recursive:true});
+ const file=await open(journal,'a',0o600);let rows=0,bytes=0,serializeMs=0,writeAwaitMs=0,fsyncAwaitMs=0;
+ try{
+  for(const change of changes){
+   const row=state.rows[change.lane].get(change.key);
+   const record=row?{op:'upsert',lane:change.lane,key:change.key,regular:!row.outright,entry:streamedRow(change.lane,change.key,row,!!row.outright)}:{op:'delete',lane:change.lane,key:change.key};
+   const atWrite=performance.now();await writeJsonRecord(file,record);writeAwaitMs+=performance.now()-atWrite;
+   const at=performance.now();await file.writeFile('\n');writeAwaitMs+=performance.now()-at;rows++;
+  }
+  if(rows){const at=performance.now();await file.sync();fsyncAwaitMs=performance.now()-at;bytes=(await file.stat()).size;}
+ }finally{await file.close();}
+ return {rows,bytes,serializeMs:Math.ceil(serializeMs),writeAwaitMs:Math.ceil(writeAwaitMs),fsyncAwaitMs:Math.ceil(fsyncAwaitMs),compactDue:bytes>=CHECKPOINT_JOURNAL_COMPACT_BYTES};
+}
+
+/** Atomic full-state compaction. The journal is rotated only after the new baseline is durable. */
+export async function compactCheckpointJournal(path:string,state:TradeState){
+ const temp=path+'.checkpoint-compaction.tmp',journal=checkpointJournalPath(path),journalTemp=journal+'.empty.tmp';
+ await mkdir(dirname(path),{recursive:true});
+ try{await copyFile(path,path+'.pre-indexed-compaction.bak',constants.COPYFILE_EXCL);}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST'&&(error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+ const file=await open(temp,'w',0o600);let rows=0,bytes=0;const write=async(s:string)=>{await file.writeFile(s);bytes+=Buffer.byteLength(s);};
+ try{
+  await write('{"mode":"connected","events":[],"workerCheckpoint":{"version":1,"regular":[');
+  let first=true;
+  for(const lane of ['prematch','inplay'] as const)for(const[key,row]of state.rows[lane])if(!row.outright){if(!first)await write(',');first=false;await writePrivateCheckpointRecord(file,streamedRow(lane,key,row,false));rows++;}
+  await write('],"outright":[');first=true;
+  for(const lane of ['prematch','inplay'] as const)for(const[key,row]of state.rows[lane])if(row.outright){if(!first)await write(',');first=false;await writePrivateCheckpointRecord(file,streamedRow(lane,key,row,true));rows++;}
+  await write(']}}');const at=performance.now();await file.sync();const fsyncMs=performance.now()-at;
+  bytes=(await file.stat()).size;
+  await file.close();await rename(temp,path);
+  const directory=await open(dirname(path),'r');try{await directory.sync();}finally{await directory.close();}
+  const empty=await open(journalTemp,'w',0o600);try{await empty.sync();}finally{await empty.close();}
+  await rename(journalTemp,journal);const journalDir=await open(dirname(journal),'r');try{await journalDir.sync();}finally{await journalDir.close();}
+  return {rows,bytes,fsyncMs:Math.ceil(fsyncMs)};
+ }catch(error){try{await file.close();}catch{}throw error;}
 }
 
 // One bounded buffer spans fixture boundaries. Previously every comma and
@@ -119,13 +159,15 @@ export async function persistRegularCheckpoint(path:string,regular:ReturnType<ty
 // Never restore connection status from disk or infer current availability from a saved feed.
 export async function restore(state: TradeState, path: string, progress?:(sample:{stage:string;rows:number})=>void) {
   progress?.({stage:'checkpoint.scan',rows:0});
-  let value: unknown;
+  let value: unknown,baseExists=true,journalRows=0;
   try {
     const metadata=await walkSnapshot(path,async()=>{},32*1024**2,'events') as {header?:unknown;mode?:unknown};
     value={mode:metadata.mode,events:[],...(metadata.header!==undefined?{workerCheckpoint:metadata.header}:{})};
   } catch(error) {
-    if((error as NodeJS.ErrnoException).code==='ENOENT')return {source:'missing',rows:0};
-    throw error;
+    if((error as NodeJS.ErrnoException).code==='ENOENT'){
+      try{await stat(checkpointJournalPath(path));baseExists=false;value={mode:'connected',events:[],workerCheckpoint:{version:1,regular:[],outright:[]}};}
+      catch(journalError){if((journalError as NodeJS.ErrnoException).code==='ENOENT')return {source:'missing',rows:0};throw journalError;}
+    } else throw error;
   }
   if (!object(value) || value.mode !== 'connected' || !Array.isArray(value.events))
     throw new Error('Invalid saved TRADE state; original file preserved');
@@ -133,13 +175,14 @@ export async function restore(state: TradeState, path: string, progress?:(sample
   const recovered = new TradeState();
   let rows = 0;
   let restoreStage='checkpoint.rebuild';
+  let restoreJournalEntry:((entry:unknown,regular:boolean,replace?:boolean)=>void)|undefined;
   if (value.workerCheckpoint !== undefined) {
     const saved = value.workerCheckpoint;
     if (!object(saved) || saved.version !== 1 || !Array.isArray(saved.outright))
       throw new Error('Unsupported TRADE checkpoint; original file preserved');
     if(saved.regularExternal!==undefined&&saved.regularExternal!==true)throw new Error('Invalid private checkpoint reference');
     if(saved.regular!==undefined&&!Array.isArray(saved.regular))throw new Error('Invalid regular checkpoint');
-    const restoreEntry=(entry:unknown,regular:boolean)=>{
+    const restoreEntry=(entry:unknown,regular:boolean,replace=false)=>{
       if(rows%100===0)progress?.({stage:restoreStage,rows});
       if(Math.min(getHeapStatistics().heap_size_limit-process.memoryUsage().heapUsed,process.availableMemory?.()??Infinity)<320*1024**2)throw new Error('Private checkpoint incremental memory guard; original preserved');
       if (!object(entry) || !['prematch', 'inplay'].includes(String(entry.lane)) || !validId(entry.fixtureId) ||
@@ -174,7 +217,8 @@ export async function restore(state: TradeState, path: string, progress?:(sample
       if(entry.betOrder !== undefined && (!tuples(entry.betOrder) || entry.betOrder.some(([,v])=>typeof v!=='string'||!/^[-]?[0-9]{1,25}$/.test(v))))throw new Error('Invalid precise timestamp ordering; original preserved');
       const lane = entry.lane as Lane;
       const key = regular?entry.fixtureId:`outright:${(entry.outright as Record<string,unknown>).competitionId}:${entry.fixtureId}`;
-      if (recovered.rows[lane].has(key)) throw new Error('Duplicate outright checkpoint identity');
+      if(replace)recovered.rows[lane].delete(key);
+      if (recovered.rows[lane].has(key)) throw new Error('Duplicate checkpoint identity');
       const markets=new Map(entry.markets) as Map<string,Market>;
       const betAt=compactBetAt(markets,entry.betAt as [string,number][]);
       const restoredRow:Row={
@@ -193,7 +237,8 @@ export async function restore(state: TradeState, path: string, progress?:(sample
       recovered.rows[lane].set(key, restoredRow);
       rows++;
     };
-    await walkSnapshot(path,async()=>{},32*1024**2,'events',async(entry,regular)=>{
+    restoreJournalEntry=restoreEntry;
+    if(baseExists)await walkSnapshot(path,async()=>{},32*1024**2,'events',async(entry,regular)=>{
       if(regular&&saved.regularExternal===true)throw new Error('Conflicting embedded regular checkpoint; original preserved');
       restoreEntry(entry,regular);
     });
@@ -202,7 +247,7 @@ export async function restore(state: TradeState, path: string, progress?:(sample
       if(!privateCheckpointFileAllowed(info.size,info.isFile(),info.isSymbolicLink()))throw new Error('Private regular checkpoint identity guard; original preserved');
       restoreStage='checkpoint.sidecar';progress?.({stage:restoreStage,rows});
       await walkSnapshot(sidePath,async entry=>{restoreEntry(entry,true);},32*1024**2,'regular');
-    }else if(Array.isArray(saved.regular))for(const entry of saved.regular)restoreEntry(entry,true);
+    }
   } else {
     // Migrate the previous UI-only projection. Preserve all participants and exposed markets;
     // provider-specific data absent from that old format cannot be reconstructed.
@@ -250,10 +295,38 @@ export async function restore(state: TradeState, path: string, progress?:(sample
     try { await copyFile(path, `${path}.pre-checkpoint.bak`, constants.COPYFILE_EXCL); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   }
+  // The append-only journal is fsynced before its durable inbox prefix is retired.
+  // A torn record fails closed and leaves both baseline and journal untouched.
+  const journal=checkpointJournalPath(path);
+  try{
+    await stat(journal);
+    let pending='';
+    for await(const chunk of createReadStream(journal,{encoding:'utf8'})){
+      pending+=chunk;
+      if(Buffer.byteLength(pending)>32*1024**2&&!pending.includes('\n'))throw new Error('Checkpoint journal record limit; original preserved');
+      for(;;){const end=pending.indexOf('\n');if(end<0)break;const line=pending.slice(0,end);pending=pending.slice(end+1);if(!line)throw new Error('Empty checkpoint journal record; original preserved');
+        let record:unknown;try{record=JSON.parse(line);}catch{throw new Error('Invalid checkpoint journal record; original preserved');}
+        if(!object(record)||!['upsert','delete'].includes(String(record.op))||!['prematch','inplay'].includes(String(record.lane))||!(typeof record.key==='number'&&validId(record.key)||typeof record.key==='string'&&record.key.length>0&&record.key.length<=128))throw new Error('Invalid checkpoint journal identity; original preserved');
+        const lane=record.lane as Lane;
+        if(record.op==='delete')recovered.rows[lane].delete(record.key as number|string);
+        else{
+          if(typeof record.regular!=='boolean'||!object(record.entry)||record.entry.lane!==lane)throw new Error('Invalid checkpoint journal row; original preserved');
+          const entry=record.entry as Record<string,unknown>;
+          const key=record.regular?entry.fixtureId:`outright:${(entry.outright as Record<string,unknown>)?.competitionId}:${entry.fixtureId}`;
+          if(key!==record.key)throw new Error('Checkpoint journal key mismatch; original preserved');
+          if(!restoreJournalEntry)throw new Error('Checkpoint journal cannot apply to legacy baseline; original preserved');
+          restoreJournalEntry(entry,record.regular,true);
+        }
+        journalRows++;
+      }
+    }
+    if(pending.length)throw new Error('Truncated checkpoint journal; original preserved');
+  }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
   // Commit only after the whole file has been validated. Restored prices stay blocked pending updates.
   progress?.({stage:'checkpoint.commit',rows});
   state.rows = recovered.rows;
   for (const lane of ['prematch', 'inplay'] as const)
     for (const row of state.rows[lane].values()) row.restored = true;
-  return { source: value.workerCheckpoint === undefined ? 'legacy_projection' : 'checkpoint', rows };
+  const totalRows=state.rows.prematch.size+state.rows.inplay.size;
+  return { source: journalRows?'checkpoint_journal':value.workerCheckpoint === undefined ? 'legacy_projection' : 'checkpoint', rows:totalRows, ...(journalRows?{journalRows}:{}) };
 }

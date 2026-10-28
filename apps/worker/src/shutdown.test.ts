@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TicketStore } from '@lsports/feed-store/tickets';
+import { IndexedFeedStore,indexedFeedPath } from '@lsports/feed-store';
 import type { EventFeed } from '@lsports/contracts';
 import { acquireWorkerLock } from './worker-lock.js';
 import { TradeState } from './state.js';
@@ -41,10 +42,9 @@ for (const supervisor of [false,true]) for (const signal of ['SIGINT','SIGTERM']
       assert.match(output,/"lock":"released"/);
       await assert.rejects(lstat(`${path}.lock`),{code:'ENOENT'});
       await assert.rejects(lstat(`${path}.lock.reclaim`),{code:'ENOENT'});
-      const projection=JSON.parse(await readFile(path,'utf8'));
-      assert.equal(projection.connections.prematch.phase,'stopped');
-      const restored=new TradeState();const result=await restore(restored,path);assert.equal(result.source,'checkpoint');assert.equal(result.rows,1);
-      assert.match(JSON.stringify(projection),/ISOLATED TEST DRAINED/);
+      const indexed=new IndexedFeedStore(indexedFeedPath(path),true);const projection=indexed.summary().metadata;assert.equal(projection.connections?.prematch.phase,'stopped');indexed.close();
+      const restored=new TradeState();const result=await restore(restored,path);assert.equal(result.source,'checkpoint_journal');assert.equal(result.rows,1);
+      assert.match(JSON.stringify(restored.feed()),/ISOLATED TEST DRAINED/);
       const reopened=new TicketStore(dbPath);assert.deepEqual(reopened.list(),before);reopened.close();
     }
   } finally {for(const child of children)if(child.exitCode===null)child.kill('SIGKILL');await rm(dir,{recursive:true,force:true});}

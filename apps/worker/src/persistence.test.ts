@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import amqp from 'amqplib';
 import { createPublisher, readConnectedFeed } from '@lsports/feed-store';
 import { TradeState, betVersionAt } from './state.js';
-import { checkpoint, restore, persistRegularCheckpoint, privateCheckpointFileAllowed, MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES } from './persistence.js';
+import { checkpoint, restore, persistRegularCheckpoint, persistCheckpointDelta, compactCheckpointJournal, privateCheckpointFileAllowed, MAX_PRIVATE_REGULAR_CHECKPOINT_BYTES } from './persistence.js';
 import { session } from './connected.js';
 import { createApp } from '../../api/src/app.js';
 import type { PackageConfig } from './config.js';
@@ -200,12 +200,27 @@ test('both lanes persist concurrently through one writer; private checkpoint and
  const packages=(['prematch','inplay'] as const).map((lane,i)=>({lane,packageId:4511-i,username:'isolated',password:'',hostname:'unused',vhost:'unused',port:5672,tls:false,queue:'unused'}));
  try{await runConnected(abort.signal,{path,ticketPath:join(dir,'tickets.sqlite'),config:{packages,snapshotUrl:'https://unused.invalid',customersUrl:'https://unused.invalid',recoveryMs:300000,staleMs:90000},session:async(pkg,_cfg,state,save)=>{
   state.apply(pkg.lane,[{fixtureId:pkg.packageId,markets:[{id:1,status:1,bets:[{id:'123',price:'2.1',status:1,isChanged:1}]}]}],Date.now());await save();
-  const side=JSON.parse(await readFile(path+'.regular-checkpoint.json','utf8'));assert.ok(side.regular.some((r:{lane:string})=>r.lane===pkg.lane));
+  const journal=(await readFile(path+'.checkpoint-journal.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line) as {op:string;lane:string});assert.ok(journal.some(r=>r.op==='upsert'&&r.lane===pkg.lane));
   if(++committed===2)abort.abort();
  }});
  const restarted=new TradeState();await restore(restarted,path);assert.equal(restarted.rows.prematch.size,1);assert.equal(restarted.rows.inplay.size,1);assert.equal(committed,2);
  await assert.rejects(readFile(path+'.lock'),(e:{code:string})=>e.code==='ENOENT');
  }finally{abort.abort();await rm(dir,{recursive:true,force:true});}
+});
+
+test('append-only checkpoint journal survives restart, compacts atomically and rejects a torn tail without changing the source',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-checkpoint-journal-')),path=join(dir,'feed.json');
+ try{
+  const state=new TradeState();state.apply('prematch',[{fixtureId:501,fixture:{status:1},markets:[{id:1,status:1,bets:[{id:'A',price:'2.4',status:1,isChanged:1}]}]}],Date.now());
+  const first=state.projectionChanges();const saved=await persistCheckpointDelta(path,state,first);assert.equal(saved.rows,1);state.acknowledgeProjectionChanges(first);
+  let restored=new TradeState();assert.equal((await restore(restored,path)).source,'checkpoint_journal');assert.equal(restored.rows.prematch.get(501)?.markets.get('1')?.bets?.[0].price,'2.4');
+  state.apply('prematch',[{fixtureId:501,markets:[{id:1,status:1,bets:[{id:'A',price:'2.9',status:1,isChanged:1}]}]}],Date.now()+1);
+  await persistCheckpointDelta(path,state,state.projectionChanges());
+  const compacted=await compactCheckpointJournal(path,state);assert.equal(compacted.rows,1);
+  restored=new TradeState();assert.equal((await restore(restored,path)).rows,1);assert.equal(restored.rows.prematch.get(501)?.markets.get('1')?.bets?.[0].price,'2.9');
+  const journal=path+'.checkpoint-journal.jsonl',valid=await readFile(journal,'utf8');await writeFile(journal,valid+'{"op":"upsert"');
+  const before=await readFile(path);await assert.rejects(restore(new TradeState(),path),/Truncated checkpoint journal/);assert.deepEqual(await readFile(path),before);
+ }finally{await rm(dir,{recursive:true,force:true});}
 });
 
 test('incremental private checkpoint and projection preserve full rows; truncated sidecar never commits partial restore', async()=>{

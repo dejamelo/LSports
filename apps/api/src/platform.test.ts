@@ -8,9 +8,9 @@ import { join } from "node:path";
 import { PlatformStore, platformEnabled } from "@lsports/feed-store/platform";
 import { TenantTickets } from "@lsports/feed-store/tenant-tickets";
 import { createApp } from "./app.js";
-import type { EventFeed } from "@lsports/contracts";
+import type { EventFeed, EventSource } from "@lsports/contracts";
 const origin = "http://localhost:3001";
-async function setup(clock:()=>number=()=>Date.now()) {
+async function setup(clock:()=>number=()=>Date.now(), sourceOverride?:EventSource) {
   const directory = await mkdtemp(join(tmpdir(), "adl-platform-test-"));
   const platform = new PlatformStore(directory,false,clock);
   await platform.bootstrap(
@@ -50,7 +50,7 @@ async function setup(clock:()=>number=()=>Date.now()) {
     ],
   } as EventFeed;
   const app = createApp(
-    {
+    sourceOverride || {
       async getEvents() {
         return structuredClone(feed);
       },
@@ -172,11 +172,26 @@ async function setup(clock:()=>number=()=>Date.now()) {
     async close() {
       await new Promise<void>((r) => server.close(() => r()));
       app.locals.closeTickets();
+      app.locals.closeIndexedFeed?.();
       platform.close();
       await rm(directory, { recursive: true, force: true });
     },
   };
 }
+
+test("indexed sportsbook pages bind cursors to authenticated client/operation and request only the selected event market",async()=>{
+ const scopes:string[]=[],requested:string[]=[];
+ const source:EventSource={async getEvents(){return {mode:'connected',health:'ok',notice:'test',events:[]};},async getEventsPage(input){scopes.push(input.scope);requested.push(`${input.eventId||''}|${input.marketId||''}`);return {feed:{mode:'connected',health:'ok',notice:'test',updatedAt:new Date().toISOString()},events:[],page:{revision:7,limit:1,nextCursor:'signed-by-store',hasMore:true}};}};
+ const s=await setup(()=>Date.now(),source);
+ try{
+  const a=await s.create('indexed-alpha'),b=await s.create('indexed-beta'),ka=await s.key(a.id),kb=await s.key(b.id);
+  const path='/api/integration/v1/events?limit=1&eventId=prematch%3A9001&marketId=prematch%3A9001%3A160';
+  const first=await s.request(path,'GET',undefined,undefined,ka.value);assert.equal(first.status,200);assert.equal(first.data.page.revision,7);
+  const second=await s.request(path+'&cursor=signed-by-store','GET',undefined,undefined,kb.value);assert.equal(second.status,200);
+  assert.equal(requested[0],'prematch:9001|prematch:9001:160');
+  assert.notEqual(scopes[0],scopes[1]);assert.match(scopes[0],new RegExp(a.id));assert.match(scopes[0],new RegExp(a.operation.id));assert.match(scopes[1],new RegExp(b.id));
+ }finally{await s.close();}
+});
 test("administrative roles, tenant isolation, CSRF, exact iframe origins, credential rotation/revocation and secret-free audit", async () => {
   const s = await setup();
   try {

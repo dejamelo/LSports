@@ -21,7 +21,10 @@ export function ticketRoutes(source: EventSource, supplied?: TicketStore) {
   const refresh = async () => { const feed = await source.getEvents(); store().reconcile(feed); return feed; };
   router.use(express.json({limit:'32kb'}));
   router.post('/tickets', async (req, res) => {
-    const feed = await refresh();
+    const feed = source.getEventsByIds && Array.isArray(req.body?.selections)
+      ? await source.getEventsByIds({ids:req.body.selections.map((leg: {eventId?:string})=>String(leg?.eventId||'')),scope:'public-ticket'})
+      : await refresh();
+    store().reconcile(feed);
     const ticket = store().create(req.body, req.get('Idempotency-Key') || '', () => feed);
     res.status(201).json(ticket);
   });

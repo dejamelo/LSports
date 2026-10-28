@@ -75,7 +75,21 @@ def receive_source(stream,context):
             require((item.isfile() or item.isdir()) and not item.name.startswith('/') and '..' not in Path(item.name).parts,'ARCHIVE_PATH_REJECTED')
             require(item.name.split('/')[0] in ('apps','packages','scripts','package.json','package-lock.json','tsconfig.json'),'SOURCE_SCOPE_REJECTED')
             require(not re.search(r'(^|/)(\.env[^/]*|\.runtime|node_modules|backups|\.local-synthetic-demo)(/|$)|\.(sqlite|pem|key|log)(\.|$)|synthetic|\.test\.',item.name,re.I),'PRIVATE_OR_TEST_SOURCE_REJECTED')
-            archive.extract(item,context,filter='data')
+            destination=context/Path(item.name)
+            require(destination.resolve().is_relative_to(context.resolve()),'ARCHIVE_PATH_REJECTED')
+            parent=destination.parent
+            parent.mkdir(parents=True,exist_ok=True,mode=0o755)
+            current=parent
+            while current!=context:
+                require(not current.is_symlink(),'ARCHIVE_PARENT_SYMLINK_REJECTED');current=current.parent
+            if item.isdir():
+                require(not destination.exists() or destination.is_dir() and not destination.is_symlink(),'ARCHIVE_DIRECTORY_CONFLICT')
+                destination.mkdir(parents=True,exist_ok=True,mode=0o755)
+            else:
+                require(not destination.exists() and not destination.is_symlink(),'ARCHIVE_FILE_CONFLICT')
+                source=archive.extractfile(item);require(source is not None,'ARCHIVE_FILE_READ_FAILED')
+                with source,open(destination,'xb') as target:shutil.copyfileobj(source,target,1024*1024)
+                os.chmod(destination,0o644)
 
 def api_allocation_hints(raw):
     patterns=[('json_parse',rb'JsonParser|JSON::Parse|Builtins_JsonParse'),('json_stringify',rb'JsonStringifier|JSON::Stringify|Builtins_JsonStringify'),('string_decode',rb'String::NewFromUtf8|StringDecoder|DecodeWrite'),('sqlite',rb'sqlite3_step|Statement::')]

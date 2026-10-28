@@ -6,4 +6,4 @@ const server = app.listen(port, host, () =>
   console.log(`API listening on ${port}`),
 );
 for (const signal of ["SIGINT", "SIGTERM"] as const)
-  process.on(signal, () => server.close(() => { app.locals.closeTickets(); process.exit(0); }));
+  process.on(signal, () => server.close(() => { app.locals.closeTickets(); app.locals.closeIndexedFeed?.(); process.exit(0); }));

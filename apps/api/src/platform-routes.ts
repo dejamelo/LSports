@@ -143,12 +143,20 @@ export function platformRoutes(
   // Explicit platform permission; no credentials, writes, snapshots or provider calls.
   router.get("/api/control/feed-overview", async (req,res)=>{
     if(admin(req).role!=="platform_admin")throw new PlatformError("FORBIDDEN","Vista global reservada a la plataforma.",403);
+    const indexed=await source.getFeedSummary?.();
+    if(indexed){res.json({readOnly:true,revision:indexed.revision,events:indexed.counts.reduce((n,row)=>n+row.events,0),selectableSelections:null,lanes:indexed.metadata.coverage||{},health:indexed.metadata.health,updatedAt:indexed.metadata.updatedAt});return;}
     const feed=await source.getEvents(),report=feedEvidence(feed);
     res.json({readOnly:true,events:feed.events.length,selectableSelections:report.events.filter(e=>e.available===true).reduce((n,e)=>n+e.selectableSelections,0),lanes:report.lanes});
   });
   router.get("/api/control/feed-preview", async (req,res)=>{
     if(admin(req).role!=="platform_admin")throw new PlatformError("FORBIDDEN","Vista global reservada a la plataforma.",403);
-    const feed=await source.getEvents();
+    const page=source.getEventsPage?await source.getEventsPage({limit:Number(req.query.limit)||100,cursor:typeof req.query.cursor==='string'?req.query.cursor:undefined,
+      lane:req.query.lane==='prematch'||req.query.lane==='inplay'?req.query.lane:undefined,
+      sport:typeof req.query.sport==='string'?req.query.sport as import('@lsports/contracts').Sport:undefined,
+      eventId:typeof req.query.eventId==='string'?req.query.eventId:undefined,
+      marketId:typeof req.query.marketId==='string'?req.query.marketId:undefined,
+      scope:`platform-admin:${admin(req).id}:lane=${String(req.query.lane||'')}:sport=${String(req.query.sport||'')}:event=${String(req.query.eventId||'')}:market=${String(req.query.marketId||'')}`}):undefined;
+    const feed=page?{...page.feed,events:page.events,page:page.page}:await source.getEvents();
     res.json({...feed,readOnly:true,notice:"Vista administrativa de solo lectura. Sin admisión de billetes. "+(feed.notice||"")});
   });
   router.get("/api/control/status", (_req, res) =>
@@ -582,9 +590,15 @@ export function platformRoutes(
   });
   router.get("/api/integration/v1/events", async (req, res) => {
     const access = auth(req);
-    const feed = tickets
-      .store(access.operationId)
-      .risk.overlay(await source.getEvents());
+    const page=source.getEventsPage?await source.getEventsPage({limit:Number(req.query.limit)||100,cursor:typeof req.query.cursor==='string'?req.query.cursor:undefined,
+      lane:req.query.lane==='prematch'||req.query.lane==='inplay'?req.query.lane:undefined,
+      sport:typeof req.query.sport==='string'?req.query.sport as import('@lsports/contracts').Sport:undefined,
+      competitionId:typeof req.query.competitionId==='string'&&/^\d+$/.test(req.query.competitionId)?Number(req.query.competitionId):undefined,
+      eventId:typeof req.query.eventId==='string'?req.query.eventId:undefined,
+      marketId:typeof req.query.marketId==='string'?req.query.marketId:undefined,
+      scope:`client:${access.clientId}:operation:${access.operationId}:${access.currency}:lane=${String(req.query.lane||'')}:sport=${String(req.query.sport||'')}:competition=${String(req.query.competitionId||'')}:event=${String(req.query.eventId||'')}:market=${String(req.query.marketId||'')}`}):undefined;
+    const rawFeed=page?{...page.feed,events:page.events}:await source.getEvents();
+    const feed = tickets.store(access.operationId).risk.overlay(rawFeed);
     const paused =
       access.client.status !== "active" ||
       !access.client.settings.acceptingTickets ||
@@ -602,6 +616,7 @@ export function platformRoutes(
       effectiveLimits: platform.effectiveOperationLimits(access.operationId)
         .limits,
       financialMode: "simulation",
+      ...(page?{page:page.page}:{}),
     });
   });
   router.post("/api/integration/v1/tickets", async (req, res) => {
@@ -627,7 +642,9 @@ export function platformRoutes(
         ...(access.terminalId ? { terminalId: access.terminalId } : {}),
       };
     }
-    const feed = await source.getEvents(),
+    const feed = source.getEventsByIds && Array.isArray(input.selections)
+      ? await source.getEventsByIds({ids:input.selections.map((leg: {eventId?:string})=>String(leg?.eventId||'')),scope:`client:${access.clientId}:operation:${access.operationId}:${access.currency}`})
+      : await source.getEvents(),
       store = tickets.store(access.operationId);
     store.reconcile(feed);
     const ticket = store.create(
@@ -753,6 +770,10 @@ export function platformRoutes(
         res
           .status(error.httpStatus)
           .json({ code: error.code, error: error.message, testOnly: true });
+      else if ((error as Error)?.message === "INDEX_CURSOR_STALE")
+        res.status(409).json({ code: "FEED_PAGE_STALE", error: "La página cambió mientras se consultaba. Iniciá una consulta nueva." });
+      else if ((error as Error)?.message === "INDEX_EVENT_EXCEEDS_PAGE_LIMIT")
+        res.status(413).json({ code: "FEED_EVENT_TOO_LARGE", error: "Este evento requiere filtrar por mercado para respetar el límite de respuesta." });
       else if ((error as { type?: string })?.type === "entity.parse.failed")
         res.status(400).json({ code: "INVALID_JSON", error: "JSON inválido." });
       else if ((error as { type?: string })?.type === "entity.too.large")

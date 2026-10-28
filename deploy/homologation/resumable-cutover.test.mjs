@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile,remoteActionTimeout} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile,verifiedExistingSnapshotMemoryProfileOption,remoteActionTimeout} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('8 GiB stopped-worker recovery distinguishes kernel and V8 OOM by exact worker identity',()=>{
  const base={name:'/adl-homologation-worker-1',state:'exited',id:'a'.repeat(64)};
@@ -32,6 +32,11 @@ test('an installed 8 GiB profile is reusable only with its complete measured rec
   assert.equal(verifiedInstalledSnapshotMemoryProfile({steps:{snapshot_memory_data:{status:'ok',result:{...result,...change}}}},model),false);
  }
  assert.equal(verifiedInstalledSnapshotMemoryProfile({steps:{snapshot_memory_data:{status:'pending',result}}},model),false);
+});
+test('repair modes forward verified installed snapshot memory profile to the remote gate',()=>{
+ const proof={status:'ok',offlineRestoreVerified:true};
+ assert.deepEqual(verifiedExistingSnapshotMemoryProfileOption(proof),{verifiedExistingSnapshotMemoryProfile:proof});
+ assert.deepEqual(verifiedExistingSnapshotMemoryProfileOption(undefined),{});
 });
 test('local audit follows the selected repository root when the executor script runs from an isolated worktree',()=>{
  assert.equal(resolveAuditEntrypoint('/Users/example/LSports'),path.resolve('/Users/example/LSports/scripts/audit-aws-cutover.ts'));
