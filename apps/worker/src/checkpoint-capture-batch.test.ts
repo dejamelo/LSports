@@ -68,7 +68,7 @@ test('only active snapshot mutation defers public projection; a recovering lane 
  state.set('prematch',{session:undefined,recoveryProgress:undefined,phase:'starting'});
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
- state.set('prematch',{lastSnapshotErrorAt:new Date().toISOString()});assert.equal(deferPublicProjectionDuringSnapshot(state),true);
+ state.set('prematch',{lastSnapshotErrorAt:new Date().toISOString()});assert.equal(deferPublicProjectionDuringSnapshot(state),false,'a rejected request before apply releases the projection gate');
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'apply',bytes:10,validatedRows:1,appliedRows:1,lastProgressAt:new Date().toISOString()}});
  assert.equal(deferPublicProjectionDuringSnapshot(state),true);
  state.set('prematch',{fullSnapshot:{...state.connections.prematch.fullSnapshot!,stage:'complete'}});assert.equal(deferPublicProjectionDuringSnapshot(state),true);

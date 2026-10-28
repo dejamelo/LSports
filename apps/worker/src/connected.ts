@@ -126,7 +126,7 @@ export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'conne
   // atomicity and validation-before-publication for the in-flight lane.
   const snapshot=c.fullSnapshot;
   const errorAt=Date.parse(c.lastSnapshotErrorAt||'');
-  const failedBeforeApply=!!c.lastSnapshotErrorAt&&Number.isFinite(errorAt)&&errorAt>=Date.parse(snapshot?.startedAt||'')&&snapshot?.stage!=='apply';
+  const failedBeforeApply=!!c.lastSnapshotErrorAt&&Number.isFinite(errorAt)&&errorAt>=Date.parse(snapshot?.startedAt||'')&&snapshot?.stage!=='apply'&&(snapshot?.appliedRows||0)===0;
   return !!snapshot&&!snapshot.completedAt&&Number.isFinite(Date.parse(snapshot.startedAt||''))&&!failedBeforeApply;
  });
 }
