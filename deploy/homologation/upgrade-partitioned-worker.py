@@ -349,26 +349,35 @@ def verified_stopped_pipeline_probe_exit(state,verified_stopped_recovery):
     return (verified_stopped_recovery is True and state.get('Running') is False
         and state.get('OOMKilled') is False and state.get('ExitCode') in (0,137))
 
-def verified_stopped_profile_proof(progress,expected_container_id):
-    if (progress.get('phase') not in ('stopped','start_requested') or progress.get('oldContainer')!=expected_container_id
-        or progress.get('supplierStoppedBeforeConsumer') is not True):return False
-    if (progress.get('preExitProof',{}).get('verified') is True
-        and progress.get('verifiedExitSignal',{}).get('containerId')==expected_container_id
-        and progress.get('verifiedExitSignal',{}).get('status') in ('docker_accepted','exit_observed_after_intent')):return True
+def stopped_profile_proof_diagnostics(progress,expected_container_id):
     observation=progress.get('shutdownObservation',{})
     samples=observation.get('samples',[]) if isinstance(observation,dict) else []
-    if not isinstance(samples,list) or len(samples)<2:return False
-    final=samples[-1]
+    if not isinstance(samples,list):samples=[]
+    final=samples[-1] if samples else {}
     prior=any(isinstance(sample,dict) and sample.get('containerId')==expected_container_id
         and sample.get('running') is True and sample.get('oomKilled') is False
         and sample.get('signalsSent')==0 for sample in samples[:-1])
-    return (prior and isinstance(final,dict) and final.get('containerId')==expected_container_id
-        and final.get('running') is False and final.get('exitCode')==0
-        and final.get('oomKilled') is False and final.get('signalsSent')==0
-        and isinstance(final.get('atUTC'),str) and isinstance(progress.get('stopRequestedAtUTC'),str)
-        and isinstance(progress.get('supplierStoppedAtUTC'),str)
-        and progress['supplierStoppedAtUTC']<=progress['stopRequestedAtUTC']
+    supplier_order=(isinstance(progress.get('supplierStoppedAtUTC'),str) and isinstance(progress.get('stopRequestedAtUTC'),str)
+        and progress['supplierStoppedAtUTC']<=progress['stopRequestedAtUTC'])
+    final_after_stop=(isinstance(final.get('atUTC'),str) and isinstance(progress.get('stopRequestedAtUTC'),str)
         and final['atUTC']>=progress['stopRequestedAtUTC'])
+    legacy=(progress.get('preExitProof',{}).get('verified') is True
+        and progress.get('verifiedExitSignal',{}).get('containerId')==expected_container_id
+        and progress.get('verifiedExitSignal',{}).get('status') in ('docker_accepted','exit_observed_after_intent'))
+    return {'phaseAccepted':progress.get('phase') in ('stopped','start_requested'),
+        'containerIdentityMatches':progress.get('oldContainer')==expected_container_id,
+        'supplierStoppedBeforeConsumer':progress.get('supplierStoppedBeforeConsumer') is True,
+        'legacyStopProofVerified':legacy,'sampleCount':len(samples),
+        'priorRunningSameContainer':prior,
+        'finalStoppedCleanly':isinstance(final,dict) and final.get('containerId')==expected_container_id and final.get('running') is False and final.get('exitCode')==0 and final.get('oomKilled') is False and final.get('signalsSent')==0,
+        'supplierStopPrecedesWorkerStop':supplier_order,'workerExitObservedAfterStopRequest':final_after_stop}
+
+def verified_stopped_profile_proof(progress,expected_container_id):
+    proof=stopped_profile_proof_diagnostics(progress,expected_container_id)
+    return (proof['phaseAccepted'] and proof['containerIdentityMatches'] and proof['supplierStoppedBeforeConsumer']
+        and (proof['legacyStopProofVerified'] or proof['sampleCount']>=2 and proof['priorRunningSameContainer']
+            and proof['finalStoppedCleanly'] and proof['supplierStopPrecedesWorkerStop']
+            and proof['workerExitObservedAfterStopRequest']))
 
 def existing_pipeline_heap_plan(worker,verified_existing_snapshot_profile=False,verified_stopped_recovery=False,expected_container_id=None):
     options=worker.get('environment',{}).get('NODE_OPTIONS')
@@ -1776,7 +1785,7 @@ def verify_stopped_retention_origin(old):
     require(identity and (interrupted or graceful),'RETENTION_REPAIR_PRIOR_RECOVERY_UNVERIFIED')
 
 def upgrade_partitioned_unlocked(request):
-    stage='partitioned_upgrade.input';backup=None
+    stage='partitioned_upgrade.input';backup=None;progress={}
     try:
         require(os.geteuid()==0,'ROOT_REQUIRED');phase=request['phase'];require(phase in ('prepare','activate','rollback'),'INVALID_UPGRADE_PHASE')
         files=request['files'];expected_sources=PARTITION_FILES|(INDEXED_PUBLICATION_FILES if request.get('pipelineRepair') is True else set());require(set(files)==expected_sources,'UPGRADE_FILE_LIST_UNVERIFIED')
@@ -2504,6 +2513,8 @@ def upgrade_partitioned_unlocked(request):
         if stage=='partitioned_upgrade.checkpoint_parser_image' and isinstance(error,(subprocess.CalledProcessError,subprocess.TimeoutExpired)):reason='CHECKPOINT_PARSER_IMAGE_BUILD_FAILED'
         if stage in ('partitioned_upgrade.oom_restore','partitioned_upgrade.projection_readback') and isinstance(error,(subprocess.CalledProcessError,subprocess.TimeoutExpired)):reason='PRESERVED_DATA_OFFLINE_REHEARSAL_FAILED_NO_START'
         detail=safe_helper_error(error)
+        if reason=='PIPELINE_STOPPED_HEAP_PROFILE_HANDOFF_UNVERIFIED':
+            detail['heapProbeHandoff']=stopped_profile_proof_diagnostics(progress,progress.get('oldContainer'))
         detail['exceptionDetails']=save_upgrade_exception(backup,error,stage)
         detail['exceptionType']=detail['exceptionDetails']['exceptionType']
         if stage=='partitioned_upgrade.checkpoint_parser_image' and backup:detail['checkpointImageBuild']=checkpoint_build_log_summary(backup)
