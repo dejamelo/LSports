@@ -838,6 +838,12 @@ export async function session(
                 // untouched. Pause durable replay only while a real request is
                 // in flight; the inbox keeps accepting unacked messages.
                 snapshotRequestAdmitted=true;fullStarted=Date.now();fullStartedAt=progress.lastProgressAt;checkpointAnchorSeconds=Math.max(0,Math.floor(fullStarted/1000)-2);
+                // Publish the active attempt to the shared state immediately.
+                // Until the complete document passes validation there is no
+                // snapshotStatePreparation, so without this marker the global
+                // publisher cannot see a download/parse in progress and may
+                // start a multi-GB projection that contends with the parser.
+                state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:fullStartedAt,stage:'waiting_http',bytes:0,validatedRows:0,appliedRows:0}});
                 if(durable){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}
               }
               if(progress.stage==='apply'&&!snapshotStatePreparation){

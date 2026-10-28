@@ -773,6 +773,7 @@ test('full recovery consumes 100 deltas before snapshot completes, commits once 
  const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',port:5672,tls:false,queue:'_4511_'};
  const fake:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){assert.equal(acks,100);stopped=true;},async distributionStatus(){return{isDistributionOn:true,consumers:[],numberMessagesInQueue:0,messagesPerSecond:0};},async snapshot(){assert.fail('Must use unfiltered spooled snapshot');},async catalog(){return[];},async snapshotFull(sink){
   sink.progress?.({stage:'waiting_http',bytes:0,validatedRows:0,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  assert.equal(state.connections.prematch.fullSnapshot?.stage,'waiting_http','projection gate must see the admitted snapshot before validation finishes');
   sink.progress?.({stage:'apply',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date().toISOString()});
   for(let i=0;i<100;i++)deliver({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'live-'+i,ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'123',Price:'2.8',Status:1}]}]}]}})),properties:{headers:{}},fields:{redelivered:false}} as ConsumeMessage);
   await allAcked;assert.equal(state.connections.prematch.recoveryProgress?.regularSnapshotReady,false);assert.equal(state.connections.prematch.phase,'recovering');assert.ok(messageWrites<=3);
