@@ -111,6 +111,11 @@ export function recoveryMode(mode){
 export function partitionedRepairMode(mode){
  return ['--partitioned-recovery','--inventory-repair','--distribution-repair','--supplier-order-repair','--supplier-order-rollback','--nullable-markets-repair','--nullable-markets-rollback','--snapshot-throughput-repair','--spool-memory-repair','--recovery-throughput-repair','--recovery-throughput-rollback','--indexed-publication-repair','--snapshot-memory-repair','--full-recovery'].includes(mode);
 }
+export function indexedApiDeploymentReceipt(rows,commit){
+ const complete=rows.findLast(row=>row.stage==='complete'&&row.status==='ok');
+ if(!complete||complete.installedCommit!==commit||complete.installedSourceVerified!==true||complete.workersUnchanged!==true||complete.posnetChanged!==false)return;
+ return {commit,imageId:complete.installedImageId,sourceFilesVerified:true,workersUnchanged:true,posnetChanged:false};
+}
 export function remoteActionTimeout(action,extra={}){
  if(action==='upgrade_partitioned'&&(extra.finalizeAfterRecovery||extra.fullRecovery))return 4500000;
  if(action==='upgrade_partitioned'&&extra.snapshotMemoryRepair)return 1800000;
@@ -392,9 +397,9 @@ export async function run(args){
       stage='indexed_api_compatibility';
       const output=await command(process.execPath,[path.join(here,'update-adl-api.mjs'),'--repo',root,'--commit',apiCommit,'--preserve-local-changes'],undefined,1800000,true,false,{stage});
       const rows=output.split('\n').filter(Boolean).flatMap(line=>{try{return[JSON.parse(line)]}catch{return[]}});
-      const complete=rows.findLast(row=>row.operation==='adl.api_update'&&row.stage==='complete'&&row.status==='ok');
-      if(!complete||complete.installedCommit!==apiCommit||complete.installedSourceVerified!==true||complete.workersUnchanged!==true||complete.posnetChanged!==false)throw Error('INDEXED_API_DEPLOYMENT_NOT_VERIFIED');
-      return {commit:apiCommit,imageId:complete.installedImageId,sourceFilesVerified:complete.installedSourceVerified,workersUnchanged:true,posnetChanged:false};
+      const receipt=indexedApiDeploymentReceipt(rows,apiCommit);
+      if(!receipt)throw Error('INDEXED_API_DEPLOYMENT_NOT_VERIFIED');
+      return receipt;
      });
      if(apiDeployment.commit!==apiCommit||apiDeployment.sourceFilesVerified!==true||apiDeployment.workersUnchanged!==true||apiDeployment.posnetChanged!==false)throw Error('INDEXED_API_DEPLOYMENT_RECEIPT_MISMATCH');
     }
