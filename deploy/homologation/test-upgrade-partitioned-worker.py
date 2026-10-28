@@ -224,6 +224,11 @@ class Upgrade(unittest.TestCase):
   oldSubset={name:value for name,value in old.items() if name in source_ns['PIPELINE_BASE_FILES']|source_ns['PIPELINE_AUXILIARY_FILES']}
   digest=hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()
   self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,candidate,digest,added))
+  oldIndexed={str(indexed.relative_to(HERE.parent.parent)):'installed:indexed-feed.ts'}
+  indexedBase={**base,**oldIndexed}
+  indexedDigest=hashlib.sha256(json.dumps(indexedBase,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,candidate,indexedDigest,added,oldIndexed))
+  with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,candidate,indexedDigest,added,{**oldIndexed,str(indexed.relative_to(HERE.parent.parent)):'different-installed-index'})
   with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,str(indexed.relative_to(HERE.parent.parent)):'changed'},digest,added)
   with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,'packages/feed-store/src/index.ts':'no export'},digest,added)
 

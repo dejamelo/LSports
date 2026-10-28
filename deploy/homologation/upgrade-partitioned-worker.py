@@ -620,15 +620,18 @@ def partition_rehearsal_args(args,progress):
         args[2:2]=['--label','eu.adl.recovery.cache-policy=bounded-reclaim-verified']
     return args
 
-def verify_pipeline_sources(old_files,files,old_digest,added_old_files):
+def verify_pipeline_sources(old_files,files,old_digest,added_old_files,indexed_old_files=None):
+    indexed_old_files=indexed_old_files or {}
     require(set(files)==PARTITION_FILES|INDEXED_PUBLICATION_FILES and set(old_files)==PIPELINE_BASE_FILES|PIPELINE_AUXILIARY_FILES and set(added_old_files)==set(PIPELINE_ADDED_DEPENDENCY_SHA256)|set(PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_SOURCE_MANIFEST_MISMATCH')
+    require(set(indexed_old_files)<=INDEXED_PUBLICATION_FILES,'PIPELINE_INDEXED_BASE_SOURCE_MANIFEST_MISMATCH')
     require({name:hashlib.sha256(added_old_files[name].encode()).hexdigest() for name in PIPELINE_ADDED_DEPENDENCY_SHA256}==PIPELINE_ADDED_DEPENDENCY_SHA256,'PIPELINE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     require(verify_pinned_added_dependencies(added_old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_PINNED_ADDED_DEPENDENCY_BASE_UNVERIFIED')
-    verified_base={**old_files,**added_old_files}
-    # Installed derived images carry the digest of the complete partition file
-    # set. Verify that same identity before applying the per-dependency pins;
-    # hashing only the historical core subset rejects every full-set image.
-    digest_base={name:verified_base[name] for name in PARTITION_FILES}
+    verified_base={**old_files,**added_old_files,**indexed_old_files}
+    # Earlier indexed-publication images already carried indexed-feed.ts in
+    # their immutable source digest even though it was tracked separately from
+    # PARTITION_FILES. Bind that exact installed source when present; legacy
+    # full-set images retain the partition-only digest.
+    digest_base={name:verified_base[name] for name in PARTITION_FILES|set(indexed_old_files)}
     require(hashlib.sha256(json.dumps(digest_base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
     require({name:hashlib.sha256(files[name].encode()).hexdigest() for name in INDEXED_PUBLICATION_FILES}==INDEXED_PUBLICATION_SOURCE_SHA256,'INDEXED_PUBLICATION_SOURCE_HASH_UNVERIFIED')
     require('export { IndexedFeedStore, indexedFeedPath } from "./indexed-feed.js";' in files['packages/feed-store/src/index.ts'],'INDEXED_PUBLICATION_EXPORT_MISSING')
@@ -1974,7 +1977,8 @@ def upgrade_partitioned_unlocked(request):
                 elif request.get('pipelineRepair'):
                     legacy_files={name:old_files[name] for name in PIPELINE_BASE_FILES|PIPELINE_AUXILIARY_FILES if name in old_files}
                     added_files={name:old_files[name] for name in set(PIPELINE_ADDED_DEPENDENCY_SHA256)|set(PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256) if name in old_files}
-                    verify_pipeline_sources(legacy_files,files,old_digest,added_files)
+                    indexed_old_files={name:old_files[name] for name in INDEXED_PUBLICATION_FILES if name in old_files}
+                    verify_pipeline_sources(legacy_files,files,old_digest,added_files,indexed_old_files)
                 elif request.get('snapshotPressureRepair'):
                     require(request.get('livePersistenceRepair') is True and request.get('liveOomRepair') is not True,'PRESSURE_REPAIR_REQUIRES_VERIFIED_LIVE_WORKER')
                     verify_live_snapshot_pressure_sources(old_files,files,old_digest)
