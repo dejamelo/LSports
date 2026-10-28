@@ -351,7 +351,12 @@ export async function run(args){
     const names=partitionWorkerSourceNames.map(name=>'apps/worker/src/'+name);names.push(...partitionPackageSourceNames);
     if(process.env.ADL_PIPELINE_REPAIR==='1')names.push('packages/feed-store/src/indexed-feed.ts');
     const {createHash}=await import('node:crypto'),files={},baseHashes={};
-    const baseRef=snapshotMemoryRepair?'7248e39':durableMode?'789707f':args[4]==='--snapshot-throughput-repair'?'043af2e':['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?'dcd644b':throughputMode?'b63e735':nullableMode?'db4c193':supplierMode?'3425f72':fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
+    const defaultBaseRef=snapshotMemoryRepair?'7248e39':durableMode?'789707f':args[4]==='--snapshot-throughput-repair'?'043af2e':['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?'dcd644b':throughputMode?'b63e735':nullableMode?'db4c193':supplierMode?'3425f72':fullMode?'89f2882':distributionMode?'941b7c8':args[4]==='--inventory-repair'?'5069beb':'a590b7b';
+    const activeSourceRef=process.env.ADL_ACTIVE_SOURCE_REF;
+    if(activeSourceRef&&!/^[0-9a-f]{40}$/.test(activeSourceRef))throw Error('ACTIVE_SOURCE_REF_NOT_IMMUTABLE');
+    const baseRef=activeSourceRef||defaultBaseRef;
+    if(activeSourceRef&&(await command('git',['rev-parse','--verify',`${activeSourceRef}^{commit}`],undefined,10000,true)).trim()!==activeSourceRef)throw Error('ACTIVE_SOURCE_REF_NOT_COMMIT');
+    const existing=(await command('git',['ls-tree','-r','--name-only',baseRef],undefined,10000,true)).split('\n');
     for(const name of names){files[name]=await command('git',['show',runtimeRef+':'+name],undefined,10000,true);baseHashes[name]=existing.includes(name)?createHash('sha256').update(await command('git',['show',baseRef+':'+name],undefined,10000,true)).digest('hex'):null;}
     if(!snapshotMemoryRepair&&args[4]==='--recovery-throughput-rollback'&&ledger.steps.throughput_rollback?.status==='ok'){emit({stage:'throughput_rollback',status:'reused',workerStarted:false,posnetChanged:false});return;}
     if(args[4]==='--recovery-throughput-rollback'&&ledger.steps.throughput_image?.status!=='ok')throw Error('THROUGHPUT_ROLLBACK_NOT_PREPARED');

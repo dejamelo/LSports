@@ -11,6 +11,8 @@ INDEXED_PUBLICATION_SOURCE_SHA256={'packages/feed-store/src/indexed-feed.ts':'7d
 def source_export_script(names):
     require(isinstance(names,set) and names and all(isinstance(name,str) and re.fullmatch(r'(?:apps|packages)/[A-Za-z0-9_./-]{1,220}',name) and '..' not in Path(name).parts for name in names),'UPGRADE_SOURCE_EXPORT_SET_INVALID')
     return "const f=require('node:fs');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(names))+".map(n=>[n,f.readFileSync('/app/'+n,'utf8')]))));"
+def current_image_source_names(pipeline_repair):
+    return PARTITION_FILES|(INDEXED_PUBLICATION_FILES if pipeline_repair else set())
 PIPELINE_BASE_FILES=PARTITION_DIGEST_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
 PROJECTION_RESUME_DRIVER_SHA256='b2f7cd58ee386c3855b9225088d112fef51a8b442bd0369848fab626fa0c8034'
 
@@ -1952,7 +1954,7 @@ def upgrade_partitioned_unlocked(request):
                 old_digest=(base_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch');require(re.fullmatch('[0-9a-f]{64}',str(old_digest)),'CURRENT_OOM_IMAGE_LABEL_UNVERIFIED')
                 old_receipt=SECURE/('partitioned-upgrade-'+old_digest[:24]+'.json');require(old_receipt.is_file() and not old_receipt.is_symlink() and old_receipt.stat().st_uid==os.geteuid() and old_receipt.stat().st_mode&0o077==0,'CURRENT_OOM_SOURCE_RECEIPT_MISSING')
                 old=json.loads(old_receipt.read_bytes());verify_current_source_receipt(old,original_image,old_digest,request.get('fullRecovery') is True,BACKUPS)
-                base_source_names=sorted(PARTITION_FILES if request.get('pipelineRepair') is True else files)
+                base_source_names=sorted(current_image_source_names(request.get('pipelineRepair') is True) if request.get('pipelineRepair') is True else files)
                 export="const fs=require('node:fs');const names="+json.dumps(base_source_names)+";console.log(JSON.stringify(Object.fromEntries(names.map(n=>[n,fs.existsSync('/app/'+n)?fs.readFileSync('/app/'+n,'utf8'):null]))))"
                 old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',original_image,'-e',export],timeout=30))
                 old_files={name:value for name,value in old_files.items() if value is not None}

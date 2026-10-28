@@ -212,6 +212,8 @@ class Upgrade(unittest.TestCase):
   exported=source_ns['source_export_script'](source_ns['PARTITION_FILES']|source_ns['INDEXED_PUBLICATION_FILES'])
   self.assertIn('packages/feed-store/src/indexed-feed.ts',exported)
   self.assertEqual(len(json.loads(exported.split('Object.fromEntries(',1)[1].split('.map(',1)[0])),len(source_ns['PARTITION_FILES']|source_ns['INDEXED_PUBLICATION_FILES']))
+  self.assertEqual(source_ns['current_image_source_names'](True),source_ns['PARTITION_FILES']|source_ns['INDEXED_PUBLICATION_FILES'])
+  self.assertEqual(source_ns['current_image_source_names'](False),source_ns['PARTITION_FILES'])
   old={name:'installed:'+name for name in source_ns['PARTITION_FILES']}
   added={'apps/worker/src/snapshot-capacity.ts':(HERE.parent.parent/'apps/worker/src/snapshot-capacity.ts').read_text(),
    'packages/feed-store/src/tenant-tickets.ts':(HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts').read_text()}
