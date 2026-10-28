@@ -2,6 +2,27 @@ import json,tempfile,unittest
 from pathlib import Path
 HERE=Path(__file__).parent
 class PipelineIdentity(unittest.TestCase):
+ def test_read_only_report_hashes_indexed_feed_store_when_requested(self):
+  ns={'__name__':'tested'}
+  for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],ns)
+  with tempfile.TemporaryDirectory() as tmp:
+   secure=Path(tmp);(secure/'deployment.json').write_text('{}');actual='adl-worker-partitioned:'+'c'*24;actual_id='sha256:'+'b'*64
+   worker={'id':'f'*64,'running':True,'oomKilled':False,'name':'/adl-homologation-worker-1'};names=ns['PARTITION_FILES']|ns['INDEXED_PUBLICATION_FILES'];hashes={name:'e'*64 for name in names};output=[]
+   def run(args,**kw):
+    if args[:2]==['docker','inspect']:return json.dumps([{'Image':actual_id,'HostConfig':{'Memory':8589934592},'Config':{'User':'node','Env':[]}}]).encode()
+    if args[:3]==['docker','image','inspect']:return json.dumps([{'Id':actual_id,'Config':{'Labels':{}}}]).encode()
+    if args[:2]==['docker','exec']:return json.dumps(hashes).encode()
+    raise AssertionError('non-read-only command')
+   old=ns['subprocess'].run
+   try:
+    ns.update(SECURE=secure,states=lambda service:[worker],partition_base=lambda meta:[],model=lambda base:{'services':{'worker':{'image':actual,'environment':{}}}},run=run,emit=lambda **record:output.append(record))
+    ns['subprocess'].run=lambda args,**kw:type('Result',(),{'returncode':0,'stdout':json.dumps([{'Id':actual_id}]).encode()})()
+    expected='a'*40;request={'expectedImage':actual,'sourceSets':{expected:hashes},'indexedPublication':True}
+    self.assertEqual(ns['pipeline_identity_report'](request),0)
+   finally:ns['subprocess'].run=old
+   self.assertTrue(output[0]['sourceComparisons'][expected]['allMatch'])
+   self.assertIn('packages/feed-store/src/indexed-feed.ts',output[0]['sourceComparisons'][expected]['mismatches'][0]['file'] if output[0]['sourceComparisons'][expected]['mismatches'] else hashes)
+
  def test_read_only_report_identifies_exact_reference_and_id_mismatch_without_environment(self):
   ns={'__name__':'tested'}
   for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],ns)

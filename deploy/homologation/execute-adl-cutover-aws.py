@@ -201,12 +201,13 @@ def pipeline_identity_report(request):
         p=SECURE/('partitioned-upgrade-'+label[:24]+'.json')
         if p.is_file() and not p.is_symlink() and p.stat().st_uid==os.geteuid() and p.stat().st_mode&0o077==0 and p.stat().st_size<=2*1024**2:
             receipt=json.loads(p.read_bytes());receipt_info={'present':True,'digestMatchesLabel':receipt.get('digest')==label,'image':safe(receipt.get('image')),'offlineRestoreVerified':receipt.get('oomRestoreVerified') is True,'phase':receipt.get('phase') if receipt.get('phase') in ('prepared','stopped','start_requested','running') else 'other','startedAtUTC':receipt.get('startAt')}
+    expected_sources=PARTITION_FILES|(INDEXED_PUBLICATION_FILES if request.get('indexedPublication') is True else set())
     sets=request.get('sourceSets');require(isinstance(sets,dict) and 1<=len(sets)<=3,'PIPELINE_SOURCE_SETS_INVALID')
-    require(all(re.fullmatch('[0-9a-f]{40}',ref) and isinstance(values,dict) and set(values)==PARTITION_FILES and all(re.fullmatch('[0-9a-f]{64}',str(v)) for v in values.values()) for ref,values in sets.items()),'PIPELINE_SOURCE_HASHES_INVALID')
-    probe="const f=require('node:fs'),h=require('node:crypto');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(PARTITION_FILES))+".map(n=>[n,h.createHash('sha256').update(f.readFileSync('/app/'+n)).digest('hex')]))));"
+    require(all(re.fullmatch('[0-9a-f]{40}',ref) and isinstance(values,dict) and set(values)==expected_sources and all(re.fullmatch('[0-9a-f]{64}',str(v)) for v in values.values()) for ref,values in sets.items()),'PIPELINE_SOURCE_HASHES_INVALID')
+    probe="const f=require('node:fs'),h=require('node:crypto');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(expected_sources))+".map(n=>[n,h.createHash('sha256').update(f.readFileSync('/app/'+n)).digest('hex')]))));"
     if workers[0]['running']:hashes=json.loads(run(['docker','exec',workers[0]['id'],'node','-e',probe],timeout=20))
     else:hashes={}
-    comparisons={ref:{'allMatch':hashes==values,'mismatches':[{'file':n,'expected':v,'found':hashes.get(n)} for n,v in values.items() if hashes.get(n)!=v]} for ref,values in sets.items()}
+    comparisons={ref:{'allMatch':all(hashes.get(n)==v for n,v in values.items()),'mismatches':[{'file':n,'expected':v,'found':hashes.get(n)} for n,v in values.items() if hashes.get(n)!=v]} for ref,values in sets.items()}
     overrides=[]
     for entry in meta.get('composeOverrides',[]):
         p=Path(entry);require(p.parent==SECURE and p.is_file() and not p.is_symlink(),'PIPELINE_OVERRIDE_UNVERIFIED');overrides.append({'name':p.name,'sha256':snapshot_file_hash(p)})

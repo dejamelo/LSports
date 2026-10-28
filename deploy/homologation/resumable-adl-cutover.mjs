@@ -186,11 +186,11 @@ export async function run(args){
     if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:true}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
     const names=partitionWorkerSourceNames.map(n=>'apps/worker/src/'+n);names.push(...partitionPackageSourceNames);
-    if(process.env.ADL_PIPELINE_REPAIR==='1')names.push('packages/feed-store/src/indexed-feed.ts');
-    const {createHash}=await import('node:crypto');const sourceSets={};
-    for(const ref of ['6f6b8928aee8dadab7b9be1f9dd2755f7c8fa46f',runtimeRef]){const full=(await command('git',['rev-parse',ref],undefined,10000,true)).trim();sourceSets[full]={};for(const name of names)sourceSets[full][name]=createHash('sha256').update(await command('git',['show',full+':'+name],undefined,10000,true)).digest('hex');}
+    const indexedPublication=process.env.ADL_PIPELINE_REPAIR==='1';if(indexedPublication)names.push('packages/feed-store/src/indexed-feed.ts');
+    const {createHash}=await import('node:crypto');const full=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim(),sourceSets={[full]:{}};
+    for(const name of names)sourceSets[full][name]=createHash('sha256').update(await command('git',['show',full+':'+name],undefined,10000,true)).digest('hex');
     const {writeProtectedReport}=await import('./distribution-validation.mjs');const {observeRecovery}=await import('./recovery-progress.mjs');
-    await observeRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,path.join(folder,`pipeline-${pid}-${parent}.json`),writeProtectedReport,{identityRequest:{expectedImage:persistenceExpectedImage(ledger,{}),sourceSets}});return;
+    await observeRecovery((action,extra)=>remote(action,extra,true),handoff,ledger,save,path.join(folder,`pipeline-${pid}-${parent}.json`),writeProtectedReport,{identityRequest:{expectedImage:persistenceExpectedImage(ledger,{}),sourceSets,indexedPublication}});return;
    }
    if(args[4]==='--worker-exit-report'){
     stage='worker_exit_report';
