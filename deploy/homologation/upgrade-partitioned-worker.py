@@ -7,7 +7,10 @@ OOM_REHEARSAL_TIMEOUT_SECONDS=1200
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
 PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256={'packages/feed-store/src/tenant-tickets.ts':'56bc1ee5debef412fd571439d9980ef065275ea141692aa58858278401103ad2'}
 INDEXED_PUBLICATION_FILES={'packages/feed-store/src/indexed-feed.ts'}
-INDEXED_PUBLICATION_SOURCE_SHA256={'packages/feed-store/src/indexed-feed.ts':'c26e30fc2697fd844ec627c3725f7fc0c19945a96f268a9da1effe3e4845eafc'}
+INDEXED_PUBLICATION_SOURCE_SHA256={'packages/feed-store/src/indexed-feed.ts':'7d9f39072a71d76f89d202a5f97d17c0bdae706c0cdc6cba0a291af6501cb9eb'}
+def source_export_script(names):
+    require(isinstance(names,set) and names and all(isinstance(name,str) and re.fullmatch(r'(?:apps|packages)/[A-Za-z0-9_./-]{1,220}',name) and '..' not in Path(name).parts for name in names),'UPGRADE_SOURCE_EXPORT_SET_INVALID')
+    return "const f=require('node:fs');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(names))+".map(n=>[n,f.readFileSync('/app/'+n,'utf8')]))));"
 PIPELINE_BASE_FILES=PARTITION_DIGEST_FILES-set(PIPELINE_ADDED_DEPENDENCY_SHA256)
 PROJECTION_RESUME_DRIVER_SHA256='b2f7cd58ee386c3855b9225088d112fef51a8b442bd0369848fab626fa0c8034'
 
@@ -24,15 +27,22 @@ def verified_existing_snapshot_memory_profile(proof,worker,memory_limit):
 def pipeline_memory_identity_verified(memory_limit,eight_gib_pipeline,verified_existing_snapshot_profile):
     return memory_limit==6442450944 or memory_limit==8589934592 and (eight_gib_pipeline or verified_existing_snapshot_profile)
 
-def verify_api_compatibility(required_commit):
+def verify_api_compatibility(required_commit,required_source_manifest,required_manifest_digest):
     require(isinstance(required_commit,str) and re.fullmatch('[0-9a-f]{40}',required_commit),'INDEXED_API_COMMIT_REQUIRED')
+    require(isinstance(required_source_manifest,dict) and 1<=len(required_source_manifest)<=2048 and all(isinstance(name,str) and re.fullmatch(r'(?:(?:apps|packages|scripts)/[A-Za-z0-9_./-]{1,220}|(?:package(?:-lock)?\.json|tsconfig\.json))',name) and '..' not in Path(name).parts and re.fullmatch('[0-9a-f]{64}',str(digest)) for name,digest in required_source_manifest.items()),'INDEXED_API_SOURCE_MANIFEST_INVALID')
+    required_digest=hashlib.sha256(json.dumps(dict(sorted(required_source_manifest.items())),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    require(required_manifest_digest==required_digest,'INDEXED_API_SOURCE_MANIFEST_DIGEST_MISMATCH')
     apis=states('api');require(len(apis)==1 and apis[0].get('running') is True and apis[0].get('health')=='healthy','INDEXED_API_NOT_HEALTHY')
     info=json.loads(run(['docker','inspect',apis[0]['id']]))[0]
     ref=info.get('Config',{}).get('Image');require(isinstance(ref,str),'INDEXED_API_IMAGE_UNVERIFIED')
     image=json.loads(run(['docker','image','inspect',ref]))[0]
     revision=(image.get('Config',{}).get('Labels') or {}).get('org.opencontainers.image.revision')
     require(revision==required_commit,'INDEXED_API_WORKER_VERSION_MISMATCH')
-    return {'apiCommit':revision,'apiImage':ref,'apiContainerId':apis[0]['id'],'healthy':True}
+    script="const fs=require('node:fs'),crypto=require('node:crypto'),expected=JSON.parse(process.env.ADL_SOURCE_MANIFEST);for(const [name,digest] of Object.entries(expected)){const actual=crypto.createHash('sha256').update(fs.readFileSync('/app/'+name)).digest('hex');if(actual!==digest)throw Error('API_SOURCE_HASH_MISMATCH')}console.log(JSON.stringify({verified:Object.keys(expected).length}));"
+    env_value=json.dumps(required_source_manifest,sort_keys=True,separators=(',',':'))
+    checked=json.loads(run(['docker','exec','--user','0:0','-e','ADL_SOURCE_MANIFEST='+env_value,apis[0]['id'],'node','-e',script]))
+    require(checked.get('verified')==len(required_source_manifest),'INDEXED_API_SOURCE_MANIFEST_MISMATCH')
+    return {'apiCommit':revision,'apiImage':ref,'apiContainerId':apis[0]['id'],'healthy':True,'sourceManifestSha256':required_digest,'sourceFilesVerified':checked['verified']}
 
 def verify_full_recovery_sources(old_files,files,old_digest):
     require(set(old_files)==PARTITION_FILES and set(files)==PARTITION_FILES,'FULL_RECOVERY_SOURCE_MANIFEST_MISMATCH')
@@ -1770,7 +1780,7 @@ def resolve_prepared_upgrade(request,candidate_files):
     image_info=json.loads(run(['docker','image','inspect',image]))[0]
     require((image_info.get('Config',{}).get('Labels') or {}).get('eu.adl.partitioned.patch')==digest,'RESUME_PREPARED_IMAGE_LABEL_MISMATCH')
     image_id=image_info['Id'];require(re.fullmatch('sha256:[0-9a-f]{64}',image_id),'RESUME_PREPARED_IMAGE_ID_UNVERIFIED')
-    export="const f=require('node:fs');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(PARTITION_FILES))+".map(n=>[n,f.readFileSync('/app/'+n,'utf8')]))));"
+    export=source_export_script(PARTITION_FILES|(INDEXED_PUBLICATION_FILES if request.get('pipelineRepair') is True else set()))
     files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',image_id,'-e',export],timeout=30))
     expected_sources=PARTITION_FILES|(INDEXED_PUBLICATION_FILES if request.get('pipelineRepair') is True else set())
     require(isinstance(files,dict) and set(files)==expected_sources and all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'RESUME_PREPARED_SOURCES_UNVERIFIED')
@@ -1795,7 +1805,7 @@ def upgrade_partitioned_unlocked(request):
     try:
         require(os.geteuid()==0,'ROOT_REQUIRED');phase=request['phase'];require(phase in ('prepare','activate','rollback'),'INVALID_UPGRADE_PHASE')
         files=request['files'];expected_sources=PARTITION_FILES|(INDEXED_PUBLICATION_FILES if request.get('pipelineRepair') is True else set());require(set(files)==expected_sources,'UPGRADE_FILE_LIST_UNVERIFIED')
-        api_compatibility=verify_api_compatibility(request['requiredApiCommit']) if request.get('pipelineRepair') is True else None
+        api_compatibility=verify_api_compatibility(request['requiredApiCommit'],request.get('requiredApiSourceManifest'),request.get('requiredApiSourceManifestSha256')) if request.get('pipelineRepair') is True else None
         require(all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'UPGRADE_SOURCE_SIZE_LIMIT')
         digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt_path=SECURE/('partitioned-upgrade-'+digest[:24]+'.json')
         if request.get('resumeBackup'):

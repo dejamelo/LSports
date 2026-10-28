@@ -145,8 +145,13 @@ export function deferPublicProjection(state:Pick<TradeState,'connections'>){
 // until this compacted full-state checkpoint has been fsynced and atomically
 // installed. Four processing windows per compaction amortize the measured
 // multi-gigabyte write without weakening inbox durability or its byte cap.
-export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=131072;
-export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=600000;
+// A full-state checkpoint used to be amortized across 131k deliveries, but the
+// durable inbox now records incremental rows and publication is indexed. That
+// old threshold left the public revision unchanged for tens of minutes while
+// incoming prices aged out of the API freshness window. Keep ACK behind the
+// same journal fsync + SQLite transaction, with a bounded live batch instead.
+export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=512;
+export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=5000;
 // The durable inbox is already FULL-durable and keeps every staged row until
 // its applied prefix is covered by this checkpoint. InPlay used to checkpoint
 // every 32 messages, rewriting the same multi-GB state roughly every few

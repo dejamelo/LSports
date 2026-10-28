@@ -183,7 +183,7 @@ class Cutover(unittest.TestCase):
    old='2026-01-01T00:00:00Z'
    lane={'phase':'connected','lastSnapshotAt':now,'session':{'startedAt':old},'recoveryProgress':{'regularSnapshotReady':True}}
    feed={'mode':'connected','updatedAt':now,'connections':{'prematch':copy.deepcopy(lane),'inplay':copy.deepcopy(lane)},'events':[]}
-   prior=NS['states'];prior_evidence=NS['feed_evidence'];NS['feed_evidence']=lambda *args:{};NS['states']=lambda service:[{'running':True}]
+   prior=NS['states'];prior_evidence=NS['feed_evidence'];prior_memory=NS['diagnostic_available_memory_bytes'];NS['feed_evidence']=lambda *args:{};NS['states']=lambda service:[{'running':True}];NS['diagnostic_available_memory_bytes']=lambda:1024**3
    def check():
     (folder/'trade-feed.json').write_text(json.dumps(feed));output=io.StringIO()
     with contextlib.redirect_stdout(output):NS['cutover_status'](folder,now)
@@ -194,7 +194,7 @@ class Cutover(unittest.TestCase):
     self.assertEqual(check()['status'],'snapshots_ready')
     feed['connections']['prematch']['recoveryProgress']['regularSnapshotReady']=False
     self.assertEqual(check()['status'],'recovering')
-   finally:NS['states']=prior;NS['feed_evidence']=prior_evidence
+   finally:NS['states']=prior;NS['feed_evidence']=prior_evidence;NS['diagnostic_available_memory_bytes']=prior_memory
  def test_cutover_status_prefers_readonly_index_metadata_to_stale_multigigabyte_checkpoint(self):
   with tempfile.TemporaryDirectory() as temporary:
    folder=Path(temporary);now=NS['datetime'].datetime.now(NS['datetime'].timezone.utc).isoformat().replace('+00:00','Z')
@@ -301,7 +301,7 @@ class RecoveryRuntimeEvidence(unittest.TestCase):
     if args[:2]==['docker','run']:return json.dumps(before).encode()
     if args[:2]==['docker','exec']:return b'7\n'
     raise AssertionError('unexpected mutation or provider call')
-   old={k:NS.get(k) for k in ('SECURE','run','subprocess')};NS.update(SECURE=secure,run=run,subprocess=types.SimpleNamespace(run=lambda *a,**kw:types.SimpleNamespace(returncode=0,stdout=b'{"CPUPerc":"90.00%","MemPerc":"50.0%"}')))
+   old={k:NS.get(k) for k in ('SECURE','run','subprocess','diagnostic_available_memory_bytes')};NS.update(SECURE=secure,run=run,subprocess=types.SimpleNamespace(run=lambda *a,**kw:types.SimpleNamespace(returncode=0,stdout=b'{"CPUPerc":"90.00%","MemPerc":"50.0%"}')),diagnostic_available_memory_bytes=lambda:1024**3)
    try:
     result=NS['recovery_runtime_evidence'](feed,[{'id':'worker','running':True}],{'before':before,'candidate':candidate});self.assertTrue(result['nullableCollectionsInstalled']);self.assertTrue(result['capturedRowPreviouslyVerified']);self.assertTrue(result['matchesBefore']);self.assertFalse(result['brokerCloseCauseProven']);self.assertEqual(result['coordinatorLocks'][0]['action'],'preserved');self.assertEqual(result['snapshotSpools'][0]['bytes'],len('PRIVATE_BODY_NOT_TO_PRINT'));self.assertNotIn('PRIVATE_BODY',json.dumps(result));self.assertTrue(all('--network' in c and 'none' in c and '--memory' in c and '128m' in c for c in calls if c[:2]==['docker','run']));self.assertTrue((feed/'trade-feed.json.snapshot-example.lock').exists())
    finally:NS.update(old)

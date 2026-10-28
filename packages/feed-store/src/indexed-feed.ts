@@ -44,7 +44,8 @@ export class IndexedFeedStore {
     try {
       this.db.exec("DELETE FROM feed_events");
       const put = this.db.prepare("INSERT INTO feed_events(id,lane,sport,competition_id,live,updated_at_ms,body) VALUES(?,?,?,?,?,?,?)");
-      for (const event of events) this.put(put, event);
+      const putMarket = this.db.prepare("INSERT INTO feed_markets(event_id,market_id,body) VALUES(?,?,?)");
+      for (const event of events) this.put(put, putMarket, event);
       this.commitMetadata(metadata);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -57,20 +58,34 @@ export class IndexedFeedStore {
       let changed = false;
       for (const id of deletedIds) { remove.run(id); changed = true; }
       const put = this.db.prepare("INSERT INTO feed_events(id,lane,sport,competition_id,live,updated_at_ms,body) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lane=excluded.lane,sport=excluded.sport,competition_id=excluded.competition_id,live=excluded.live,updated_at_ms=excluded.updated_at_ms,body=excluded.body");
-      for (const event of upserts) { this.put(put, event); changed = true; }
+      const existingMarkets = this.db.prepare("SELECT market_id FROM feed_markets WHERE event_id=?");
+      const removeMarket = this.db.prepare("DELETE FROM feed_markets WHERE event_id=? AND market_id=?");
+      const putMarket = this.db.prepare("INSERT INTO feed_markets(event_id,market_id,body) VALUES(?,?,?) ON CONFLICT(event_id,market_id) DO UPDATE SET body=excluded.body WHERE feed_markets.body IS NOT excluded.body");
+      for (const event of upserts) { this.put(put, existingMarkets, removeMarket, putMarket, event); changed = true; }
       this.commitMetadata(metadata, changed);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  private put(stmt: ReturnType<DatabaseSync["prepare"]>, event: SportEvent) {
+  private put(stmt: ReturnType<DatabaseSync["prepare"]>, putMarket: ReturnType<DatabaseSync["prepare"]>, event: SportEvent): void;
+  private put(stmt: ReturnType<DatabaseSync["prepare"]>, existingMarkets: ReturnType<DatabaseSync["prepare"]>, removeMarket: ReturnType<DatabaseSync["prepare"]>, putMarket: ReturnType<DatabaseSync["prepare"]>, event: SportEvent): void;
+  private put(stmt: ReturnType<DatabaseSync["prepare"]>, existingOrMarketPut: ReturnType<DatabaseSync["prepare"]>, removeOrEvent: ReturnType<DatabaseSync["prepare"]> | SportEvent, marketPutOrEvent?: ReturnType<DatabaseSync["prepare"]> | SportEvent, maybeEvent?: SportEvent) {
+    const event = maybeEvent || (removeOrEvent as SportEvent);
     const lane = event.source;
     if (lane !== "prematch" && lane !== "inplay") throw Error("INDEX_EVENT_WITHOUT_LANE");
     const { markets = [], marketDiagnostic: _diagnostic, ...rest } = event;
     stmt.run(event.id, lane, event.sport, event.competition?.id ?? null, event.live ? 1 : 0,
       Date.parse(event.updatedAt || "") || 0, JSON.stringify({ ...rest, markets: [], selections: [] }));
-    this.db.prepare("DELETE FROM feed_markets WHERE event_id=?").run(event.id);
-    const marketPut=this.db.prepare("INSERT INTO feed_markets(event_id,market_id,body) VALUES(?,?,?)");
-    for(const market of markets)marketPut.run(event.id,market.id,JSON.stringify(market));
+    if (maybeEvent) {
+      const keep = new Set(markets.map(market => market.id));
+      const current = existingOrMarketPut.all(event.id) as { market_id: string }[];
+      const removeMarket = removeOrEvent as ReturnType<DatabaseSync["prepare"]>;
+      for (const row of current) if (!keep.has(row.market_id)) removeMarket.run(event.id, row.market_id);
+      const putMarket = marketPutOrEvent as ReturnType<DatabaseSync["prepare"]>;
+      for (const market of markets) putMarket.run(event.id, market.id, JSON.stringify(market));
+    } else {
+      const putMarket = existingOrMarketPut;
+      for (const market of markets) putMarket.run(event.id, market.id, JSON.stringify(market));
+    }
   }
   private commitMetadata(metadata: Omit<EventFeed, "events">, increment = true) {
     const body = JSON.stringify(metadata);

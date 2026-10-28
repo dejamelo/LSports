@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
 import {connectDurableMq,openInbox} from './durable-ingress.mjs';
-import {session,publicationCaptureTurn,coalescedPersistence} from './connected.js';
+import {session,publicationCaptureTurn,coalescedPersistence,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';
 import {TradeState} from './state.js';
 import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';
 import {createPublisher} from '@lsports/feed-store';
@@ -24,7 +24,7 @@ for(const failure of [false,true])test(`durable replay and atomic retirement con
   assert.equal(options?.deferTransport,true);
   actor=await connectDurableMq(p,db,m=>{metrics=m;onMetrics?.(m)},{offline:true,deferTransport:true});
   const activate=actor.activateTransport.bind(actor);actor.activateTransport=async()=>{activateCalls++;return activate()};return actor;
- }},dbPath);void task.catch(()=>{});
+ },checkpointBatchThreshold:PREMATCH_CHECKPOINT_BATCH_THRESHOLD,checkpointBatchFlushMs:PREMATCH_CHECKPOINT_BATCH_FLUSH_MS},dbPath);void task.catch(()=>{});
  try{
   await until(()=>metrics?.checkpointed===100);
   assert.equal(attempts,1);assert.equal(activateCalls,0,'no network connection before verified distribution');

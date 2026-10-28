@@ -39,7 +39,11 @@ def timeline_timestamp(value,field):
     valid=isinstance(value,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z',value)
     try:
         if not valid:raise ValueError()
-        return datetime.datetime.fromisoformat(value.replace('Z','+00:00'))
+        # Python datetime stores microseconds; RFC3339 permits nanoseconds.
+        # Preserve the supported six digits without rejecting valid provider
+        # timestamps or rounding a barrier earlier than its source instant.
+        normalized=re.sub(r'(\.\d{6})\d{1,3}(?=Z$)',r'\1',value)
+        return datetime.datetime.fromisoformat(normalized.replace('Z','+00:00'))
     except (ValueError,TypeError):
         emit(operation='cutover.aws',stage='timeline_timestamp',status='blocked',reason='TIMELINE_TIMESTAMP_UNVERIFIED',timestampField=field,valueType=type(value).__name__,requiredFormat='RFC3339 UTC Z; optional 1-9 fractional digits; valid calendar')
         raise RuntimeError('TIMELINE_TIMESTAMP_UNVERIFIED_'+field.replace('.','_').upper())
@@ -646,7 +650,7 @@ def recovery_runtime_evidence(directory,consumers,expected):
         elif key and line.isdigit():readings[key]=int(line)
     result['cgroupMemory']=readings
     result['containerMemoryLimitBytes']=info.get('HostConfig',{}).get('Memory')
-    result['hostAvailableMemoryBytes']=int(next((line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:')),'0'))*1024
+    result['hostAvailableMemoryBytes']=diagnostic_available_memory_bytes()
     return result
 
 def existing_recovery_timeline(consumers,window):

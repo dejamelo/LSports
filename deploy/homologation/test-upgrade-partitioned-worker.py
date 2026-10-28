@@ -71,13 +71,22 @@ class Upgrade(unittest.TestCase):
 
  def test_indexed_worker_requires_healthy_api_at_the_same_immutable_commit(self):
   commit='a'*40;old_states,old_run=NS['states'],NS['run']
+  manifest={'apps/api/src/app.ts':'1'*64,'packages/feed-store/src/indexed-feed.ts':'2'*64}
+  manifest_digest=hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()
   NS['states']=lambda service:[{'id':'api-id','running':True,'health':'healthy'}] if service=='api' else []
-  NS['run']=lambda args,**kwargs:(json.dumps([{'Config':{'Image':'adl-api:'+commit}}]).encode() if args[:2]==['docker','inspect'] else json.dumps([{'Config':{'Labels':{'org.opencontainers.image.revision':commit}}}]).encode())
+  def run(args,**kwargs):
+   if args[:2]==['docker','inspect']:return json.dumps([{'Config':{'Image':'adl-api:'+commit}}]).encode()
+   if args[:2]==['docker','image']:return json.dumps([{'Config':{'Labels':{'org.opencontainers.image.revision':commit}}}]).encode()
+   if args[:2]==['docker','exec'] and args[2]=='--user':return json.dumps({'verified':len(manifest)}).encode()
+   raise AssertionError('unexpected command')
+  NS['run']=run
   try:
-   self.assertEqual(NS['verify_api_compatibility'](commit)['apiCommit'],commit)
-   with self.assertRaisesRegex(RuntimeError,'INDEXED_API_WORKER_VERSION_MISMATCH'):NS['verify_api_compatibility']('b'*40)
+   result=NS['verify_api_compatibility'](commit,manifest,manifest_digest)
+   self.assertEqual(result['apiCommit'],commit);self.assertEqual(result['sourceManifestSha256'],manifest_digest);self.assertEqual(result['sourceFilesVerified'],len(manifest))
+   with self.assertRaisesRegex(RuntimeError,'INDEXED_API_SOURCE_MANIFEST_DIGEST_MISMATCH'):NS['verify_api_compatibility'](commit,manifest,'0'*64)
+   with self.assertRaisesRegex(RuntimeError,'INDEXED_API_WORKER_VERSION_MISMATCH'):NS['verify_api_compatibility']('b'*40,manifest,manifest_digest)
    NS['states']=lambda service:[]
-   with self.assertRaisesRegex(RuntimeError,'INDEXED_API_NOT_HEALTHY'):NS['verify_api_compatibility'](commit)
+   with self.assertRaisesRegex(RuntimeError,'INDEXED_API_NOT_HEALTHY'):NS['verify_api_compatibility'](commit,manifest,manifest_digest)
   finally:NS['states'],NS['run']=old_states,old_run
 
  def test_full_recovery_accepts_only_measured_stale_projection_gate(self):
@@ -196,10 +205,13 @@ class Upgrade(unittest.TestCase):
  def test_pipeline_dependency_pin_matches_current_source_manifest(self):
   path=HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts';indexed=HERE.parent.parent/'packages/feed-store/src/indexed-feed.ts'
   digest=hashlib.sha256(path.read_bytes()).hexdigest();indexed_digest=hashlib.sha256(indexed.read_bytes()).hexdigest()
-  source_ns={'__name__':'tested_upgrade_manifest','require':NS['require'],'hashlib':hashlib,'json':json}
+  source_ns={'__name__':'tested_upgrade_manifest','require':NS['require'],'hashlib':hashlib,'json':json,'re':__import__('re'),'Path':Path}
   exec((HERE/'upgrade-partitioned-worker.py').read_text().split("if __name__=='__main__':")[0],source_ns)
   self.assertEqual(source_ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256'][str(path.relative_to(HERE.parent.parent))],digest)
   self.assertEqual(source_ns['INDEXED_PUBLICATION_SOURCE_SHA256'][str(indexed.relative_to(HERE.parent.parent))],indexed_digest)
+  exported=source_ns['source_export_script'](source_ns['PARTITION_FILES']|source_ns['INDEXED_PUBLICATION_FILES'])
+  self.assertIn('packages/feed-store/src/indexed-feed.ts',exported)
+  self.assertEqual(len(json.loads(exported.split('Object.fromEntries(',1)[1].split('.map(',1)[0])),len(source_ns['PARTITION_FILES']|source_ns['INDEXED_PUBLICATION_FILES']))
   old={name:'installed:'+name for name in source_ns['PARTITION_FILES']}
   added={'apps/worker/src/snapshot-capacity.ts':(HERE.parent.parent/'apps/worker/src/snapshot-capacity.ts').read_text(),
    'packages/feed-store/src/tenant-tickets.ts':(HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts').read_text()}

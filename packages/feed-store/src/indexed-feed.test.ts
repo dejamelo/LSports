@@ -67,6 +67,25 @@ test("an interrupted delta rolls back rows and revision; the last committed page
   } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("market deltas reuse identities, update changed bodies and remove only markets absent from the new event", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-market-delta-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  try {
+    const original = event("prematch:1", now);
+    original.markets!.push({ id: "prematch:1:2", name: "total", status: 1, selections: [{ id: "prematch:1:2:1", label: "over", odds: 1.9, available: true }] });
+    writer.rebuild([original], metadata(now));
+    const changed = event("prematch:1", now + 1, 2.2);
+    writer.applyDelta([changed], [], metadata(now + 1));
+    const page = writer.page({ limit: 10, scope: "market-delta", now: now + 1 });
+    assert.equal(page.events.length, 1);
+    assert.equal(page.events[0].markets?.length, 1, "the removed market must be deleted");
+    assert.equal(page.events[0].selections[0].odds, 2.2, "changed market bodies must replace the committed value");
+    const sql = new DatabaseSync(path, { readOnly: true });
+    try { assert.equal((sql.prepare("SELECT count(*) AS n FROM feed_markets WHERE event_id=?").get("prematch:1") as { n: number }).n, 1); }
+    finally { sql.close(); }
+  } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("read-only API sees the last committed revision while the worker has an open WAL transaction", () => {
   const dir = mkdtempSync(join(tmpdir(), "adl-indexed-wal-reader-")), path = join(dir, "public.sqlite"), now = Date.now();
   const writer = new IndexedFeedStore(path);

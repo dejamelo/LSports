@@ -134,15 +134,18 @@ test('OOM repair and rollback remain distinct durable modes; no migration mode i
  assert.equal(partitionedRepairMode('--indexed-publication-repair'),true);
  assert.equal(partitionedRepairMode('--snapshot-memory-repair'),true);
  assert.equal(partitionedRepairMode('--feed-validation-resume'),false);
- const commit='a'.repeat(40),complete={stage:'complete',status:'ok',installedCommit:commit,installedImageId:'sha256:'+('b'.repeat(64)),installedSourceVerified:true,workersUnchanged:true,posnetChanged:false};
+ const commit='a'.repeat(40),sourceManifest={'apps/api/src/app.ts':'1'.repeat(64),'packages/feed-store/src/indexed-feed.ts':'2'.repeat(64)};
+ const {canonicalSourceDigest}=await import('./resumable-adl-cutover.mjs');
+ const complete={stage:'complete',status:'ok',installedCommit:commit,installedImageId:'sha256:'+('b'.repeat(64)),installedSourceVerified:true,sourceManifest,sourceManifestSha256:canonicalSourceDigest(sourceManifest),workersUnchanged:true,posnetChanged:false};
  const receipt=indexedApiDeploymentReceipt([{stage:'api_replace',status:'running'},complete],commit);
- assert.deepEqual(receipt,{commit,installedCommit:commit,imageId:complete.installedImageId,sourceFilesVerified:true,workersUnchanged:true,posnetChanged:false});
+ assert.deepEqual(receipt,{commit,installedCommit:commit,imageId:complete.installedImageId,sourceFilesVerified:true,sourceManifest,sourceManifestSha256:complete.sourceManifestSha256,workersUnchanged:true,posnetChanged:false});
  assert.equal(indexedApiDeploymentReceipt([complete],'c'.repeat(40)),undefined);
  assert.equal(indexedApiDeploymentReceipt([{...complete,workersUnchanged:false}],commit),undefined);
  const next='c'.repeat(40);
  assert.equal(alignApiDeploymentReceipt(receipt,next,['apps/api/src/app.ts']),undefined);
  assert.deepEqual(alignApiDeploymentReceipt(receipt,next,[]),{...receipt,commit:next,sourceCompatibilityVerified:true});
  assert.equal(alignApiDeploymentReceipt({...receipt,sourceFilesVerified:false},next,[]),undefined);
+ assert.equal(alignApiDeploymentReceipt({...receipt,sourceManifest:{...sourceManifest,'apps/api/src/app.ts':'0'.repeat(64)}},next,[]),undefined);
 });
 
 test('persistence repair obtains exact image from successful protected progress and never guesses',()=>{

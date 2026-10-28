@@ -29,8 +29,8 @@ for(const persistFails of [false,true])test(`transport closes during captured ch
   actor.offline(Array.from({length:100},(_,i)=>({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'isolated-'+i,ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'1',Price:'2.80',Status:1,IsChanged:1}]}]}]}})),properties:{headers:{MessageType:3}},fields:{redelivered:false}})));
   await until(()=>began);actor.emit('close');
   const before=openInbox(inbox);assert.equal(before.stats().backlog,100,'broker ACKed raw rows cannot retire before business persistence');before.close();
-  release();await assert.rejects(task);const db=openInbox(inbox);assert.equal(db.stats().backlog,persistFails?100:0);db.close();
-  assert.ok(saves>0);if(!persistFails){assert.equal(latest.checkpointed,100);const recovered=new TradeState();await restore(recovered,path);assert.equal(recovered.rows.prematch.get(1)?.markets.get('1')?.bets?.[0].price,'2.80');}
+  release();await assert.rejects(task);const db=openInbox(inbox);assert.equal(db.stats().backlog,persistFails?100:99,'only the captured prefix may retire; the uncaptured raw suffix stays replayable');if(!persistFails)assert.equal(db.peek(99).length,99);db.close();
+  assert.ok(saves>0);if(!persistFails){assert.equal(latest.checkpointed,1);const recovered=new TradeState();await restore(recovered,path);assert.equal(recovered.rows.prematch.get(1)?.markets.get('1')?.bets?.[0].price,'2.80');}
   if(persistFails){
    const replayState=new TradeState();await restore(replayState,path);const replayAbort=new AbortController();let replayActor:any,replayMetrics:any;
    const replaySave=coalescedPersistence(()=>publicationCaptureTurn(replayState,async stable=>{const {regular,...saved}=streamCheckpoint(stable);await persistRegularCheckpoint(path,stable);await publish(stable.projection(Date.now(),false),{...saved,regularExternal:true});}));

@@ -202,6 +202,7 @@ def main():
         built=json.loads(run(['docker','image','inspect',image]))[0]
         require(installed['Image']==built['Id'] and (built['Config'].get('Labels') or {}).get('org.opencontainers.image.revision')==sha,'INSTALLED_IMAGE_VERSION_MISMATCH')
         source_hashes={str(p.relative_to(context)):hashlib.sha256(p.read_bytes()).hexdigest() for p in context.rglob('*') if p.is_file() and p.name!='Dockerfile'}
+        source_manifest_sha256=hashlib.sha256(json.dumps(dict(sorted(source_hashes.items())),sort_keys=True,separators=(',',':')).encode()).hexdigest()
         verify="const fs=require('fs'),crypto=require('crypto');let raw='';process.stdin.on('data',x=>raw+=x);process.stdin.on('end',()=>{const items=Object.entries(JSON.parse(raw));const valid=items.every(([p,h])=>crypto.createHash('sha256').update(fs.readFileSync('/app/'+p)).digest('hex')===h);console.log(JSON.stringify({valid,count:items.length}));process.exitCode=valid?0:2;});"
         verified=json.loads(run(['docker','exec','-i','--user','0:0',current_ids[0],'node','-e',verify],input=json.dumps(source_hashes).encode(),log=log))
         require(verified.get('valid') is True,'INSTALLED_SOURCE_MISMATCH')
@@ -228,7 +229,7 @@ def main():
         meta['composeOverrides']=list(dict.fromkeys(meta.get('composeOverrides',[])+[str(overlay)]));meta['apiUiCommit']=sha;meta['apiUiBackup']=str(backup)
         atomic(SECURE/'deployment.json',json.dumps(meta).encode())
         private(backup/'success.json',json.dumps({'commit':sha,'adminPresent':bool(admins),'image':image,'installedImageId':installed['Image'],'installedSourceVerified':True}).encode())
-        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,httpsVerified=True,applicationVerified=True,panelRoutesVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,apiFeedReadSafeVerified=True,integrationVerified=False,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,caddyConfigurationPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
+        emit(stage='complete',status='ok',backup=str(backup),commit=sha,installedCommit=sha,installedImageId=installed['Image'],installedSourceVerified=True,sourceManifest=source_hashes,sourceManifestSha256=source_manifest_sha256,httpsVerified=True,applicationVerified=True,panelRoutesVerified=True,administratorPreserved=bool(admins),initializationRequired=not bool(admins),schemaCompatible=True,additiveTables=additions,apiFeedReadSafeVerified=True,integrationVerified=False,workersUnchanged=True,posnetChanged=False,composeOverridesPreserved=True,caddyConfigurationPreserved=True,syntheticDataTransferred=False,panel='https://sportbook.apuestadeportiva.lat/control')
         return 0
     except Exception as e:
         code=str(e) if isinstance(e,RuntimeError) and re.fullmatch('[A-Z_]+',str(e)) else 'PRIVATE_ERROR_SEE_STAGE'
