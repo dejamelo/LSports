@@ -68,6 +68,12 @@ def verify_current_source_receipt(receipt,image,digest,full_recovery,backups_roo
         path=backup/name;require(path.is_file() and not path.is_symlink() and path.stat().st_uid==os.geteuid() and path.stat().st_mode&0o077==0 and snapshot_file_hash(path)==digest_value,'CURRENT_SOURCE_BACKUP_HASH_MISMATCH')
     return True
 
+def verify_active_container_source_hashes(active_hashes,candidate_files,installed_image_files):
+    require(set(active_hashes)==set(candidate_files),'UPGRADE_ACTIVE_SOURCE_MANIFEST_MISMATCH')
+    expected={name:(hashlib.sha256(installed_image_files[name].encode()).hexdigest() if name in installed_image_files else None) for name in candidate_files}
+    require(active_hashes==expected,'UPGRADE_ACTIVE_SOURCE_IMAGE_MISMATCH')
+    return True
+
 def verify_projection_resume_artifacts(backup,progress,image_info,name):
     require(isinstance(name,str) and re.fullmatch(r'projection-resume-[0-9]{8}T[0-9]{4}Z',name),'PROJECTION_RESUME_DIRECTORY_UNVERIFIED')
     resume=backup/name;require(resume.parent==backup and resume.is_dir() and not resume.is_symlink() and resume.stat().st_mode&0o077==0,'PROJECTION_RESUME_DIRECTORY_UNSAFE')
@@ -1886,7 +1892,8 @@ def upgrade_partitioned_unlocked(request):
             # Fail on the exact changed source set before image-identity and
             # recovery-receipt checks. This is a safety preflight, not a test
             # shortcut: every patch still has to pass its mode-specific proof.
-            require(hashes==request['baseHashes'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH')
+            identity_upgrade=any(request.get(key) is True for key in ('liveOomRepair','livePersistenceRepair','fullRecovery'))
+            if not identity_upgrade:require(hashes==request['baseHashes'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH')
             if request.get('liveOomRepair') or request.get('livePersistenceRepair') or request.get('fullRecovery'):
                 identity_proof='verified_full_recovery_source' if request.get('fullRecovery') is True else verify_current_worker_identity(workers[0],request,original_image)
                 if identity_proof=='verified_v8_heap_exit':
@@ -1898,6 +1905,7 @@ def upgrade_partitioned_unlocked(request):
                 export="const fs=require('node:fs');const names="+json.dumps(base_source_names)+";console.log(JSON.stringify(Object.fromEntries(names.map(n=>[n,fs.existsSync('/app/'+n)?fs.readFileSync('/app/'+n,'utf8'):null]))))"
                 old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',original_image,'-e',export],timeout=30))
                 old_files={name:value for name,value in old_files.items() if value is not None}
+                verify_active_container_source_hashes(hashes,files,old_files)
                 if request.get('snapshotCheckpointMemoryRepair'):
                     require(request.get('snapshotMemoryRepair') is True and request.get('liveOomRepair') is True and re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))),'SNAPSHOT_CHECKPOINT_REPAIR_IDENTITY_REQUIRED')
                     verify_snapshot_checkpoint_memory_sources(old_files,files,old_digest)

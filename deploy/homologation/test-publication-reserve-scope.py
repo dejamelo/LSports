@@ -19,6 +19,9 @@ class PublicationScope(unittest.TestCase):
   self.assertEqual(hashlib.sha256(added['apps/worker/src/snapshot-capacity.ts'].encode()).hexdigest(),ns['PIPELINE_ADDED_DEPENDENCY_SHA256']['apps/worker/src/snapshot-capacity.ts'])
   base={**old,**added};digest=hashlib.sha256(json.dumps({p:base[p] for p in ns['PARTITION_FILES']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
   files={p:base[p] if p in base else 'old' for p in ns['PARTITION_FILES']}
+  for name in ('apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts'):
+   files[name]=(Path(__file__).parents[2]/name).read_text()
+  files['packages/feed-store/src/indexed-feed.ts']=(Path(__file__).parents[2]/'packages/feed-store/src/indexed-feed.ts').read_text()
   files['packages/feed-store/src/tenant-tickets.ts']='reviewed tenant dependency'
   ns['verify_pipeline_sources'](old,files,digest,added)
   with self.assertRaises(RuntimeError):ns['verify_pipeline_sources'](old,{**files,'apps/worker/src/persistence.ts':'telemetry'},digest,added)

@@ -5,6 +5,16 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_live_upgrade_binds_active_container_to_its_immutable_image_sources(self):
+  installed={'apps/worker/src/connected.ts':'original-connected','packages/feed-store/src/index.ts':'original-index'}
+  candidates={**installed,'packages/feed-store/src/indexed-feed.ts':'new-indexed-module'}
+  hashes={name:(hashlib.sha256(installed[name].encode()).hexdigest() if name in installed else None) for name in candidates}
+  self.assertTrue(NS['verify_active_container_source_hashes'](hashes,candidates,installed))
+  with self.assertRaisesRegex(RuntimeError,'UPGRADE_ACTIVE_SOURCE_IMAGE_MISMATCH'):
+   NS['verify_active_container_source_hashes']({**hashes,'apps/worker/src/connected.ts':'0'*64},candidates,installed)
+  with self.assertRaisesRegex(RuntimeError,'UPGRADE_ACTIVE_SOURCE_MANIFEST_MISMATCH'):
+   NS['verify_active_container_source_hashes']({k:v for k,v in hashes.items() if k!='packages/feed-store/src/indexed-feed.ts'},candidates,installed)
+
  def test_sqlite_recovery_copy_uses_online_backup_and_captures_committed_wal(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);source=root/'trade-feed.public.sqlite';target=root/'backup.sqlite';writer=sqlite3.connect(source)
@@ -475,7 +485,13 @@ class Upgrade(unittest.TestCase):
     with patch.object(Path,'stat',root_owned_receipt),contextlib.redirect_stdout(out):code=NS['upgrade_partitioned'](request)
     self.assertNotIn('MUST_NEVER_PRINT',out.getvalue());return code,json.loads(out.getvalue().splitlines()[-1])
    try:
-    code,result=invoke('prepare',{**hashes,next(iter(hashes)):'bad'});self.assertEqual(code,2);self.assertEqual(result['reason'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH');self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
+    if full:
+     name='apps/worker/src/connected.ts';original_hash=hashes[name];hashes[name]='0'*64
+     code,result=invoke('prepare');hashes[name]=original_hash
+     self.assertEqual(code,2);self.assertEqual(result['reason'],'UPGRADE_ACTIVE_SOURCE_IMAGE_MISMATCH')
+    else:
+     code,result=invoke('prepare',{**hashes,next(iter(hashes)):'bad'});self.assertEqual(code,2);self.assertEqual(result['reason'],'UPGRADE_BASE_SOURCES_CHANGED_NO_BLIND_PATCH')
+    self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
     if nullable:
      proof=(evidence/'report.json').read_bytes();bad=json.loads(proof);bad['rawRowSha256']='0'*64;(evidence/'report.json').write_text(json.dumps(bad));code,result=invoke('prepare');self.assertEqual(code,2);self.assertEqual(result['reason'],'CAPTURED_EVIDENCE_HASH_MISMATCH');self.assertEqual(running,not oom);self.assertFalse(any(c[:2]==['docker','kill'] for c in calls));(evidence/'report.json').write_bytes(proof)
     code,result=invoke('prepare');self.assertEqual(code,0,result);self.assertTrue(result['offlineType38Verified']);self.assertEqual(result['offlineDurableIngressVerified'],durable);self.assertEqual(result['offlineFullRecoveryVerified'],full);self.assertEqual(result['offlinePropagationVerified'],distribution);self.assertEqual(result['offlineSupplierOrderVerified'],supplier);self.assertEqual(result['offlineNullableMarketsVerified'],nullable);self.assertEqual(result['offlineThroughputVerified'],throughput);self.assertEqual(result['offlineSpoolMemoryVerified'],spool);self.assertEqual(result['offlineSnapshotThroughputVerified'],parser);self.assertEqual(running,not oom);self.assertFalse(any('up' in c or c[:2]==['docker','kill'] for c in calls))
