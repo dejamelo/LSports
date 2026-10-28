@@ -8,9 +8,14 @@ class Upgrade(unittest.TestCase):
   names=NS['PARTITION_FILES'];old={name:'installed:'+name for name in names};candidate=dict(old)
   for name in ('apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','packages/contracts/src/index.ts'):candidate[name]+='\ncorrected'
   digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-  NS['verify_snapshot_checkpoint_memory_sources'](old,candidate,digest)
+  self.assertEqual(NS['verify_snapshot_checkpoint_memory_sources'](old,candidate,digest),'snapshot_memory_patch')
   with self.assertRaises(Exception):NS['verify_snapshot_checkpoint_memory_sources'](old,{**candidate,'apps/worker/src/provider.ts':'unexpected'},digest)
   with self.assertRaises(Exception):NS['verify_snapshot_checkpoint_memory_sources'](old,candidate,'0'*64)
+  compact=dict(old);compact['apps/worker/src/connected.ts']='export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=131072; export const PREMATCH_CHECKPOINT_BATCH_FLUSH_MS=600000; pendingAcks.length+checkpointPending>=checkpointBatchThreshold; Math.min(4096,Math.max(1,checkpointBatchThreshold-pendingAcks.length-checkpointPending)); retained_in_durable_inbox'
+  self.assertEqual(NS['verify_snapshot_checkpoint_memory_sources'](old,compact,digest),'durable_inbox_checkpoint_compaction')
+  for invalid in ('export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=262144;','export const PREMATCH_CHECKPOINT_BATCH_THRESHOLD=131072;'):
+   changed=dict(compact);changed['apps/worker/src/connected.ts']=invalid
+   with self.assertRaises(Exception):NS['verify_snapshot_checkpoint_memory_sources'](old,changed,digest)
 
  def test_stopped_snapshot_repair_preserves_measured_existing_eight_gib_and_heap(self):
   mib=1024**2;gib=1024**3

@@ -157,7 +157,17 @@ def verify_snapshot_checkpoint_memory_sources(old_files,files,old_digest):
     canonical=hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     require(canonical==old_digest,'SNAPSHOT_CHECKPOINT_INSTALLED_SOURCE_DIGEST_MISMATCH')
     changed={name for name in files if files[name]!=old_files[name]}
-    require(changed=={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','packages/contracts/src/index.ts'},'SNAPSHOT_CHECKPOINT_PATCH_SCOPE_UNVERIFIED')
+    snapshot_memory_patch={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','packages/contracts/src/index.ts'}
+    if changed==snapshot_memory_patch:return 'snapshot_memory_patch'
+    # The inbox-backed compaction change is intentionally limited to the
+    # checkpoint scheduler. Admit only its exact bounded policy and the
+    # existing durable-inbox barriers; all other source deltas stay rejected.
+    if changed=={'apps/worker/src/connected.ts'}:
+        source=files['apps/worker/src/connected.ts']
+        require(re.search(r'PREMATCH_CHECKPOINT_BATCH_THRESHOLD\s*=\s*131072\s*;',source) and re.search(r'PREMATCH_CHECKPOINT_BATCH_FLUSH_MS\s*=\s*600000\s*;',source),'CHECKPOINT_COMPACTION_POLICY_UNVERIFIED')
+        require('pendingAcks.length+checkpointPending>=checkpointBatchThreshold' in source and 'Math.min(4096,Math.max(1,checkpointBatchThreshold-pendingAcks.length-checkpointPending))' in source and 'retained_in_durable_inbox' in source,'CHECKPOINT_COMPACTION_DURABILITY_BARRIER_UNVERIFIED')
+        return 'durable_inbox_checkpoint_compaction'
+    require(False,'SNAPSHOT_CHECKPOINT_PATCH_SCOPE_UNVERIFIED')
 
 def verify_live_snapshot_pressure_sources(old_files,files,old_digest):
     base={name:old_files[name] for name in PARTITION_DIGEST_FILES if name in old_files}
