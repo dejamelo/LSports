@@ -10,6 +10,8 @@ test('keeps recognized fixed memory and snapshot caps; rejects unapproved increa
  assert.equal(workerCapacityApproved(model('4294967296')),true);
  assert.equal(workerCapacityApproved(model('8589934592')),false);
  assert.equal(workerCapacityApproved(model('8589934592'),{pipelineMemoryEightGiB:true}),true);
+ assert.equal(workerCapacityApproved(model('8589934592'),{snapshotMemoryEightGiB:true}),true);
+ assert.equal(workerCapacityApproved(model('8589934592',{capacityApproved:true,macStopped:false,notBeforeConfigured:true}),{snapshotMemoryEightGiB:true}),false);
  assert.equal(workerCapacityApproved(model('8589934592',{capacityApproved:true,macStopped:false,notBeforeConfigured:true}),{pipelineMemoryEightGiB:true}),false);
  assert.equal(workerCapacityApproved(model('6442450944',undefined,'512')),false);
  assert.equal(workerCapacityApproved(model('6442450944',undefined,'256','512')),false);
