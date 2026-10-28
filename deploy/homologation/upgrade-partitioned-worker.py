@@ -152,6 +152,13 @@ def verify_live_oom_sources(old_files,files,old_digest):
     changed={name for name in files if files[name]!=old_files[name]}
     require(changed and changed<= {'apps/worker/src/state.ts','apps/worker/src/connected.ts','apps/worker/src/persistence.ts','apps/worker/src/timestamp-recovery.ts','packages/feed-store/src/index.ts'},'CURRENT_OOM_PATCH_SCOPE_UNVERIFIED')
 
+def verify_snapshot_checkpoint_memory_sources(old_files,files,old_digest):
+    require(set(old_files)==PARTITION_FILES and set(files)==PARTITION_FILES,'SNAPSHOT_CHECKPOINT_SOURCE_MANIFEST_MISMATCH')
+    canonical=hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    require(canonical==old_digest,'SNAPSHOT_CHECKPOINT_INSTALLED_SOURCE_DIGEST_MISMATCH')
+    changed={name for name in files if files[name]!=old_files[name]}
+    require(changed=={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','packages/contracts/src/index.ts'},'SNAPSHOT_CHECKPOINT_PATCH_SCOPE_UNVERIFIED')
+
 def verify_live_snapshot_pressure_sources(old_files,files,old_digest):
     base={name:old_files[name] for name in PARTITION_DIGEST_FILES if name in old_files}
     require(set(old_files)==set(files) and set(base)==PARTITION_DIGEST_FILES and hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'CURRENT_PRESSURE_SOURCE_DIGEST_MISMATCH')
@@ -1599,7 +1606,10 @@ def upgrade_partitioned_unlocked(request):
                 old=json.loads(old_receipt.read_bytes());require(old.get('digest')==old_digest and old.get('image')==original_image and old.get('oomRestoreVerified') is True,'CURRENT_OOM_SOURCE_RECEIPT_UNVERIFIED')
                 export="const fs=require('node:fs');const names="+json.dumps(sorted(files))+";console.log(JSON.stringify(Object.fromEntries(names.map(n=>[n,fs.readFileSync('/app/'+n,'utf8')]))))"
                 old_files=json.loads(run(['docker','run','--rm','--network','none','--memory','128m','--read-only','--entrypoint','node',original_image,'-e',export],timeout=30))
-                if request.get('checkpointWriteBufferRepair'):
+                if request.get('snapshotCheckpointMemoryRepair'):
+                    require(request.get('snapshotMemoryRepair') is True and request.get('liveOomRepair') is True and re.fullmatch('[0-9a-f]{12,63}',str(request.get('expectedOomPrefix',''))),'SNAPSHOT_CHECKPOINT_REPAIR_IDENTITY_REQUIRED')
+                    verify_snapshot_checkpoint_memory_sources(old_files,files,old_digest)
+                elif request.get('checkpointWriteBufferRepair'):
                     require(request.get('pipelineRepair') is True and request.get('livePersistenceRepair') is True and request.get('transportLifecycleRepair') is True,'CHECKPOINT_BUFFER_REQUIRES_VERIFIED_TRANSPORT_PIPELINE')
                     verify_checkpoint_buffer_sources(old_files,files,old_digest)
                 elif request.get('transportLifecycleRepair'):

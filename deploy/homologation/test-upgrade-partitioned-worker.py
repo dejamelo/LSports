@@ -4,6 +4,14 @@ HERE=Path(__file__).parent
 NS={'__name__':'tested'}
 for name in ('resume-adl-api.py','repair-adl-snapshot.py','upgrade-partitioned-worker.py','execute-adl-cutover-aws.py'):exec((HERE/name).read_text().split("if __name__=='__main__':")[0],NS)
 class Upgrade(unittest.TestCase):
+ def test_snapshot_checkpoint_patch_is_pinned_to_installed_image_digest_and_exact_files(self):
+  names=NS['PARTITION_FILES'];old={name:'installed:'+name for name in names};candidate=dict(old)
+  for name in ('apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','packages/contracts/src/index.ts'):candidate[name]+='\ncorrected'
+  digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  NS['verify_snapshot_checkpoint_memory_sources'](old,candidate,digest)
+  with self.assertRaises(Exception):NS['verify_snapshot_checkpoint_memory_sources'](old,{**candidate,'apps/worker/src/provider.ts':'unexpected'},digest)
+  with self.assertRaises(Exception):NS['verify_snapshot_checkpoint_memory_sources'](old,candidate,'0'*64)
+
  def test_stopped_snapshot_repair_preserves_measured_existing_eight_gib_and_heap(self):
   mib=1024**2;gib=1024**3
   p={'memoryLimitBytes':8*gib,'snapshotMemoryRepair':True,'snapshotMemoryEightGiBRepair':True,'snapshotMemoryEightGiBHeadroomBytes':12*gib,'heapBudgetPlan':{'preserveExisting':True,'snapshotMemoryEightGiBRepair':True,'evidenceVerified':True,'oldSpaceMiB':4608,'previousOldSpaceMiB':4608,'containerLimitUnchanged':True,'effectiveHeapLimitBytes':5*gib}}

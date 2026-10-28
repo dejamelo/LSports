@@ -291,7 +291,13 @@ export async function run(args){
     const repairOptions=supplierMode?{fullRecovery:true,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true}:distributionMode?{fixCommit:'2aa06f7'}:{};
     if(durableMode)repairOptions.durableIngress=true;
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;if(!snapshotMemoryEightGiB)repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
-    if(snapshotMemoryEightGiB){repairOptions.snapshotMemoryEightGiBRepair=true;repairOptions.snapshotMemorySourceBackup=ledger.steps.throughput_image?.result?.backup;}
+    if(snapshotMemoryEightGiB){
+     repairOptions.snapshotMemoryEightGiBRepair=true;
+     repairOptions.snapshotMemorySourceBackup=ledger.steps.throughput_image?.result?.backup;
+     const stoppedOom=pre.awsWorkerContainers?.filter(c=>c.name==='/adl-homologation-worker-1'&&c.state==='exited'&&c.exitCode===137&&c.oomKilled===true);
+     if(stoppedOom?.length!==1||!/^([0-9a-f]{12,63})$/.test(stoppedOom[0].id||''))throw Error('SNAPSHOT_OOM_IDENTITY_CHANGED');
+     repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=stoppedOom[0].id.slice(0,12);repairOptions.snapshotCheckpointMemoryRepair=true;
+    }
     if(snapshotMemoryRepair&&process.env.ADL_CHECKPOINT_REPAIR_BACKUP){const b=process.env.ADL_CHECKPOINT_REPAIR_BACKUP;if(snapshotMemoryEightGiB||!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(b)||process.env.ADL_RESUME_BACKUP)throw Error('DERIVED_REPAIR_BACKUP_UNVERIFIED');repairOptions.checkpointRepairBackup=b;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||''))throw Error('EXPECTED_CURRENT_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
     if(snapshotMemoryRepair&&process.env.ADL_LIVE_V8_HEAP_OOM_REPAIR==='1'){const prefix=process.env.ADL_EXPECTED_OOM_PREFIX;if(!/^[0-9a-f]{12,63}$/.test(prefix||'')||repairOptions.liveOomRepair)throw Error('EXPECTED_CURRENT_V8_OOM_PREFIX_REQUIRED');repairOptions.liveOomRepair=true;repairOptions.v8HeapOomRepair=true;repairOptions.expectedOomPrefix=prefix;}
