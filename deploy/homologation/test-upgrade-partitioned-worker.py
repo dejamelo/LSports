@@ -296,6 +296,13 @@ class Upgrade(unittest.TestCase):
   with self.assertRaisesRegex(RuntimeError,'UPGRADE_STOP_OBSERVATION_DEADLINE_NO_MORE_SIGNALS'):
    NS['watch_upgrade_stop'](sample,saved.append,timeout=45,interval=15,now=lambda:clock[0],sleep=lambda sec:clock.__setitem__(0,clock[0]+sec))
   self.assertEqual(clock[0],45);self.assertTrue(any(s['samples'][-1].get('progressKind')=='container_cpu_or_io' for s in saved))
+ def test_resumed_full_recovery_stop_budget_uses_measured_active_checkpoint_cycle(self):
+  old=NS.get('states');NS['states']=lambda _: [{'id':'a'*64,'running':False}]
+  try:
+   progress={'oldContainer':'a'*64,'shutdownObservation':{'samples':[{'atUTC':'2026-10-28T13:45:00Z','records':[{'operation':'file.persist','stage':'regular_checkpoint','loggedAtUTC':'2026-10-28T13:44:00Z'}],'lastCompletedPersistence':{'regularDurationMs':378835,'publishDurationMs':92671},'progressSincePreviousSample':True}]}}
+   self.assertEqual(NS['resumed_stop_budget'](progress),600)
+   budget=NS['resumed_stop_budget'](progress,True);self.assertGreater(budget,180);self.assertLessEqual(budget,1200)
+  finally:NS['states']=old
  def test_shutdown_progress_has_a_finite_deadline(self):
   clock=[0];saved=[]
   with self.assertRaisesRegex(RuntimeError,'UPGRADE_STOP_OBSERVATION_DEADLINE_NO_MORE_SIGNALS'):

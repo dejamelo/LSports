@@ -1419,9 +1419,9 @@ def watch_upgrade_stop(sample,record,timeout=180,interval=15,now=None,sleep=None
         if previous is not None and now()-last_change>=90:raise RuntimeError('UPGRADE_STOP_NO_OBSERVABLE_PROGRESS_NO_MORE_SIGNALS')
         previous=fingerprint;sleep(min(interval,timeout-elapsed))
 
-def resumed_stop_budget(progress):
+def resumed_stop_budget(progress, measured_full_recovery=False):
     previous=progress.get('shutdownObservation',{}).get('samples',[])
-    if progress.get('pipelineRepair') is True:
+    if progress.get('pipelineRepair') is True or measured_full_recovery is True:
         measured=max(((s.get('lastCompletedPersistence') or {}).get('lastDurationMs',0) for s in previous if isinstance(s,dict)),default=0)
         # A graceful stop can complete one persist and immediately begin another
         # final pass. If that second pass is already observable, budget its measured
@@ -1995,7 +1995,7 @@ def upgrade_partitioned_unlocked(request):
                     progress['shutdownObservation']=report;save(progress)
                     emit(operation='cutover.aws',stage='partitioned_upgrade.stop_observation',status='observing',backup=str(backup),**report['samples'][-1],forceStopEvidenceVerified=False,posnetChanged=False)
                 if any(w['running'] for w in states('worker')):
-                    budget=resumed_stop_budget(progress) if request.get('resumeBackup') or request.get('pipelineRepair') else 180
+                    budget=resumed_stop_budget(progress,request.get('fullRecovery') is True) if request.get('resumeBackup') or request.get('pipelineRepair') or request.get('fullRecovery') else 180
                     initial=upgrade_stop_sample(progress)
                     emit(operation='cutover.aws',stage='partitioned_upgrade.resume_stop_status',status='collected',backup=str(backup),current=initial,shutdownLogs=evidence.get('shutdownLogs',[]),observationBudgetSeconds=budget,signalsSent=0,forceStopEvidenceVerified=False,posnetChanged=False)
                     try:watch_upgrade_stop(lambda:upgrade_stop_sample(progress),observed,timeout=budget)
