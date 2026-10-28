@@ -11,6 +11,8 @@ test('initial dual-feed recovery defers the full public projection until a basel
  let projectionBuilt=false;
  await checkpointBeforeProjection(async()=>({saved:true}),()=>{projectionBuilt=true;return {};},deferPublicProjectionDuringSnapshot(state));
  assert.equal(projectionBuilt,false,'the first session save must not rebuild the multi-GB public graph before either snapshot');
+ for(const lane of ['prematch','inplay'] as const)state.set(lane,{recoveryProgress:{stage:'waiting_retry',startedAt,regularSnapshotReady:false}});
+ assert.equal(deferPublicProjectionDuringSnapshot(state),true,'rate-limited retries must keep the stale public projection gated while both lanes lack a validated baseline');
  state.set('inplay',{phase:'connected',recoveryProgress:{stage:'idle',startedAt,regularSnapshotReady:true}});
  assert.equal(deferPublicProjectionDuringSnapshot(state),false,'a healthy feed keeps publishing while only the other lane is recovering');
 });

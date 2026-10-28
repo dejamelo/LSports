@@ -116,7 +116,7 @@ export function deferPublicProjectionDuringSnapshot(state:Pick<TradeState,'conne
  // This avoids building and fsyncing the whole public graph immediately before
  // the first snapshot, while preserving normal publication when either lane is
  // already healthy.
- if(lanes.length>0&&lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.stage==='snapshot'&&c.recoveryProgress.regularSnapshotReady===false))return true;
+ if(lanes.length>0&&lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.regularSnapshotReady===false))return true;
  return lanes.some(c=>{
   // A lane without a verified baseline remains unavailable in projection via
   // its own `phase !== connected` guard. Do not let that lane suppress public
@@ -781,11 +781,33 @@ export async function session(
           if(api.snapshotFull){
             if(timestampRecoveryPending){
               state.set(lane,{message:"Recuperando eventos y liquidaciones desde el checkpoint seguro; cuotas bloqueadas."});
-              await api.snapshotFull({lane,timestamp:recoveryAnchor,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,apply:async(row,at)=>{
+              let requestAdmitted=false,applyPreparation:Promise<void>|undefined,lastProgressLog=0;
+              const recovered=await api.snapshotFull({lane,timestamp:recoveryAnchor,signal:AbortSignal.any([signal,transportAbort.signal]),assertOpen:requireOpen,progress:progress=>{
+                // A timestamp replay uses the same streamed full-document parser
+                // as the baseline, but it previously exposed no progress and let
+                // ordinary checkpoint/publication work contend with its apply.
+                // Pause inbox replay only after the scheduler admits the HTTP
+                // request; keep received rows durable and unacknowledged.
+                if(progress.stage==='download'&&!requestAdmitted){requestAdmitted=true;if(durable){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}}
+                if(progress.stage==='apply'&&!applyPreparation){
+                  if(!requestAdmitted)throw new Error('Timestamp snapshot apply began without scheduler admission');
+                  setSnapshotPersistenceDeferred(state,true,pkg.lane);
+                  applyPreparation=(async()=>{await processing;if(backgroundCommit)await backgroundCommit;await state.exclusive(async()=>{await state.publicationIdle();});})();
+                  void applyPreparation.catch(()=>{});
+                }
+                if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'spool_progress',timestampSnapshot:true,...progress}));}
+              },apply:async(row,at)=>{
+                requireOpen();if(!applyPreparation)throw new Error('Timestamp snapshot row arrived before full-document validation');await applyPreparation;
                 const applied=processing.then(async()=>{requireOpen();await state.publicationMutation(()=>state.apply(lane,[{...row,marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()}));});processing=applied;await applied;
               }});
-              requireOpen();await processing;await save();timestampRecoveryPending=false;
-              console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
+              requireOpen();await processing;
+              // The timestamp spool is fully validated and applied. Let one
+              // durable checkpoint capture it before replay resumes or the full
+              // baseline starts; the inbox prefix remains unretired until that
+              // save has completed.
+              setSnapshotPersistenceDeferred(state,false,pkg.lane);await save();timestampRecoveryPending=false;
+              if(requestAdmitted&&durable){snapshotApplicationActive=false;setDurableSnapshotApplicationActive(state,false,pkg.lane);if(pendingAcks.length){commitPending(true);if(backgroundCommit)await backgroundCommit;}if(buffered.length&&!closed)scheduleDrain();}
+              console.info(JSON.stringify({lane,operation:'snapshot.timestamp_recovery',status:'applied',rows:recovered.rows,bytes:recovered.bytes,completedAt:new Date().toISOString(),timestampSeconds:recoveryAnchor,scope:'sdk_GetEvents_timestamp_not_heartbeat',settlementCoverage:'only_results_returned_by_supplier_retention'}));
             }
             const ackedAtStart=acknowledgedMessages;let fullStarted=Date.now(),fullStartedAt:string|undefined,snapshotRequestAdmitted=false,snapshotStatePreparation:Promise<void>|undefined;let lastProgressLog=0;
             // Close the cross-lane checkpoint race before the final pre-snapshot
