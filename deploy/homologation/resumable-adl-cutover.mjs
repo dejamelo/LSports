@@ -121,6 +121,20 @@ export function indexedApiDeploymentReceipt(rows,commit){
  if(!complete||complete.installedCommit!==commit||complete.installedSourceVerified!==true||complete.workersUnchanged!==true||complete.posnetChanged!==false||!sourceManifest||canonicalSourceDigest(sourceManifest)!==complete.sourceManifestSha256)return;
  return {commit,installedCommit:complete.installedCommit,imageId:complete.installedImageId,sourceFilesVerified:true,sourceManifest,sourceManifestSha256:complete.sourceManifestSha256,workersUnchanged:true,posnetChanged:false};
 }
+export function indexedApiReaderCompatible(installedSource,candidateSource){
+ const contract=source=>{
+  if(typeof source!=='string')return;
+  const initial=source.indexOf('  /** Initial recovery:');
+  const page=source.indexOf('  page(');
+  const end=source.lastIndexOf('\n}\n\nexport const indexedFeedPath');
+  if(initial<0||page<initial||end<page)return;
+  // The constructor/schema, cursor format, types and all read methods must
+  // remain byte-identical across the worker update. Only writer code may vary.
+  return source.slice(0,initial)+source.slice(page,end)+source.slice(end);
+ };
+ const a=contract(installedSource),b=contract(candidateSource);
+ return typeof a==='string'&&a===b;
+}
 export function alignApiDeploymentReceipt(receipt,requiredCommit,changedProductionFiles,verifiedSourceManifest){
  const sourceManifest=receipt?.sourceManifest||verifiedSourceManifest;
  if(!receipt||receipt.sourceFilesVerified!==true||!sourceManifest||receipt.sourceManifest&&canonicalSourceDigest(receipt.sourceManifest)!==receipt.sourceManifestSha256||! /^[0-9a-f]{64}$/.test(canonicalSourceDigest(sourceManifest))||receipt.workersUnchanged!==true||receipt.posnetChanged!==false||!/^[0-9a-f]{40}$/.test(receipt.commit||'')||!/^[0-9a-f]{40}$/.test(requiredCommit||''))return;
@@ -406,33 +420,39 @@ export async function run(args){
     if(snapshotMemoryRepair&&process.env.ADL_FINALIZE_VERIFIED_SHUTDOWN==='1'){if(!repairOptions.resumeBackup)throw Error('FINALIZATION_REQUIRES_PINNED_PREPARATION');repairOptions.finalizeAfterRecovery=true;}
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
     if(repairOptions.pipelineRepair){
-     const apiCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();
+     const workerCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();
      const recordedApiDeployment=await step(ledger,'indexed_api_compatibility',save,async()=>{
       stage='indexed_api_compatibility';
-      const output=await command(process.execPath,[path.join(here,'update-adl-api.mjs'),'--repo',root,'--commit',apiCommit,'--preserve-local-changes'],undefined,1800000,true,false,{stage});
+      const output=await command(process.execPath,[path.join(here,'update-adl-api.mjs'),'--repo',root,'--commit',workerCommit,'--preserve-local-changes'],undefined,1800000,true,false,{stage});
       const rows=output.split('\n').filter(Boolean).flatMap(line=>{try{return[JSON.parse(line)]}catch{return[]}});
-      const receipt=indexedApiDeploymentReceipt(rows,apiCommit);
+      const receipt=indexedApiDeploymentReceipt(rows,workerCommit);
       if(!receipt)throw Error('INDEXED_API_DEPLOYMENT_NOT_VERIFIED');
       return receipt;
      });
      let changedProductionFiles=[];
-     if(recordedApiDeployment.commit!==apiCommit){
-      changedProductionFiles=(await command('git',['diff','--name-only','-z',recordedApiDeployment.commit,apiCommit,'--','apps','packages','package.json','package-lock.json','tsconfig.json','scripts/bootstrap-platform.ts','scripts/recover-platform-access.ts'],undefined,10000,true)).split('\0').filter(apiProductionSource);
+     if(recordedApiDeployment.commit!==workerCommit){
+      changedProductionFiles=(await command('git',['diff','--name-only','-z',recordedApiDeployment.commit,workerCommit,'--','apps','packages','package.json','package-lock.json','tsconfig.json','scripts/bootstrap-platform.ts','scripts/recover-platform-access.ts'],undefined,10000,true)).split('\0').filter(apiProductionSource);
      }
      let apiSourceManifest=recordedApiDeployment.sourceManifest;
      if(!apiSourceManifest){
-      if(changedProductionFiles.length)throw Error('INDEXED_API_SOURCE_MANIFEST_UNAVAILABLE_AFTER_SOURCE_CHANGE');
       const apiSources=(await command('git',['ls-tree','-r','--name-only','-z',recordedApiDeployment.commit],undefined,10000,true)).split('\0').filter(Boolean).filter(apiProductionSource);
       apiSourceManifest={};
       for(const name of apiSources)apiSourceManifest[name]=createHash('sha256').update(await command('git',['show',recordedApiDeployment.commit+':'+name],undefined,10000,true)).digest('hex');
      }
-     const apiDeployment=alignApiDeploymentReceipt(recordedApiDeployment,apiCommit,changedProductionFiles,apiSourceManifest);
-     if(!apiDeployment||apiDeployment.commit!==apiCommit||apiDeployment.sourceFilesVerified!==true||apiDeployment.workersUnchanged!==true||apiDeployment.posnetChanged!==false||apiDeployment.sourceCompatibilityVerified!==true)throw Error('INDEXED_API_DEPLOYMENT_RECEIPT_MISMATCH');
+     let readerCompatibilityVerified=changedProductionFiles.length===0;
+     if(!readerCompatibilityVerified&&changedProductionFiles.length===1&&changedProductionFiles[0]==='packages/feed-store/src/indexed-feed.ts'){
+      const installed=await command('git',['show',recordedApiDeployment.commit+':packages/feed-store/src/indexed-feed.ts'],undefined,10000,true);
+      const candidate=await command('git',['show',workerCommit+':packages/feed-store/src/indexed-feed.ts'],undefined,10000,true);
+      readerCompatibilityVerified=indexedApiReaderCompatible(installed,candidate);
+     }
+     if(!readerCompatibilityVerified)throw Error('INDEXED_API_READ_CONTRACT_CHANGED');
+     const apiDeployment=alignApiDeploymentReceipt(recordedApiDeployment,recordedApiDeployment.commit,[],apiSourceManifest);
+     if(!apiDeployment||apiDeployment.commit!==recordedApiDeployment.commit||apiDeployment.sourceFilesVerified!==true||apiDeployment.workersUnchanged!==true||apiDeployment.posnetChanged!==false||apiDeployment.sourceCompatibilityVerified!==true)throw Error('INDEXED_API_DEPLOYMENT_RECEIPT_MISMATCH');
      repairOptions.requiredApiCommit=apiDeployment.installedCommit;
      repairOptions.requiredApiSourceManifest=apiDeployment.sourceManifest;
      repairOptions.requiredApiSourceManifestSha256=apiDeployment.sourceManifestSha256;
-     repairOptions.requiredApiSourceTreeCommit=apiCommit;
-     repairOptions.requiredApiSourceCompatibilityVerified=apiDeployment.sourceCompatibilityVerified;
+     repairOptions.requiredApiSourceTreeCommit=recordedApiDeployment.commit;
+     repairOptions.requiredApiSourceCompatibilityVerified=readerCompatibilityVerified;
     }
     const sourceDigest=canonicalSourceDigest(files);
     const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup,sourceDigest}):undefined;

@@ -126,7 +126,7 @@ test('inventory repair separates repeated current-container distribution errors 
 
 
 test('OOM repair and rollback remain distinct durable modes; no migration mode is selected',async()=>{
- const {recoveryMode,partitionedRepairMode,indexedApiDeploymentReceipt,alignApiDeploymentReceipt}=await import('./resumable-adl-cutover.mjs');
+ const {recoveryMode,partitionedRepairMode,indexedApiDeploymentReceipt,alignApiDeploymentReceipt,indexedApiReaderCompatible}=await import('./resumable-adl-cutover.mjs');
  assert.deepEqual(recoveryMode('--snapshot-memory-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--indexed-publication-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--snapshot-memory-rollback'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:true});
@@ -146,6 +146,11 @@ test('OOM repair and rollback remain distinct durable modes; no migration mode i
  assert.deepEqual(alignApiDeploymentReceipt(receipt,next,[]),{...receipt,commit:next,sourceCompatibilityVerified:true});
  assert.equal(alignApiDeploymentReceipt({...receipt,sourceFilesVerified:false},next,[]),undefined);
  assert.equal(alignApiDeploymentReceipt({...receipt,sourceManifest:{...sourceManifest,'apps/api/src/app.ts':'0'.repeat(64)}},next,[]),undefined);
+ const installed='interface T {}\nconst encode = x => x;\nexport class Store {\n  constructor(){ this.db.exec("CREATE TABLE feed_events"); }\n  /** Initial recovery: replace rows atomically. */\n  rebuild(){ oldWriter(); }\n  page(input){ return readPage(input); }\n}\n\nexport const indexedFeedPath = x => x;';
+ const writerOnly=installed.replace('rebuild(){ oldWriter(); }','rebuild(){ preparedWriter(); }');
+ assert.equal(indexedApiReaderCompatible(installed,writerOnly),true);
+ assert.equal(indexedApiReaderCompatible(installed,writerOnly.replace('readPage(input)','readPageWithDifferentCursor(input)')),false);
+ assert.equal(indexedApiReaderCompatible(installed,writerOnly.replace('CREATE TABLE feed_events','CREATE TABLE other_table')),false);
 });
 
 test('persistence repair obtains exact image from successful protected progress and never guesses',()=>{
