@@ -1245,6 +1245,53 @@ def recovery_source_bytes(path):
         if wal.is_file() and not wal.is_symlink():size+=wal.stat().st_size
     return size
 
+def rollback_recovery_disk_preflight(directory,backup):
+    sources=pre_stop_copy_files(directory)
+    sources.extend(p for p in directory.glob('trade-feed.json.snapshot-*.json') if re.fullmatch(r'trade-feed\.json\.snapshot-[0-9a-f]{16}\.json',p.name))
+    require(all(p.is_file() and not p.is_symlink() for p in sources),'ROLLBACK_RECOVERY_SOURCE_UNVERIFIED')
+    total=sum(recovery_source_bytes(p) for p in sources)
+    free=shutil.disk_usage(backup).free;reserve=4*1024**3
+    require(free>=total+reserve,'ROLLBACK_RECOVERY_DISK_HEADROOM_INSUFFICIENT')
+    return {'sourceBytes':total,'freeBytes':free,'reserveBytes':reserve,'requiredFreeBytes':total+reserve,'sourceFiles':len(sources)}
+
+def capture_recovery_generation(directory,backup):
+    """Capture a post-stop rollback point without raw copies of active SQLite sidecars."""
+    budget=rollback_recovery_disk_preflight(directory,backup)
+    sources=pre_stop_copy_files(directory)
+    sources.extend(p for p in directory.glob('trade-feed.json.snapshot-*.json') if re.fullmatch(r'trade-feed\.json\.snapshot-[0-9a-f]{16}\.json',p.name))
+    total=budget['sourceBytes'];free=budget['freeBytes'];reserve=budget['reserveBytes']
+    name='rollback-state-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+os.urandom(4).hex()
+    destination=backup/name;destination.mkdir(mode=0o700)
+    entries={};sqlite_receipts={}
+    for source in sorted(sources,key=lambda p:p.name):
+        require(source.parent==directory and not source.is_symlink(),'ROLLBACK_RECOVERY_SOURCE_SCOPE_UNVERIFIED')
+        target=destination/source.name
+        if source.name.endswith('.sqlite'):
+            receipt=sqlite_consistent_backup(source,target);sqlite_receipts[source.name]=receipt
+        else:
+            shutil.copyfile(source,target);os.chmod(target,0o600)
+            with target.open('rb') as copied:os.fsync(copied.fileno())
+            require(snapshot_file_hash(source)==snapshot_file_hash(target),'ROLLBACK_RECOVERY_COPY_HASH_MISMATCH')
+        entries[source.name]={'sha256':snapshot_file_hash(target),'bytes':target.stat().st_size,'kind':'sqlite_online_backup' if source.name.endswith('.sqlite') else 'file_copy'}
+    manifest={'version':1,'capturedAtUTC':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z'),'files':entries,'sqliteBackupReceipts':sqlite_receipts,'sourceBytes':total,'freeBytesBefore':free,'reserveBytesAfter':reserve,'walShmCopiedIndependently':False}
+    private(destination/'recovery-manifest.private.json',json.dumps(manifest,sort_keys=True).encode())
+    return {'directory':name,'files':len(entries),'sourceBytes':total,'freeBytesAfter':shutil.disk_usage(backup).free,'manifestSha256':snapshot_file_hash(destination/'recovery-manifest.private.json'),'sqliteDatabases':sorted(sqlite_receipts),'walShmCopiedIndependently':False}
+
+def verify_recovery_generation(backup,receipt):
+    root_name=receipt.get('directory') if isinstance(receipt,dict) else None
+    require(isinstance(root_name,str) and re.fullmatch(r'rollback-state-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}',root_name),'ROLLBACK_RECOVERY_GENERATION_UNVERIFIED')
+    root=backup/root_name;manifest_path=root/'recovery-manifest.private.json'
+    require(root.parent==backup and root.is_dir() and not root.is_symlink() and root.stat().st_mode&0o077==0 and manifest_path.is_file() and not manifest_path.is_symlink() and manifest_path.stat().st_mode&0o077==0 and manifest_path.stat().st_uid==os.geteuid() and snapshot_file_hash(manifest_path)==receipt.get('manifestSha256'),'ROLLBACK_RECOVERY_MANIFEST_MISMATCH')
+    manifest=json.loads(manifest_path.read_bytes());files=manifest.get('files',{});sqlites=manifest.get('sqliteBackupReceipts',{})
+    require(manifest.get('walShmCopiedIndependently') is False and len(files)==receipt.get('files') and sorted(sqlites)==receipt.get('sqliteDatabases'),'ROLLBACK_RECOVERY_MANIFEST_INCOMPLETE')
+    for filename,row in files.items():
+        artifact=root/filename
+        require(isinstance(filename,str) and Path(filename).name==filename and artifact.is_file() and not artifact.is_symlink() and artifact.stat().st_mode&0o077==0 and artifact.stat().st_uid==os.geteuid() and row.get('sha256')==snapshot_file_hash(artifact),'ROLLBACK_RECOVERY_FILE_HASH_MISMATCH')
+        if filename.endswith('.sqlite'):
+            receipt=sqlites.get(filename,{})
+            require(row.get('kind')=='sqlite_online_backup' and sqlite3_integrity(artifact) and receipt.get('sha256')==row.get('sha256') and receipt.get('walIncludedBySQLiteBackupApi') is True and receipt.get('integrity')=='ok','ROLLBACK_RECOVERY_SQLITE_INVALID')
+    return {'directory':root_name,'files':len(files),'sqliteDatabases':sorted(sqlites),'verified':True}
+
 def storage_before_stop(backup,container,progress,digest):
     mounts=[m for m in container.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed']
     require(len(mounts)==1,'PRE_STOP_FEED_MOUNT_UNVERIFIED')
@@ -2063,13 +2110,22 @@ def upgrade_partitioned_unlocked(request):
             rollback=backup/'rollback.worker.private.json'
             require(progress.get('supplierOrderVerified') and rollback.is_file() and not rollback.is_symlink(),'ROLLBACK_NOT_PREPARED')
             workers=states('worker')
+            rollback_recovery=progress.get('rollbackRecoveryGeneration')
+            if rollback_recovery:verify_recovery_generation(backup,rollback_recovery)
             if progress['phase']=='rolled_back_stopped':
-                require(not any(w['running'] for w in workers),'ROLLED_BACK_WORKER_UNEXPECTEDLY_RUNNING')
-                emit(operation='cutover.aws',stage='partitioned_upgrade.rollback',status='ok',reused=True,workerStarted=False,oldWorkerKeptStopped=True,posnetChanged=False);return 0
+                require(not any(w['running'] for w in workers) and rollback_recovery,'ROLLED_BACK_WORKER_UNEXPECTEDLY_RUNNING')
+                emit(operation='cutover.aws',stage='partitioned_upgrade.rollback',status='ok',reused=True,recoveryGeneration=rollback_recovery,workerStarted=False,oldWorkerKeptStopped=True,posnetChanged=False);return 0
             if any(w['running'] for w in workers):
                 require(len(workers)==1 and progress.get('rollbackStopRequested') is not True,'ROLLBACK_STOP_PENDING_NO_MORE_SIGNALS')
                 info=json.loads(run(['docker','inspect',workers[0]['id']]))[0]
                 require(info['Image']==image_id,'ROLLBACK_WORKER_IDENTITY_CHANGED')
+                feed_mounts=[m for m in info.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed' and m.get('Type')=='volume']
+                require(len(feed_mounts)==1,'ROLLBACK_RECOVERY_VOLUME_UNVERIFIED')
+                volume=json.loads(run(['docker','volume','inspect',feed_mounts[0]['Name']]))[0]
+                require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','ROLLBACK_RECOVERY_VOLUME_PROJECT_UNVERIFIED')
+                rollback_directory=Path(volume['Mountpoint']);require(not rollback_directory.is_symlink(),'ROLLBACK_RECOVERY_VOLUME_SYMLINK')
+                rollback_budget=rollback_recovery_disk_preflight(rollback_directory,backup)
+                emit(operation='cutover.aws',stage='partitioned_upgrade.rollback_recovery_preflight',status='verified',**rollback_budget,workerStarted=False,posnetChanged=False)
                 environment=info['Config']['Env'];require(all(isinstance(v,str) and '\n' not in v and '\r' not in v for v in environment),'STOP_ENV_FORMAT_UNVERIFIED')
                 env_file=backup/'rollback-stop.private.env';env_content=('\n'.join(environment)+'\n').encode()
                 if env_file.exists():require(env_file.is_file() and not env_file.is_symlink() and env_file.stat().st_mode&0o077==0 and env_file.read_bytes()==env_content,'ROLLBACK_ENV_CHANGED')
@@ -2082,6 +2138,21 @@ def upgrade_partitioned_unlocked(request):
                 deadline=time.time()+90
                 while time.time()<deadline and any(c['running'] for c in states('worker')):time.sleep(1)
             require(not any(c['running'] for c in states('worker')),'ROLLBACK_GRACEFUL_STOP_PENDING_NO_MORE_SIGNALS')
+            if not rollback_recovery:
+                stopped=states('worker');require(len(stopped)==1,'ROLLBACK_STOPPED_CONTAINER_IDENTITY_UNVERIFIED')
+                stopped_info=json.loads(run(['docker','inspect',stopped[0]['id']]))[0]
+                require(stopped_info['Image']==image_id and not stopped_info['State']['Running'],'ROLLBACK_STOPPED_IMAGE_UNVERIFIED')
+                feed_mounts=[m for m in stopped_info.get('Mounts',[]) if m.get('Destination')=='/app/.runtime/feed' and m.get('Type')=='volume']
+                require(len(feed_mounts)==1,'ROLLBACK_RECOVERY_VOLUME_UNVERIFIED')
+                volume=json.loads(run(['docker','volume','inspect',feed_mounts[0]['Name']]))[0]
+                require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','ROLLBACK_RECOVERY_VOLUME_PROJECT_UNVERIFIED')
+                rollback_directory=Path(volume['Mountpoint']);require(not rollback_directory.is_symlink(),'ROLLBACK_RECOVERY_VOLUME_SYMLINK')
+                require(not (rollback_directory/'trade-feed.json.lock').exists() and not list(rollback_directory.glob('trade-feed.json*.reclaim')),'ROLLBACK_RECOVERY_LOCK_STILL_PRESENT')
+                rollback_recovery=capture_recovery_generation(rollback_directory,backup)
+                progress['rollbackRecoveryGeneration']=rollback_recovery;save(progress)
+                verified_generation=verify_recovery_generation(backup,rollback_recovery)
+                emit(operation='cutover.aws',stage='partitioned_upgrade.rollback_recovery',status='verified',**verified_generation,freeDiskBytes=rollback_recovery.get('freeBytesAfter'),workerStarted=False,posnetChanged=False)
+            else:verify_recovery_generation(backup,rollback_recovery)
             # Use an override containing only the old image. Existing overrides,
             # data and journals remain authoritative; never restore old data.
             old_overlay=SECURE/('compose.worker-rollback-'+digest[:24]+'.json')
@@ -2096,7 +2167,7 @@ def upgrade_partitioned_unlocked(request):
             temporary=SECURE/(receipt_path.name+'.rollback.tmp');private(temporary,json.dumps(meta).encode());durable_replace(temporary,SECURE/'deployment.json')
             run(partition_base(meta)+['--profile','feed-consumer','create','--no-deps','--no-build','--pull','never','worker'],timeout=90,log=backup/'rollback.private.log')
             progress['phase']='rolled_back_stopped';save(progress)
-            emit(operation='cutover.aws',stage='partitioned_upgrade.rollback',status='ok',workerStarted=False,oldImageRestored=True,oldWorkerKeptStopped=True,dataRestored=False,posnetChanged=False);return 0
+            emit(operation='cutover.aws',stage='partitioned_upgrade.rollback',status='ok',workerStarted=False,oldImageRestored=True,oldWorkerKeptStopped=True,dataRestored=False,recoveryGeneration=rollback_recovery,posnetChanged=False);return 0
         require(progress['phase']!='rolled_back_stopped','ROLLED_BACK_WORKER_REQUIRES_REVIEW')
         if progress['phase'] in ('start_requested','running'):
             workers=states('worker');require(len(workers)==1 and workers[0]['running'],'UPGRADED_WORKER_NOT_RUNNING_NO_BLIND_RESTART');current_container=json.loads(run(['docker','inspect',workers[0]['id']]))[0]

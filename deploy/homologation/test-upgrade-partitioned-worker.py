@@ -14,6 +14,23 @@ class Upgrade(unittest.TestCase):
    self.assertFalse(Path(str(target)+'-wal').exists());self.assertFalse(Path(str(target)+'-shm').exists())
    recovered=sqlite3.connect(f'file:{target}?mode=ro',uri=True);self.assertEqual(recovered.execute('SELECT value FROM odds').fetchone(),('committed-in-wal',));recovered.close();writer.close()
 
+ def test_rollback_generation_covers_checkpoint_journal_compaction_and_sqlite_without_sidecar_copies(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);volume=root/'volume';backup=root/'backup';volume.mkdir();backup.mkdir(mode=0o700)
+   (volume/'trade-feed.json').write_text('{"workerCheckpoint":{"version":1,"regular":[],"outright":[]}}');(volume/'trade-feed.json.regular-checkpoint.json').write_text('{}')
+   journal=volume/'trade-feed.json.checkpoint-journal.jsonl';journal.write_text('{"op":"upsert","lane":"prematch","key":1}\n')
+   (volume/'trade-feed.json.pre-indexed-compaction.bak').write_text('{"previous":"durable"}')
+   writers=[]
+   for name in ('trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite','trade-feed.public.sqlite'):
+    writer=sqlite3.connect(volume/name);writer.execute('PRAGMA journal_mode=WAL');writer.execute('CREATE TABLE rows(id INTEGER PRIMARY KEY,value TEXT)');writer.execute('INSERT INTO rows(value) VALUES (?)',('committed',));writer.commit();writers.append(writer)
+   result=NS['capture_recovery_generation'](volume,backup);verified=NS['verify_recovery_generation'](backup,result)
+   self.assertTrue(verified['verified']);self.assertIn(journal.name,[p.name for p in (backup/result['directory']).iterdir()])
+   for name in ('trade-feed.json.prematch.inbox.sqlite','trade-feed.json.inplay.inbox.sqlite','trade-feed.public.sqlite'):
+    self.assertTrue(NS['sqlite3_integrity'](backup/result['directory']/name));self.assertFalse((backup/result['directory']/(name+'-wal')).exists());self.assertFalse((backup/result['directory']/(name+'-shm')).exists())
+   for writer in writers:writer.close()
+   bad=backup/result['directory']/journal.name;bad.write_text('corrupt')
+   with self.assertRaisesRegex(RuntimeError,'ROLLBACK_RECOVERY_FILE_HASH_MISMATCH'):NS['verify_recovery_generation'](backup,result)
+
  def test_indexed_worker_requires_healthy_api_at_the_same_immutable_commit(self):
   commit='a'*40;old_states,old_run=NS['states'],NS['run']
   NS['states']=lambda service:[{'id':'api-id','running':True,'health':'healthy'}] if service=='api' else []
@@ -430,7 +447,7 @@ class Upgrade(unittest.TestCase):
     if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok throughput-offline-ok spool-memory-offline-ok snapshot-throughput-offline-ok planned-distribution-stop-ok durable-ingress-offline-ok snapshot-memory-offline-ok oom-checkpoint-restore-ok' if '--input-type=module' in args or any(str(a).endswith('-proof.mjs') for a in args) else json.dumps(hashes).encode()
     if args[:2]==['docker','build']:images[image]={'Id':'sha256:'+('c'*64),'Config':{'User':'node','Labels':{'eu.adl.partitioned.patch':digest}}};return b''
     if args[:2]==['docker','inspect']:
-     return json.dumps([{'Image':images[selected]['Id'],'HostConfig':{'Memory':4294967296,'RestartPolicy':{'Name':'no'}},'Config':{'Env':['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true','LSPORTS_INPLAY_STREAMED_SNAPSHOT=true',*(['NODE_OPTIONS=--max-old-space-size=2560'] if oom and selected==image else [])]},'Mounts':[{'Destination':'/app/.runtime/feed','Type':'volume','RW':False,'Name':'feed'}]}]).encode()
+     return json.dumps([{'Image':images[selected]['Id'],'State':{'Running':running},'HostConfig':{'Memory':4294967296,'RestartPolicy':{'Name':'no'}},'Config':{'Env':['LSPORTS_PREMATCH_PARTITIONED_SNAPSHOT=true','LSPORTS_INPLAY_STREAMED_SNAPSHOT=true',*(['NODE_OPTIONS=--max-old-space-size=2560'] if oom and selected==image else [])]},'Mounts':[{'Destination':'/app/.runtime/feed','Type':'volume','RW':False,'Name':'feed'}]}]).encode()
     if args[:3]==['docker','volume','inspect']:return json.dumps([{'Mountpoint':str(volume),'Labels':{'com.docker.compose.project':'adl-homologation'}}]).encode()
     if args[:2]==['docker','kill']:running=False;return b''
     if 'up' in args:running=True;selected=image;return b''
@@ -453,7 +470,7 @@ class Upgrade(unittest.TestCase):
     real_stat=Path.stat
     def root_owned_receipt(path,*args,**kwargs):
      stat=real_stat(path,*args,**kwargs)
-     if Path(path)==receipt_path:return os.stat_result((stat.st_mode,stat.st_ino,stat.st_dev,stat.st_nlink,0,stat.st_gid,stat.st_size,stat.st_atime,stat.st_mtime,stat.st_ctime))
+     if Path(path)==receipt_path or Path(path).name=='recovery-manifest.private.json' or Path(path).parent.name.startswith('rollback-state-'):return os.stat_result((stat.st_mode,stat.st_ino,stat.st_dev,stat.st_nlink,0,stat.st_gid,stat.st_size,stat.st_atime,stat.st_mtime,stat.st_ctime))
      return stat
     with patch.object(Path,'stat',root_owned_receipt),contextlib.redirect_stdout(out):code=NS['upgrade_partitioned'](request)
     self.assertNotIn('MUST_NEVER_PRINT',out.getvalue());return code,json.loads(out.getvalue().splitlines()[-1])
