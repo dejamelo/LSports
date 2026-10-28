@@ -66,6 +66,47 @@ export class IndexedFeedStore {
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
+  /**
+   * Keep one atomic SQLite revision while yielding between bounded slices.
+   * Large validated snapshots can contain thousands of changed events; doing
+   * their synchronous SQLite writes in one event-loop turn starves AMQP and
+   * durable inbox processing even though WAL readers remain safe.
+   */
+  async applyDeltaBatched(
+    upserts: Iterable<SportEvent>,
+    deletedIds: Iterable<string>,
+    metadata: Omit<EventFeed, "events">,
+    options: { maxSliceMs?: number; yieldEveryRows?: number; yieldTurn?: () => Promise<void> } = {},
+  ) {
+    const maxSliceMs = options.maxSliceMs ?? 8;
+    const yieldEveryRows = options.yieldEveryRows ?? 32;
+    if (!Number.isFinite(maxSliceMs) || maxSliceMs < 1 || maxSliceMs > 1000 || !Number.isSafeInteger(yieldEveryRows) || yieldEveryRows < 1 || yieldEveryRows > 10000) throw Error("INVALID_INDEX_DELTA_SLICE");
+    const yieldTurn = options.yieldTurn ?? (() => new Promise<void>(resolve => setImmediate(resolve)));
+    const started = performance.now(); let sliceStarted = started, maxSliceObservedMs = 0, yieldCount = 0, upsertRows = 0, deletedRows = 0, sliceRows = 0;
+    const yieldIfDue = async () => {
+      sliceRows++;
+      const elapsed = performance.now() - sliceStarted;
+      if (elapsed < maxSliceMs && sliceRows < yieldEveryRows) return;
+      maxSliceObservedMs = Math.max(maxSliceObservedMs, elapsed); yieldCount++; await yieldTurn(); sliceStarted = performance.now();
+      sliceRows = 0;
+    };
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const remove = this.db.prepare("DELETE FROM feed_events WHERE id=?");
+      let changed = false;
+      for (const id of deletedIds) { remove.run(id); deletedRows++; changed = true; await yieldIfDue(); }
+      const put = this.db.prepare("INSERT INTO feed_events(id,lane,sport,competition_id,live,updated_at_ms,body) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lane=excluded.lane,sport=excluded.sport,competition_id=excluded.competition_id,live=excluded.live,updated_at_ms=excluded.updated_at_ms,body=excluded.body");
+      const existingMarkets = this.db.prepare("SELECT market_id FROM feed_markets WHERE event_id=?");
+      const removeMarket = this.db.prepare("DELETE FROM feed_markets WHERE event_id=? AND market_id=?");
+      const putMarket = this.db.prepare("INSERT INTO feed_markets(event_id,market_id,body) VALUES(?,?,?) ON CONFLICT(event_id,market_id) DO UPDATE SET body=excluded.body WHERE feed_markets.body IS NOT excluded.body");
+      for (const event of upserts) { this.put(put, existingMarkets, removeMarket, putMarket, event); upsertRows++; changed = true; await yieldIfDue(); }
+      this.commitMetadata(metadata, changed);
+      const beforeCommit = performance.now(); maxSliceObservedMs = Math.max(maxSliceObservedMs, beforeCommit - sliceStarted);
+      this.db.exec("COMMIT"); const commitMs = Math.ceil(performance.now() - beforeCommit); maxSliceObservedMs = Math.max(maxSliceObservedMs, commitMs);
+      const elapsedMs = Math.ceil(performance.now() - started);
+      return { upsertRows, deletedRows, yieldCount, maxSliceMs: Math.ceil(maxSliceObservedMs), commitMs, elapsedMs };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
   private put(stmt: ReturnType<DatabaseSync["prepare"]>, putMarket: ReturnType<DatabaseSync["prepare"]>, event: SportEvent): void;
   private put(stmt: ReturnType<DatabaseSync["prepare"]>, existingMarkets: ReturnType<DatabaseSync["prepare"]>, removeMarket: ReturnType<DatabaseSync["prepare"]>, putMarket: ReturnType<DatabaseSync["prepare"]>, event: SportEvent): void;
   private put(stmt: ReturnType<DatabaseSync["prepare"]>, existingOrMarketPut: ReturnType<DatabaseSync["prepare"]>, removeOrEvent: ReturnType<DatabaseSync["prepare"]> | SportEvent, marketPutOrEvent?: ReturnType<DatabaseSync["prepare"]> | SportEvent, maybeEvent?: SportEvent) {

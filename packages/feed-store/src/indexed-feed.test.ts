@@ -109,6 +109,75 @@ test("read-only API sees the last committed revision while the worker has an ope
   } finally { reader?.close(); writer.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("batched snapshot deltas yield to live work and stay invisible until atomic commit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-batched-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path), reader = new IndexedFeedStore(path, true);
+  try {
+    writer.rebuild([event("prematch:1", now)], metadata(now));
+    const before = reader.page({ limit: 20, scope: "snapshot", now });
+    let entered!: () => void, release!: () => void;
+    const paused = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let yields = 0;
+    const work = writer.applyDeltaBatched([event("prematch:2", now), event("prematch:3", now)], [], metadata(now), {
+      yieldEveryRows: 1,
+      yieldTurn: async () => { if (++yields === 1) { entered(); await gate; } },
+    });
+    await paused;
+    const during = reader.page({ limit: 20, scope: "snapshot", now });
+    assert.equal(during.page.revision, before.page.revision);
+    assert.deepEqual(during.events.map(row => row.id), ["prematch:1"], "readers must see the previous committed revision while the snapshot is staged");
+    release();
+    const metrics = await work;
+    assert.equal(metrics.upsertRows, 2);
+    assert.equal(metrics.yieldCount, 2);
+    const after = reader.page({ limit: 20, scope: "snapshot", now });
+    assert.equal(after.page.revision, before.page.revision + 1);
+    assert.deepEqual(after.events.map(row => row.id), ["prematch:1", "prematch:2", "prematch:3"]);
+  } finally { reader.close(); writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an interrupted batched delta rolls back cleanly on reopen", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-batched-rollback-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  writer.rebuild([event("prematch:1", now)], metadata(now));
+  try {
+    await assert.rejects(writer.applyDeltaBatched([event("prematch:2", now), event("prematch:3", now)], [], metadata(now), {
+      yieldEveryRows: 1,
+      yieldTurn: async () => { throw Error("simulated_interruption"); },
+    }), /simulated_interruption/);
+  } finally { writer.close(); }
+  const restored = new IndexedFeedStore(path, true);
+  try {
+    const page = restored.page({ limit: 20, scope: "restored", now });
+    assert.deepEqual(page.events.map(row => row.id), ["prematch:1"]);
+    assert.equal(page.page.revision, 1);
+    const sql = new DatabaseSync(path, { readOnly: true });
+    try { assert.equal((sql.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check, "ok"); }
+    finally { sql.close(); }
+  } finally { restored.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("representative snapshot-sized delta yields event-loop turns", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-batched-volume-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  try {
+    writer.rebuild([], metadata(now));
+    function* snapshotRows() { for (let i = 1; i <= 11_887; i++) yield event(`prematch:${i}`, now); }
+    let liveTurns = 0;
+    const result = await writer.applyDeltaBatched(snapshotRows(), [], metadata(now), {
+      yieldEveryRows: 32,
+      yieldTurn: async () => { await new Promise<void>(resolve => setImmediate(resolve)); liveTurns++; },
+    });
+    assert.equal(result.upsertRows, 11_887);
+    assert.ok(result.yieldCount >= 300);
+    assert.equal(liveTurns, result.yieldCount);
+    const page = writer.page({ limit: 100, scope: "snapshot-volume", now });
+    assert.equal(page.events.length, 100);
+    assert.equal(page.page.hasMore, true);
+  } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("40,864 representative fixtures are indexed and paged with live-duplicate suppression", () => {
   const dir = mkdtempSync(join(tmpdir(), "adl-indexed-volume-")), path = join(dir, "public.sqlite"), now = Date.now();
   const writer = new IndexedFeedStore(path);

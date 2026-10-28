@@ -7,7 +7,7 @@ OOM_REHEARSAL_TIMEOUT_SECONDS=1200
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
 PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256={'packages/feed-store/src/tenant-tickets.ts':'56bc1ee5debef412fd571439d9980ef065275ea141692aa58858278401103ad2'}
 INDEXED_PUBLICATION_FILES={'packages/feed-store/src/indexed-feed.ts'}
-INDEXED_PUBLICATION_SOURCE_SHA256={'packages/feed-store/src/indexed-feed.ts':'7d9f39072a71d76f89d202a5f97d17c0bdae706c0cdc6cba0a291af6501cb9eb'}
+INDEXED_PUBLICATION_SOURCE_SHA256={'packages/feed-store/src/indexed-feed.ts':'99c08907dfa8a634b636757aa4ee07a282b5c2c3f87b46b83d0529fcb42b078b'}
 def source_export_script(names):
     require(isinstance(names,set) and names and all(isinstance(name,str) and re.fullmatch(r'(?:apps|packages)/[A-Za-z0-9_./-]{1,220}',name) and '..' not in Path(name).parts for name in names),'UPGRADE_SOURCE_EXPORT_SET_INVALID')
     return "const f=require('node:fs');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(names))+".map(n=>[n,f.readFileSync('/app/'+n,'utf8')]))));"

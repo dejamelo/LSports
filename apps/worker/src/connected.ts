@@ -296,7 +296,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         );
         const checkpointIo=durable.checkpointResult;
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),indexStarted=performance.now();
-        let indexRows=0,indexRebuild=false;
+        let indexRows=0,indexRebuild=false,indexDetails:Record<string,number>|undefined;
         if(!indexedReady){
           memoryStage('indexed_projection.rebuild');
           const feed=stable.projection(Date.now(),false);
@@ -312,7 +312,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           const upserts=(function*(){for(const change of changes){const delta=stable.projectDelta(change.lane,change.key);ticketOutcomes.push(...(delta.ticketOutcomes||[]));ticketVersionRecoveries.push(...(delta.ticketVersionRecoveries||[]));const event=delta.events[0];if(event)yield event;}})();
           const deleted=(function*(){for(const change of changes)if(!stable.rows[change.lane].has(change.key))yield `${change.lane}:${String(change.key)}`;})();
           indexRows=changes.length;
-          indexedFeed!.applyDelta(upserts,deleted,stable.projectionMetadata());
+          indexDetails=await indexedFeed!.applyDeltaBatched(upserts,deleted,stable.projectionMetadata());
           state.acknowledgeProjectionChanges(changes);
           const deltaFeed={...stable.projectionMetadata(),events:[],ticketOutcomes,ticketVersionRecoveries};
           if(tenantTickets)tenantTickets.reconcile(deltaFeed);
@@ -322,7 +322,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         const indexDurationMs=Math.ceil(performance.now()-indexStarted);
         lastCompletedPublication=Date.now();
         lastPersistedMutationGeneration=stable.mutationGeneration;
-        const metric={publicationId,checkpointIo,indexedProjection:{rows:indexRows,rebuild:indexRebuild,durationMs:indexDurationMs},writes:++writes,publicProjectionDeferredForSnapshot:false,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:indexDurationMs,maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
+        const metric={publicationId,checkpointIo,indexedProjection:{rows:indexRows,rebuild:indexRebuild,durationMs:indexDurationMs,...(indexDetails||{})},writes:++writes,publicProjectionDeferredForSnapshot:false,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:indexDurationMs,maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
         }catch(error){
