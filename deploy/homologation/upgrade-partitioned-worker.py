@@ -397,7 +397,7 @@ def existing_pipeline_heap_plan(worker,verified_existing_snapshot_profile=False,
                 measured=json.loads(run(['docker','exec',workers[0]['id'],'node','-e',probe],timeout=30))
             else:
                 state=live.get('State',{})
-                require(verified_stopped_pipeline_probe_exit(state,verified_stopped_recovery),'PIPELINE_STOPPED_HEAP_PROBE_EXIT_UNVERIFIED')
+                require(verified_stopped_pipeline_probe_exit(state,verified_stopped_recovery),'PIPELINE_STOPPED_HEAP_PROFILE_HANDOFF_UNVERIFIED')
                 measured=json.loads(run(['docker','run','--rm','--network','none','--read-only','--memory','8589934592','--memory-swap','8589934592','--cpus','2','-e','NODE_OPTIONS='+options,'--entrypoint','node',live.get('Image'),'-e',probe],timeout=30))
             limit=measured.get('heapLimitBytes')
             require(type(limit) is int and 4608*1024**2<=limit<=8589934592-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
@@ -423,7 +423,7 @@ def existing_pipeline_heap_plan(worker,verified_existing_snapshot_profile=False,
             if state.get('ExitCode')==1 and state.get('OOMKilled') is False:
                 verify_live_persistence_failure_identity(workers[0],{'snapshotMemoryRepair':True,'livePersistenceRepair':True,'pipelineRepair':True,'expectedLiveImage':image},image)
             else:
-                require(state.get('Running') is False and state.get('ExitCode')==0 and state.get('OOMKilled') is False,'PIPELINE_STOPPED_HEAP_PROBE_EXIT_UNVERIFIED')
+                require(state.get('Running') is False and state.get('ExitCode')==0 and state.get('OOMKilled') is False,'PIPELINE_STOPPED_HEAP_CONTAINER_STATE_UNVERIFIED')
             measured=json.loads(run(['docker','run','--rm','--network','none','--read-only','--memory','8589934592','--memory-swap','8589934592','--cpus','2','--entrypoint','node',found['Id'],options,'-e',probe],timeout=30))
         limit=measured.get('heapLimitBytes')
         require(type(limit) is int and 4608*1024**2<=limit<=8589934592-512*1024**2,'PIPELINE_EFFECTIVE_HEAP_HEADROOM_UNVERIFIED')
