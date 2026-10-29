@@ -21,8 +21,18 @@ export default function SportsbookAppearance({ clientId, api, onError, onNotice 
     finally { setBusy(false); }
   };
   const previewStyle = Object.fromEntries(Object.entries(draft).map(([key, value]) => [`--theme-${key === "oddsButton" ? "odds-button" : key}`, value])) as CSSProperties;
+  const sameTheme = (a: ThemeColors, b: ThemeColors) => Object.keys(a).every((key) => a[key as keyof ThemeColors] === b[key as keyof ThemeColors]);
+  const unsaved = !!record && !sameTheme(draft, record.draft);
+  const savedDraft = !!record && !sameTheme(record.draft, record.published);
+  const themeState = unsaved
+    ? "Cambios sin guardar. Usa Guardar borrador para conservarlos o Publicar para aplicarlos al sportsbook."
+    : savedDraft
+      ? `Borrador guardado, todavía no publicado. Revisión publicada ${record?.revision ?? 0}. Pulsa Publicar para aplicar los colores.`
+      : record?.revision
+        ? `Tema publicado · revisión ${record.revision}. Las nuevas sesiones del sportsbook reciben este tema.`
+        : "Tema predeterminado Apuesta DEPORTIVA LAT publicado; todavía no hay una personalización guardada.";
   return <section className="control-card appearance-card">
-    <div className="appearance-heading"><div><h2>Apariencia del sportsbook</h2><p>El borrador no cambia el sportsbook hasta que lo publiques. Revisión {record?.revision ?? "—"}.</p></div></div>
+    <div className="appearance-heading"><div><h2>Apariencia del sportsbook</h2><p role="status">{themeState}</p></div></div>
     <div className="appearance-grid">
       <div className="appearance-colors">
         {Object.entries(labels).map(([key, label]) => <label className="appearance-color" key={key}>{label}<span><input aria-label={label} type="color" value={draft[key as keyof ThemeColors]} onChange={(e) => setDraft((old) => ({ ...old, [key]: e.target.value.toUpperCase() }))}/><code>{draft[key as keyof ThemeColors]}</code></span></label>)}

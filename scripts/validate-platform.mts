@@ -256,6 +256,9 @@ try {
   await casino.goto(parentOrigin);
   const frame = casino.frameLocator("iframe");
   await frame.getByRole("region", { name: "Ligas principales" }).getByText("Equipo de prueba A", { exact: true }).waitFor();
+  assert.equal(await frame.locator(":root").evaluate((node) => getComputedStyle(node).getPropertyValue("--theme-primary").trim()), "#40C4FF");
+  assert.equal(await frame.locator(".featured-match").first().evaluate((node) => getComputedStyle(node).backgroundColor), "rgb(37, 58, 49)", "the published secondary color must win over redesigned card CSS");
+  assert.equal(await frame.locator(".featured-odds button:not([aria-pressed=true])").first().evaluate((node) => getComputedStyle(node).backgroundColor), "rgb(32, 42, 47)", "the published odds-button color must win over redesigned odds CSS");
   await frame.locator(".principal-odds button:not([disabled])").first().click();
   await frame.getByLabel("Importe simulado (ARS)", { exact: true }).fill("10");
   await frame
