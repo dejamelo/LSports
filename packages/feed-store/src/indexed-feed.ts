@@ -165,6 +165,14 @@ export class IndexedFeedStore {
       lastUpdatedAt = cursor.lastUpdatedAt;
       lastId = cursor.lastId;
     }
+    const metadata = JSON.parse(row.body) as Omit<EventFeed, "events">;
+    const feedAge = input.now === undefined ? 0 : input.now - Date.parse(metadata.updatedAt || "");
+    // A global stale/unavailable feed suppresses the entire result set. Return
+    // that fact before building a candidate page so hasMore/cursor never claim
+    // there are results beyond rows that the freshness gate just removed.
+    if ((input.now !== undefined && (!Number.isFinite(feedAge) || feedAge > 20000 || feedAge < -5000)) || metadata.health === "unavailable") {
+      return { feed: metadata, events: [], page: { revision: row.revision, limit, hasMore: false } };
+    }
     const filter = input.filter || {};
     // Start with the most recently changed source events so the first bounded
     // page contains current fixtures instead of an ID-ordered set of old rows.
@@ -200,13 +208,10 @@ export class IndexedFeedStore {
     const markets=ids.length?this.db.prepare(`SELECT event_id,market_id,body FROM feed_markets WHERE event_id IN (${ids.map(()=>'?').join(',')})${filter.marketId?' AND market_id=?':''} ORDER BY event_id,market_id`).all(...(filter.marketId?[...ids,filter.marketId]:ids)) as {event_id:string;market_id:string;body:string}[]:[];
     const byEvent=new Map<string, SportEvent['markets']>();
     for(const row of markets){let list=byEvent.get(row.event_id);if(!list){list=[];byEvent.set(row.event_id,list);}list.push(JSON.parse(row.body) as NonNullable<SportEvent['markets']>[number]);}
-    const metadata = JSON.parse(row.body) as Omit<EventFeed, "events">;
-    const age = input.now === undefined ? 0 : input.now - Date.parse(metadata.updatedAt || "");
     // The global health flag is aggregate across both feeds. A recovering InPlay
     // lane must not hide a ready PreMatch lane; readiness is checked per event
     // below. A stale global market heartbeat still suppresses all odds.
-    const events = age > 20000 || age < -5000 || metadata.health === "unavailable"
-      ? [] : visible.map(record => {
+    const events = visible.map(record => {
         const base=JSON.parse(record.body) as SportEvent, eventMarkets=byEvent.get(record.id)||[];
         const primary=eventMarkets.find(m=>m.selections.some(s=>s.available))||eventMarkets[0];
         return {...base,markets:eventMarkets,selections:primary?.selections||[],market:primary?.name||'Sin mercados disponibles'};

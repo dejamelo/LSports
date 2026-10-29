@@ -32,6 +32,8 @@ test("indexed feed atomically pages committed revisions and rejects cross-scope/
     if (metaCursor.page.nextCursor) assert.throws(() => writer.page({ limit: 1, cursor: metaCursor.page.nextCursor, scope: "meta", now }), /INDEX_CURSOR_STALE/);
     const stale = writer.page({ limit: 20, scope: "client-a", now: now + 21_000 });
     assert.equal(stale.events.length, 0);
+    assert.equal(stale.page.hasMore, false);
+    assert.equal(stale.page.nextCursor, undefined);
     const masked = writer.page({ limit: 20, scope: "client-a", now });
     assert.equal(masked.events.filter(e => e.id === "inplay:1").length, 1);
     // PM is hidden only when a live InPlay fixture with the same provider ID exists.
@@ -39,6 +41,38 @@ test("indexed feed atomically pages committed revisions and rejects cross-scope/
     const marketOnly=writer.page({limit:5,scope:"market",now,filter:{eventId:"prematch:2",marketId:"prematch:2:1"}});
     assert.equal(marketOnly.events[0].markets?.length,1);
     assert.equal(marketOnly.events[0].selections[0].id,"prematch:2:1:1");
+  } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("freshness suppression never advertises phantom pages across a periodic snapshot", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-snapshot-pages-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  try {
+    const current = event("prematch:open", now - 1_000);
+    current.markets![0].selections[0].status = 1;
+    current.selections[0].status = 1;
+    const duringSnapshot = { ...metadata(now - 30_000), health: "degraded" as const,
+      connections: { prematch: { phase: "connected", message: "snapshot applying" }, inplay: { phase: "recovering", message: "awaiting baseline" } } };
+    writer.rebuild([current], { ...metadata(now), health: "degraded" as const,
+      connections: { prematch: { phase: "connected", message: "ready" }, inplay: { phase: "recovering", message: "awaiting baseline" } } });
+    const before = writer.page({ lane: "prematch", limit: 1, scope: "client-a/operation-a/ARS", now });
+    assert.equal(before.events[0].markets![0].selections[0].available, true);
+    assert.equal(before.page.hasMore, false);
+
+    writer.applyDelta([], [], duringSnapshot);
+    const hidden = writer.page({ lane: "prematch", limit: 1, scope: "client-a/operation-a/ARS", now });
+    assert.equal(hidden.events.length, 0);
+    assert.equal(hidden.page.hasMore, false);
+    assert.equal(hidden.page.nextCursor, undefined);
+
+    writer.applyDelta([current], [], { ...metadata(now - 500), health: "degraded" as const,
+      connections: { prematch: { phase: "connected", message: "snapshot committed", ingressProgress: { backlog: 0, processingBacklog: 0, oldestProcessingAgeMs: 0 } },
+        inplay: { phase: "recovering", message: "awaiting baseline" } } });
+    const after = writer.page({ lane: "prematch", limit: 1, scope: "client-a/operation-a/ARS", now });
+    assert.equal(after.events.length, 1);
+    assert.equal(after.events[0].markets![0].selections[0].available, true);
+    assert.ok(after.page.revision > before.page.revision);
+    assert.equal(after.page.hasMore, false);
   } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
