@@ -5,15 +5,16 @@ import { sportsbookApi, embedded, getEmbedContext } from "./sportsbook-api";
 import { TicketHistory } from "./TicketHistory";
 import { useEffect, useState, useRef } from "react";
 import {
-  ArrowUpRight,
   Check,
   CircleAlert,
+  ChevronLeft,
   ChevronRight,
   Clock3,
   Flame,
   Globe2,
   Menu,
   Search,
+  Shield,
   ShieldCheck,
   Ticket,
   Trash2,
@@ -29,6 +30,22 @@ import type {
   SportEvent,
 } from "@lsports/contracts";
 type Pick = { event: SportEvent; selection: Selection };
+const selectionFor = (event: SportEvent, market: NonNullable<SportEvent["markets"]>[number] | undefined, label: string) =>
+  market?.selections.find((selection) => selection.label.trim().toLocaleUpperCase("es-AR") === label);
+const primaryMarket = (event: SportEvent) => {
+  const markets = event.markets || [];
+  return markets.find((market) => market.status === 1 && ["1", "X", "2"].every((label) => selectionFor(event, market, label)))
+    || markets.find((market) => market.status === 1 && market.selections.length > 0)
+    || markets[0];
+};
+function ClubMark({ event, side }: { event: SportEvent; side: "home" | "away" }) {
+  const participant = event.participants?.find((row) => row.name === event[side]);
+  // TRADE supplies participant IDs/names but no crest or image URL. Keep a neutral
+  // shield until an authorized ID-to-asset catalog is configured.
+  return <span className="club-mark" aria-label="Escudo no disponible" data-participant-id={participant?.id}>
+    <Shield size={20} strokeWidth={1.6} aria-hidden="true" />
+  </span>;
+}
 const sports: { id: Sport; icon: string; name: string }[] = [
   { id: "futbol", icon: "⚽", name: "Fútbol" },
   { id: "tenis", icon: "🎾", name: "Tenis" },
@@ -66,6 +83,8 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
   const [reviewed,setReviewed]=useState("");
   const [registeredId,setRegisteredId]=useState("");
   const [focusTicketId,setFocusTicketId]=useState("");
+  const [leagueFilter,setLeagueFilter]=useState("Todas");
+  const carouselTrack=useRef<HTMLDivElement>(null);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [mobileSlip, setMobileSlip] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -158,6 +177,50 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
           .toLocaleLowerCase("es-AR")
           .includes(query.toLocaleLowerCase("es-AR")),
     ) ?? [];
+  const eventMarkets = events.filter((event) => event.kind !== "outright" && event.home && event.away);
+  const marketFreshness = (event: SportEvent) => {
+    const markets = event.markets || [];
+    return markets.reduce((count, market) => count + (market.status === 1 ? market.selections.filter((selection) =>
+      selection.available === true && selection.odds > 1 && Number.isFinite(selection.odds),
+    ).length : 0),
+      0,
+    );
+  };
+  const eventsWithCurrentMarkets = eventMarkets.filter((event) => event.available === true && marketFreshness(event) > 0);
+  const leagueNames = [...new Set(eventsWithCurrentMarkets.map((event) => event.league))].slice(0, 8);
+  const byPriority = [...eventsWithCurrentMarkets].sort((a, b) => {
+    const availableDifference = marketFreshness(b) - marketFreshness(a);
+    if (availableDifference) return availableDifference;
+    const popular = (league: string) => /liga profesional|champions|premier league|la liga|libertadores|serie a|bundesliga/i.test(league) ? 1 : 0;
+    if (popular(a.league) !== popular(b.league)) return popular(b.league) - popular(a.league);
+    const startA = Date.parse(a.startsAt || "") || Number.MAX_SAFE_INTEGER;
+    const startB = Date.parse(b.startsAt || "") || Number.MAX_SAFE_INTEGER;
+    return startA - startB;
+  });
+  const featuredMatches = byPriority.slice(0, 6);
+  const leagueMatches = byPriority.filter((event) => leagueFilter === "Todas" || event.league === leagueFilter).slice(0, 9);
+  const featuredIds = new Set(featuredMatches.map((event) => event.id));
+  const principalIds = new Set(leagueMatches.map((event) => event.id));
+  const remainingMatches = eventMarkets.filter((event) => !featuredIds.has(event.id) && !principalIds.has(event.id));
+  const groupedMatches = [...new Set(remainingMatches.map((event) => event.league))].map((league) => ({
+    league,
+    events: remainingMatches.filter((event) => event.league === league),
+  }));
+  const cardOdds = (event: SportEvent) => {
+    const market = primaryMarket(event);
+    const threeWay = ["1", "X", "2"].map((label) => selectionFor(event, market, label));
+    const availableThreeWay = threeWay.every(Boolean);
+    return { market, selections: availableThreeWay ? threeWay as Selection[] : (market?.selections || []).slice(0, 3) };
+  };
+  const canPick = (event: SportEvent, selection: Selection) => !readOnlyPreview &&
+    (!connected || event.available === true && selection.available === true);
+  const activeLane = tab === "En vivo" ? feed?.connections?.inplay : feed?.connections?.prematch;
+  const laneKey = tab === "En vivo" ? "inplay" : "prematch";
+  const lastLaneMarketAt = feed?.coverage?.[laneKey]?.activity?.lastMarketReceivedAt;
+  const laneMarketAge = lastLaneMarketAt ? Date.now() - Date.parse(lastLaneMarketAt) : Number.POSITIVE_INFINITY;
+  const laneBacklog = activeLane?.ingressProgress;
+  const laneFresh = Number.isFinite(laneMarketAge) && laneMarketAge >= -5000 && laneMarketAge <= 20000;
+  const laneStatus = !connected ? "demo" : activeLane?.phase === "error" || activeLane?.phase === "stopped" ? "unavailable" : activeLane?.phase === "connected" && laneFresh && !((laneBacklog?.processingBacklog ?? laneBacklog?.backlog ?? 0) > 0 && (laneBacklog?.oldestProcessingAgeMs ?? laneBacklog?.oldestAgeMs ?? 0) > 5000) ? "ready" : "recovering";
   const toggle = (event: SportEvent, selection: Selection) => {
     if(presentation.format==="pos")setMobileSlip(true);
     setMessage("");
@@ -259,7 +322,14 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
       <div className="demo-notice">
         <ShieldCheck size={14} />
         <span>
-          {embedScope&&`${embedScope.currency} · SIMULACIÓN · `}{feed?.client?.displayName && `${feed.client.displayName} · `}{feed?.notice || "Consultando estado de la API… Sin dinero real."}
+          {embedScope&&`${embedScope.currency} · SIMULACIÓN · `}{feed?.client?.displayName && `${feed.client.displayName} · `}
+          {connected
+            ? laneStatus === "ready"
+              ? tab === "En vivo" ? "InPlay actualizado. Las cuotas no vigentes siguen bloqueadas." : "Prepartido actualizado. Las cuotas no vigentes siguen bloqueadas."
+              : laneStatus === "recovering"
+                ? tab === "En vivo" ? "InPlay en actualización. Prepartido continúa por separado." : "Prepartido en actualización. Las cuotas no vigentes siguen bloqueadas."
+                : tab === "En vivo" ? "InPlay no disponible en este momento." : "Prepartido no disponible en este momento."
+            : feed?.notice || "Consultando estado de la API… Sin dinero real."}
         </span>
         <span className="notice-age">18+</span>
       </div>
@@ -318,56 +388,38 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
           <div className="breadcrumb">
             Deportes <ChevronRight size={12} /> Sportsbook
           </div>
-          <section className="hero">
-            <div className="hero-copy">
-              <span className="eyebrow">
-                <span /> TU PRÓXIMA GRAN JUGADA
-              </span>
-              <h1>
-                La pasión se vive.
-                <br />
-                <em>El partido lo elegís vos.</em>
-              </h1>
-              <p>
-                Todo el deporte, toda la emoción.
-                <br />
-                Explorá las cuotas y armá tu jugada de prueba.
-              </p>
-              <button
-                onClick={() =>
-                  document
-                    .getElementById("events")
-                    ?.scrollIntoView({ behavior: "smooth" })
-                }
-              >
-                Explorar eventos <ArrowUpRight size={17} />
-              </button>
-              <small>
-                {connected
-                  ? "Datos del proveedor · Sin apuestas reales"
-                  : "Experiencia demo · Sin apuestas reales"}
-              </small>
+          {sport === "futbol" && tab === "Prepartido" && <section className="match-showcase" aria-label="Partidos principales">
+            <div className="match-showcase-heading">
+              <div><span className="eyebrow muted">APUESTA DEPORTIVA LAT</span><h1>Partidos destacados</h1></div>
+              <div className="showcase-controls"><span className="fixture-badge"><Clock3 size={13} /> Horarios ART</span><button aria-label="Partidos anteriores" onClick={()=>carouselTrack.current?.scrollBy({left:-340,behavior:"smooth"})}><ChevronLeft size={17}/></button><button aria-label="Partidos siguientes" onClick={()=>carouselTrack.current?.scrollBy({left:340,behavior:"smooth"})}><ChevronRight size={17}/></button></div>
             </div>
-            <div className="hero-art" aria-hidden="true">
-              <div className="pitch-ring ring-one" />
-              <div className="pitch-ring ring-two" />
-              <div className="ball">⚽</div>
-              <span className="art-tag">
-                <Zap size={14} /> EL JUEGO NO PARA
-              </span>
-              <div className="field-line" />
-            </div>
-          </section>
-          <div className="section-title">
-            <div>
-              <span className="eyebrow muted">TU CANCHA, TUS REGLAS</span>
-              <h2>Encontrá tu próximo partido</h2>
-            </div>
-            <span className="fixture-badge">
-              <Clock3 size={13} />{" "}
-              {connected ? "Horarios ART" : "Agenda ilustrativa"}
-            </span>
-          </div>
+            {featuredMatches.length ? <div className="featured-track" aria-label="Carrusel horizontal de partidos" ref={carouselTrack} tabIndex={0}>
+              {featuredMatches.map((event) => {
+                const { market, selections } = cardOdds(event);
+                const oneXTwo = selections.length === 3 && ["1", "X", "2"].every((label) => selections.some((selection) => selection.label.trim().toUpperCase() === label));
+                const odds = oneXTwo ? ["1", "X", "2"].map((label) => selections.find((selection) => selection.label.trim().toUpperCase() === label)!) : selections;
+                return <article className="featured-match" key={event.id}>
+                  <div className="featured-match-top"><span>{event.league}</span><span className={event.live ? "match-live" : ""}>{event.live ? event.score || "EN VIVO" : event.time}</span></div>
+                  <div className="featured-teams">
+                    <div className="featured-side"><ClubMark event={event} side="home"/><strong>{event.home}</strong></div>
+                    <span className="match-versus">{event.live && event.score ? event.score : "VS"}</span>
+                    <div className="featured-side"><ClubMark event={event} side="away"/><strong>{event.away}</strong></div>
+                  </div>
+                  <div className="featured-market-label">{market?.name || "Mercado principal"}</div>
+                  <div className="featured-odds">
+                    {odds.map((selection, index) => <button key={selection.id} aria-pressed={picks.some((pick) => pick.selection.id === selection.id)} disabled={!canPick(event, selection)} onClick={() => toggle(event, selection)}>
+                      <span>{oneXTwo ? ["1", "X", "2"][index] : selection.label}</span>
+                      <strong>{selection.available === true ? selection.odds.toFixed(2) : "—"}</strong>
+                    </button>)}
+                    {!odds.length && <span className="no-current-market">Mercados actuales no disponibles</span>}
+                  </div>
+                </article>;
+              })}
+            </div> : <div className="showcase-empty">
+              <div className="showcase-ball" aria-hidden="true">⚽</div>
+              <div><strong>Esperando partidos con mercados del feed</strong><p>No mostramos encuentros ni cuotas inventados.</p></div>
+            </div>}
+          </section>}
           <div className="tabs" role="tablist" aria-label="Tipo de evento">
             {["Prepartido", "En vivo", "Hípica"].map((t) => (
               <button
@@ -424,108 +476,48 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
               className={`connection-panel ${feed.health !== "ok" ? "connection-warning" : ""}`}
               role="status"
             >
-              <strong>
-                Proveedor: LSports TRADE · Test ·{" "}
-                {feed.health === "ok"
-                  ? "Feed conectado"
-                  : feed.health === "degraded"
-                    ? "Conexión parcial"
-                    : "Sin conexión confirmada"}
-              </strong>
-              <p>
-                API: {feed.events.length} eventos · Visibles con
-                deporte/aba/búsqueda actuales: {events.length}. Sin eventos
-                ficticios de respaldo.
-              </p>
-              {Object.entries(feed.coverage || {}).map(([lane, c]) => (
-                <p key={`coverage-${lane}`}>
-                  {lane === "prematch" ? "PreMatch" : "InPlay"}: snapshot
-                  proveedor {c.snapshot?.providerRows ?? "sin auditar"} → SDK{" "}
-                  {c.snapshot?.sdkRows ?? "—"} · actualizaciones de eventos{" "}
-                  {c.eventUpdatesReceived} · registros sin fixture{" "}
-                  {c.rowsWithoutFixture} · publicados {c.rowsPublished} · con
-                  cuotas seleccionables {c.eventsWithSelectableOdds}
-                  {c.keepAliveActiveEvents !== undefined
-                    ? ` · último KeepAlive ActiveEvents: ${c.keepAliveActiveEvents}`
-                    : ""}
-                </p>
-              ))}
-              {Object.entries(feed.connections || {}).map(([lane, state]) => (
-                <p key={lane}>
-                  {lane === "prematch" ? "PreMatch" : "InPlay"}: {state.message}
-                  {state.lastSnapshotAt &&
-                    ` · Snapshot ${new Date(state.lastSnapshotAt).toLocaleTimeString("es-AR")}`}
-                </p>
-              ))}
-              <p>{feed.horseRacing?.message}</p>
+              <strong>{laneStatus === "ready" ? (tab === "En vivo" ? "En vivo actualizado" : "Prepartido actualizado") : laneStatus === "recovering" ? (tab === "En vivo" ? "Actualizando InPlay" : "Actualizando Prepartido") : "Mercados no disponibles"}</strong>
+              <details><summary>Estado del catálogo</summary>
+                <p>LSports TRADE · Test · {events.length} partidos en esta vista. Las cuotas sin vigencia siguen bloqueadas.</p>
+                {Object.entries(feed.connections || {}).map(([lane, state]) => <p key={lane}>{lane === "prematch" ? "Prepartido" : "En vivo"}: {state.message}{state.lastSnapshotAt && ` · ${new Date(state.lastSnapshotAt).toLocaleTimeString("es-AR")}`}</p>)}
+              </details>
             </div>
           )}
-          <div className="event-list">
-            {error ? (
-              <div className="empty">
-                <p>{error}</p>
-                <button onClick={() => setAttempt((v) => v + 1)}>
-                  Reintentar
-                </button>
-              </div>
+          {sport === "futbol" && tab === "Prepartido" && <section className="principal-leagues" aria-label="Ligas principales">
+            <div className="principal-heading"><div><span className="eyebrow muted">CATÁLOGO ACTUAL</span><h2>Ligas principales</h2></div><div className="league-filters" aria-label="Filtrar por competición">
+              {["Todas", ...leagueNames].map((league) => <button key={league} aria-pressed={leagueFilter === league} onClick={() => setLeagueFilter(league)}>{league}</button>)}
+            </div></div>
+            {leagueMatches.length ? <div className="principal-grid">{leagueMatches.map((event) => {
+              const { market, selections } = cardOdds(event);
+              return <article className="principal-match" key={event.id}>
+                <div className="principal-match-top"><span>{event.league}</span><span>{event.live ? event.score || "EN VIVO" : event.time}</span></div>
+                <div className="principal-teams"><div><ClubMark event={event} side="home"/><strong>{event.home}</strong></div><div><ClubMark event={event} side="away"/><strong>{event.away}</strong></div></div>
+                <div className="principal-market">{market?.name || "Mercado principal"}</div>
+                <div className="principal-odds">{selections.map((selection) => <button key={selection.id} aria-pressed={picks.some((pick) => pick.selection.id === selection.id)} disabled={!canPick(event, selection)} onClick={() => toggle(event, selection)}><span>{selection.label}</span><strong>{selection.available === true ? selection.odds.toFixed(2) : "—"}</strong></button>)}{!selections.length && <span className="no-current-market">Sin cuotas vigentes</span>}</div>
+              </article>;
+            })}</div> : <div className="empty principal-empty"><Search size={24}/><strong>No hay partidos disponibles en esta selección</strong><span>El catálogo se actualizará cuando el feed publique eventos.</span></div>}
+          </section>}
+          {error ? (
+              <div className="empty"><p>{error}</p><button onClick={() => setAttempt((v) => v + 1)}>Reintentar</button></div>
             ) : !feed ? (
-              <div className="empty" role="status">
-                Cargando la cancha…
-              </div>
+              <div className="empty" role="status">Cargando eventos…</div>
             ) : events.length === 0 ? (
-              <div className="empty">
-                <Search size={28} />
-                <h3>No hay eventos para esta selección</h3>
-                <p>{readOnlyPreview ? "No hay eventos actuales disponibles para esta selección. No se generan datos ni cuotas de prueba." : "Probá otro deporte, pestaña o búsqueda."}</p>
-                <button onClick={() => setQuery("")}>Limpiar búsqueda</button>
-              </div>
+              <div className="empty"><Search size={28}/><h3>{tab === "En vivo" ? "Todavía no hay partidos en vivo" : "No hay eventos para esta selección"}</h3><p>{tab === "En vivo" ? "Esta operación aún no tiene fixtures InPlay disponibles. Prepartido continúa por separado." : readOnlyPreview ? "No hay eventos actuales disponibles para esta selección. No se generan datos ni cuotas de prueba." : "Probá otro deporte, pestaña o búsqueda."}</p><button onClick={() => setQuery("")}>Limpiar búsqueda</button></div>
             ) : (
-              events.map((event) => (
-                <article className="event-card" key={event.id}>
-                  <div className="event-league">
-                    <Trophy size={13} />
-                    {event.league}
-                    <span>
-                      {connected ? event.statusLabel || "TRADE" : "DEMO"}
-                    </span>
-                  </div>
-                  <div className="event-body">
-                    <div className="event-details">
-                      <div
-                        className={`event-time ${event.live ? "live-time" : ""}`}
-                      >
-                        {event.live && <span className="live-dot" />}
-                        {event.time}
-                      </div>
-                      <strong>{event.home}</strong>
-                      <strong className="away">{event.away}</strong>
-                      {event.kind === "outright" && !!event.participants?.length && (
-                        <details className="race-participants">
-                          <summary>Ver participantes ({event.participants.length})</summary>
-                          <ul>{event.participants.map((participant, index) => (
-                            <li key={`${participant.id ?? index}:${index}`}>
-                              {participant.position ? `${participant.position}. ` : ""}
-                              {participant.name || "Nombre no informado"}
-                              {participant.isActive === 0 ? " · Inactivo" : ""}
-                            </li>
-                          ))}</ul>
-                        </details>
-                      )}
-                      {event.score && (
-                        <span className="score">{event.score}</span>
-                      )}
-                    </div>
-                    <EventMarkets
-                      event={event}
-                      selected={picks.map((p) => p.selection.id)}
-                      blocked={readOnlyPreview || !!error || feed?.client?.acceptingTickets === false || event.available === false}
-                      onSelect={toggle}
-                    />
-                  </div>
-                </article>
-              ))
-            )}
+          <div className="competition-list">
+            {groupedMatches.map(({ league, events: competitionEvents }) => <section className="competition-group" key={league}>
+              <h3><Trophy size={14}/>{league}<span>{competitionEvents.length}</span></h3>
+              {competitionEvents.map((event) => <article className="compact-match" key={event.id}>
+                <div className="compact-match-info"><span className={`compact-time ${event.live ? "match-live" : ""}`}>{event.live ? event.score || "EN VIVO" : event.time}</span><div className="compact-teams"><div><ClubMark event={event} side="home"/><strong>{event.home}</strong></div><div><ClubMark event={event} side="away"/><strong>{event.away}</strong></div></div></div>
+                <EventMarkets event={event} selected={picks.map((pick) => pick.selection.id)} blocked={readOnlyPreview || !!error || feed?.client?.acceptingTickets === false || event.available === false} onSelect={toggle}/>
+              </article>)}
+            </section>)}
           </div>
+          )}
+          {/* Existing non-match catalog entries (for example, racing) retain their own markets and participants. */}
+          {events.filter((event) => event.kind === "outright").map((event) => <article className="event-card outright-card" key={event.id}>
+            <div className="event-league"><Trophy size={13}/>{event.league}<span>{event.statusLabel}</span></div><div className="event-body"><div className="event-details"><div className="event-time">{event.time}</div><strong>{event.home}</strong><strong className="away">{event.away}</strong>{event.participants?.length ? <details className="race-participants"><summary>Ver participantes ({event.participants.length})</summary><ul>{event.participants.map((participant, index) => <li key={`${participant.id ?? index}:${index}`}>{participant.position ? `${participant.position}. ` : ""}{participant.name || "Nombre no informado"}{participant.isActive === 0 ? " · Inactivo" : ""}</li>)}</ul></details> : null}</div><EventMarkets event={event} selected={picks.map((pick) => pick.selection.id)} blocked={readOnlyPreview || !!error || feed?.client?.acceptingTickets === false || event.available === false} onSelect={toggle}/></div>
+          </article>)}
           <div className="data-disclaimer">
             <ShieldCheck size={16} />
             <p>
