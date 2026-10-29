@@ -473,7 +473,7 @@ export default function App({readOnlyPreview=false}:{readOnlyPreview?:boolean}={
           </div>
           {connected && (
             <div
-              className={`connection-panel ${feed.health !== "ok" ? "connection-warning" : ""}`}
+              className={`connection-panel ${laneStatus !== "ready" ? "connection-warning" : ""}`}
               role="status"
             >
               <strong>{laneStatus === "ready" ? (tab === "En vivo" ? "En vivo actualizado" : "Prepartido actualizado") : laneStatus === "recovering" ? (tab === "En vivo" ? "Actualizando InPlay" : "Actualizando Prepartido") : "Mercados no disponibles"}</strong>
