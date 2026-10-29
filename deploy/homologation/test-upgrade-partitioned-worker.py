@@ -102,6 +102,16 @@ class Upgrade(unittest.TestCase):
   extra=dict(candidate);extra['apps/worker/src/state.ts']+='; unexpected'
   with self.assertRaises(Exception):NS['verify_full_recovery_sources'](old,extra,digest)
 
+ def test_full_recovery_accepts_checkpoint_only_delta_when_live_snapshot_guards_are_installed(self):
+  names=NS['PARTITION_FILES'];old={name:'installed:'+name for name in names}
+  old['apps/worker/src/full-snapshot.ts']='transportComplete=res.complete===true; if(!transportComplete) throw Error(); transportBytes!==contentLengthBytes; Snapshot HTTP Content-Length mismatch'
+  old['apps/worker/src/connected.ts']="lanes.length>0&&lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.regularSnapshotReady===false); ingress.processingBacklog??ingress.backlog; ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000"
+  candidate=dict(old);candidate['apps/worker/src/persistence.ts']='CHECKPOINT_JOURNAL_WRITE_BUFFER_BYTES=1024*1024; checkpointJournalWriteBuffer(file); await output.flush(); await file.sync()'
+  digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  self.assertEqual(NS['verify_full_recovery_sources'](old,candidate,digest),None)
+  unsafe=dict(candidate);unsafe['apps/worker/src/state.ts']+='; unexpected'
+  with self.assertRaises(Exception):NS['verify_full_recovery_sources'](old,unsafe,digest)
+
  def test_current_full_recovery_receipt_requires_immutable_backup_hashes(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);secure=root/'secure';secure.mkdir(mode=0o700);backups=root/'backups';backups.mkdir(mode=0o700);backup=backups/'adl-partitioned-upgrade-receipt';backup.mkdir(mode=0o700)

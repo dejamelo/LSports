@@ -51,7 +51,7 @@ def verify_full_recovery_sources(old_files,files,old_digest):
     installed_digest=hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     require(installed_digest==old_digest,'FULL_RECOVERY_INSTALLED_SOURCE_DIGEST_MISMATCH')
     changed={name for name in files if files[name]!=old_files[name]}
-    require(changed in ({'apps/worker/src/connected.ts'},{'apps/worker/src/connected.ts','apps/worker/src/persistence.ts'}),'FULL_RECOVERY_PATCH_SCOPE_UNVERIFIED')
+    require(bool(changed) and changed<={'apps/worker/src/connected.ts','apps/worker/src/persistence.ts'},'FULL_RECOVERY_PATCH_SCOPE_UNVERIFIED')
     connected=files['apps/worker/src/connected.ts']
     snapshot_gate="lanes.length>0&&lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.regularSnapshotReady===false)" in connected
     stale_backlog_gate=("ingress.processingBacklog??ingress.backlog" in connected and
