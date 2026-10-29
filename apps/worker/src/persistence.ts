@@ -55,21 +55,37 @@ export function streamCheckpoint(state:TradeState){
 
 export const checkpointJournalPath=(path:string)=>path+'.checkpoint-journal.jsonl';
 export const CHECKPOINT_JOURNAL_COMPACT_BYTES=1024**3;
+export const CHECKPOINT_JOURNAL_WRITE_BUFFER_BYTES=1024*1024;
+/**
+ * Coalesce the streamed JSON fragments and record separators before writing.
+ * The previous writer awaited one filesystem call for every record newline;
+ * at production scale those hundreds of tiny writes dominated journal time.
+ * Memory stays bounded to the configured chunk plus one serializer fragment,
+ * while record order and the final fsync-before-ACK contract are unchanged.
+ */
+export function checkpointJournalWriteBuffer(file:Pick<Awaited<ReturnType<typeof open>>,'writeFile'>,limit=CHECKPOINT_JOURNAL_WRITE_BUFFER_BYTES){
+ const chunks:string[]=[];let bufferedBytes=0,writeCalls=0,writeAwaitMs=0,maxBufferedBytes=0;
+ const flush=async()=>{if(!bufferedBytes)return;const text=chunks.join('');chunks.length=0;bufferedBytes=0;const at=performance.now();try{await file.writeFile(text);writeCalls++;}finally{writeAwaitMs+=performance.now()-at;}};
+ return {async writeFile(text:string){if(bufferedBytes&&bufferedBytes+Buffer.byteLength(text)>limit)await flush();chunks.push(text);bufferedBytes+=Buffer.byteLength(text);maxBufferedBytes=Math.max(maxBufferedBytes,bufferedBytes);if(bufferedBytes>=limit)await flush();},flush,stats:()=>({writeCalls,writeAwaitMs:Math.ceil(writeAwaitMs),maxBufferedBytes})};
+}
 export async function persistCheckpointDelta(path:string,state:TradeState,changes:readonly {lane:Lane;key:number|string;marketIds?:readonly string[]|null}[]){
  const journal=checkpointJournalPath(path);await mkdir(dirname(path),{recursive:true});
- const file=await open(journal,'a',0o600);let rows=0,bytes=0,serializeMs=0,writeAwaitMs=0,fsyncAwaitMs=0,journalBytes=0;
+ const file=await open(journal,'a',0o600);let rows=0,bytes=0,serializeMs=0,fsyncAwaitMs=0,journalBytes=0;
+ const output=checkpointJournalWriteBuffer(file);
  try{
   for(const change of changes){
    const row=state.rows[change.lane].get(change.key);
    const partial=!!row&&change.marketIds!==undefined&&change.marketIds!==null;
    const marketIds=partial?new Set(change.marketIds):undefined;
    const record=row?{op:partial?'merge':'upsert',lane:change.lane,key:change.key,regular:!row.outright,...(partial?{marketIds:[...marketIds!]}:{}),entry:streamedRow(change.lane,change.key,row,!!row.outright,marketIds)}:{op:'delete',lane:change.lane,key:change.key};
-   const encoded=await writeJsonRecord(file,record);bytes+=encoded.bytes;serializeMs+=encoded.serializeMs;writeAwaitMs+=encoded.writeAwaitMs;
-   const at=performance.now();await file.writeFile('\n');writeAwaitMs+=performance.now()-at;bytes++;rows++;
+   const encoded=await writeJsonRecord(output as any,record);bytes+=encoded.bytes;serializeMs+=encoded.serializeMs;
+   await output.writeFile('\n');bytes++;rows++;
   }
+  await output.flush();
   if(rows){const at=performance.now();await file.sync();fsyncAwaitMs=performance.now()-at;journalBytes=(await file.stat()).size;}
  }finally{await file.close();}
- return {rows,bytes,journalBytes,serializeMs:Math.ceil(serializeMs),writeAwaitMs:Math.ceil(writeAwaitMs),fsyncAwaitMs:Math.ceil(fsyncAwaitMs),compactDue:journalBytes>=CHECKPOINT_JOURNAL_COMPACT_BYTES};
+ const write=output.stats();
+ return {rows,bytes,journalBytes,serializeMs:Math.ceil(serializeMs),writeAwaitMs:write.writeAwaitMs,writeCalls:write.writeCalls,maxBufferedBytes:write.maxBufferedBytes,fsyncAwaitMs:Math.ceil(fsyncAwaitMs),compactDue:journalBytes>=CHECKPOINT_JOURNAL_COMPACT_BYTES};
 }
 
 /** Atomic full-state compaction. The journal is rotated only after the new baseline is durable. */

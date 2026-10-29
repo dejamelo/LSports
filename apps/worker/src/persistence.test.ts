@@ -284,12 +284,19 @@ test('12,321-fixture periodic refresh keeps unchanged market deltas out of the c
   }))}));
   state.apply('prematch',events,at);let changes=state.projectionChanges();
   const initial=await persistCheckpointDelta(path,state,changes);state.acknowledgeProjectionChanges(changes);
+  assert.ok(initial.writeCalls<changes.length/20,`batched journal should avoid one filesystem await per row (${initial.writeCalls} writes for ${changes.length} rows)`);
+  assert.ok(initial.maxBufferedBytes<=1024*1024,`journal staging is bounded (${initial.maxBufferedBytes} bytes)`);
   state.apply('prematch',events.map(event=>({...event,marketRecovery:true})),at+60000,{source:'snapshot',receivedAt:at+60000});
   changes=state.projectionChanges();assert.equal(changes.length,12321);assert.ok(changes.every(change=>change.marketIds?.length===0));
   const refresh=await persistCheckpointDelta(path,state,changes);
+  assert.ok(refresh.writeCalls<changes.length/20,`periodic metadata journal should batch writes (${refresh.writeCalls} writes for ${changes.length} rows)`);
   assert.ok(refresh.bytes<initial.bytes/2,`repeat metadata delta ${refresh.bytes}B should be materially smaller than full market state ${initial.bytes}B`);
   const records=(await readFile(path+'.checkpoint-journal.jsonl','utf8')).trim().split('\n');
   const sample=JSON.parse(records.at(-1)!);assert.deepEqual(sample.marketIds,[]);assert.equal(sample.entry.markets.length,0);
+  state.acknowledgeProjectionChanges(changes);
+  const recovered=new TradeState();const recovery=await restore(recovered,path);
+  assert.equal(recovery.rows,12321,'the batched journal remains a complete recoverable prefix after restart');
+  assert.equal(recovered.rows.prematch.get(1)?.markets.size,3);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
