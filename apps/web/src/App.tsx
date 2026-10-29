@@ -39,7 +39,7 @@ const primaryMarket = (event: SportEvent) => {
     || markets[0];
 };
 function ClubMark({ event, side }: { event: SportEvent; side: "home" | "away" }) {
-  const participant = event.participants?.find((row) => row.name === event[side]);
+  const participant = event.participants?.find((row) => row.position === (side === "home" ? "1" : "2"));
   // TRADE supplies participant IDs/names but no crest or image URL. Keep a neutral
   // shield until an authorized ID-to-asset catalog is configured.
   return <span className="club-mark" aria-label="Escudo no disponible" data-participant-id={participant?.id}>
