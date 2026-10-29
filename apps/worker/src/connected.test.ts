@@ -44,6 +44,31 @@ test("snapshot validation leaves prior-baseline checkpoints publishable until ap
  const applyingCheckpoint=persist();await new Promise(resolve=>setTimeout(resolve,10));assert.equal(captures,1);
  setSnapshotPersistenceDeferred(state,false,"prematch");await applyingCheckpoint;assert.equal(captures,2);
 });
+test('initial full recovery continues durable replay through HTTP and validation, pausing only at apply',{timeout:10000},async()=>{
+ const state=new TradeState(),abort=new AbortController();let deliver:(m:ConsumeMessage)=>void=()=>{},acks=0,persisted=0;
+ const live={content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'live-during-validation',ServerTimestamp:Date.now()},Body:{Events:[{FixtureId:1,Markets:[{Id:1,Status:1,Bets:[{Id:'123',Price:'2.4',Status:1}]}]}]}})),properties:{headers:{}},fields:{inboxId:1,inboxReceived:Date.now(),redelivered:false}} as unknown as ConsumeMessage;
+ const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(_queue:string,callback:typeof deliver){deliver=callback;return{consumerTag:'initial-recovery-replay'};},stage(){},ack(){acks++;},nack(){assert.fail('durable message must be retained and replayed');}});
+ const connection=Object.assign(new EventEmitter(),{async activateTransport(){},intakePaused:()=>false,async createChannel(){return channel;},async close(){connection.emit('close');},quiesce(){}});
+ const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',port:5672,tls:false,queue:'_4511_'};
+ const api:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true,consumers:[],messagesPerSecond:0,numberMessagesInQueue:0};},async catalog(){return[];},async snapshot(){assert.fail('validated full snapshot required');},async snapshotFull(sink){
+  sink.progress?.({stage:'waiting_http',bytes:0,validatedRows:0,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  sink.progress?.({stage:'download',bytes:0,validatedRows:0,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  sink.progress?.({stage:'validate',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  deliver(live);
+  const deadline=Date.now()+3000;while(acks===0&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(acks,1,'live row must be durably checkpointed before validated snapshot application starts');
+  assert.equal(state.rows.prematch.get(1)?.markets.get('1')?.bets?.[0]?.price,'2.4');
+  sink.progress?.({stage:'apply',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date().toISOString()});
+  await sink.apply({fixtureId:1,markets:[{id:1,status:1,bets:[{id:'123',price:'2.2',status:1}]}] as any},Date.now());
+  sink.progress?.({stage:'complete',bytes:100,validatedRows:1,appliedRows:1,lastProgressAt:new Date().toISOString()});
+  return{ids:new Set([1]),rows:1,bytes:100};
+ }};
+ const running=session(pkg,{packages:[pkg],snapshotUrl:'http://isolated',customersUrl:'http://isolated',staleMs:90000,recoveryMs:300000},state,async()=>{persisted++;},abort.signal,{clientFactory:()=>api,connect:(async()=>{throw Error('durable path expected');}) as any,durableConnect:(async()=>connection) as any,checkpointBatchThreshold:1,checkpointBatchFlushMs:10},'/isolated/initial-recovery-replay.sqlite');
+ const deadline=Date.now()+3000;while(!(state.connections.prematch.phase==='connected'&&state.connections.prematch.fullSnapshot?.completedAt)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
+ assert.equal(state.connections.prematch.phase,'connected','validated baseline must reach connected after the apply gate releases');assert.ok(state.connections.prematch.fullSnapshot?.completedAt);abort.abort();await running;
+ assert.equal(acks,1);assert.ok(persisted>=3);
+ assert.ok(state.rows.prematch.has(1),'live row must remain represented in the recovered state');
+});
 test("worker consumes while snapshot is pending, preserves newer deltas, persists before ack and gates on shutdown", async () => {
   const state = new TradeState();
   const abort = new AbortController();

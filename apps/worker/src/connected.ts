@@ -908,7 +908,6 @@ export async function session(
                 // publisher cannot see a download/parse in progress and may
                 // start a multi-GB projection that contends with the parser.
                 state.set(lane,{fullSnapshot:{method:'disk_spool_two_pass',startedAt:fullStartedAt,stage:'waiting_http',bytes:0,validatedRows:0,appliedRows:0}});
-                if(durable&&!periodicRefresh){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}
               }
               if(progress.stage==='apply'&&!snapshotStatePreparation){
                 if(!snapshotRequestAdmitted)throw new Error('Snapshot apply began without scheduler admission');
