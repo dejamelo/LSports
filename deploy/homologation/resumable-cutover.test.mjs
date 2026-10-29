@@ -56,7 +56,7 @@ test('protected full recovery timeout covers the measured checkpoint and publica
 test('missing local checkpoint only counts as stopped for recovery when every process and lock is absent',()=>{
  const report={status:'blocked',matchingWorkerProcesses:0,workerLockAbsent:true,processes:{status:'ok',matching:0},locks:[],blockers:[{stage:'checkpoint',reason:'ENOENT'}],journalCount:1};
  assert.equal(macAuditProvesStopped(report),false);assert.equal(macAuditProvesStopped(report,{allowMissingCheckpoint:true}),true);
- assert.equal(modeAllowsMissingMacCheckpoint('--partitioned-recovery'),true);assert.equal(modeAllowsMissingMacCheckpoint('--recover-and-cutover'),false);
+ assert.equal(modeAllowsMissingMacCheckpoint('--partitioned-recovery'),true);assert.equal(modeAllowsMissingMacCheckpoint('--snapshot-throughput-repair'),true);assert.equal(modeAllowsMissingMacCheckpoint('--recover-and-cutover'),false);
  for(const changed of [{matchingWorkerProcesses:1},{workerLockAbsent:false},{locks:[{}]},{journalCount:0},{blockers:[{stage:'checkpoint',reason:'INVALID'}]}])assert.equal(macAuditProvesStopped({...report,...changed},{allowMissingCheckpoint:true}),false);
 });
 test('completed stages are reused; failure stays pending and does not erase previous results',async()=>{

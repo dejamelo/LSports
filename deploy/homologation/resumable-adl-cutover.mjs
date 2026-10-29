@@ -59,7 +59,7 @@ export function macAuditProvesStopped(audit,{allowMissingCheckpoint=false}={}){
  if(audit?.status==='ok'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true)return true;
  return allowMissingCheckpoint&&audit?.status==='blocked'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true&&audit.processes?.status==='ok'&&audit.processes?.matching===0&&Array.isArray(audit.locks)&&audit.locks.length===0&&audit.blockers?.length===1&&audit.blockers[0]?.stage==='checkpoint'&&audit.blockers[0]?.reason==='ENOENT'&&audit.journalCount>=1;
 }
-export function modeAllowsMissingMacCheckpoint(mode){return mode==='--partitioned-recovery';}
+export function modeAllowsMissingMacCheckpoint(mode){return mode==='--partitioned-recovery'||mode==='--snapshot-throughput-repair';}
 // Authorized protected recovery + resumable migration. No credentials are copied or printed.
 import fs from 'node:fs/promises';
 import path from 'node:path';
