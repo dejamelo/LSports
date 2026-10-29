@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,modeAllowsMissingMacCheckpoint,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile,verifiedExistingSnapshotMemoryProfileOption,remoteActionTimeout} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,reusablePartitionedRecoveryImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,modeAllowsMissingMacCheckpoint,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile,verifiedExistingSnapshotMemoryProfileOption,remoteActionTimeout} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('8 GiB stopped-worker recovery distinguishes kernel and V8 OOM by exact worker identity',()=>{
  const base={name:'/adl-homologation-worker-1',state:'exited',id:'a'.repeat(64)};
@@ -86,6 +86,12 @@ test('prepared pressure-repair image is not reused until its matching pressure p
  assert.equal(reusablePreparedImage(ledger,options),undefined);
  result.offlineSnapshotPressureVerified=true;
  assert.equal(reusablePreparedImage(ledger,options),result);
+});
+test('partitioned recovery reuses only the matching prepared image and its verified backup',()=>{
+ const digest='a'.repeat(64),result={status:'ok',image:'adl-worker-partitioned:'+digest.slice(0,24),backup:'/var/backups/adl-partitioned-upgrade-safe',progressPhase:'prepared',workerRestarted:false,offlinePartitionsVerified:true,offlineType38Verified:true};
+ const ledger={steps:{partitioned_image:{status:'ok',result}}};assert.equal(reusablePartitionedRecoveryImage(ledger,digest),result);
+ for(const change of [{image:'adl-worker-partitioned:'+'b'.repeat(24)},{backup:'/tmp/unsafe'},{workerRestarted:true},{offlinePartitionsVerified:false},{offlineType38Verified:false},{progressPhase:'active'}])assert.equal(reusablePartitionedRecoveryImage({steps:{partitioned_image:{status:'ok',result:{...result,...change}}}},digest),undefined);
+ assert.equal(reusablePartitionedRecoveryImage(ledger,'b'.repeat(64)),undefined);
 });
 
 test('prepared source digest matches Python canonical JSON ordering and Unicode escaping',()=>{

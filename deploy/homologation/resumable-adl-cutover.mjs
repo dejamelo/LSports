@@ -184,6 +184,11 @@ export function reusablePreparedImage(ledger,{backup,pipelineRepair=false,durabl
  if(snapshotPressureRepair&&result.offlineSnapshotPressureVerified!==true)return;
  return result;
 }
+export function reusablePartitionedRecoveryImage(ledger,sourceDigest){
+ const result=ledger?.steps?.partitioned_image?.status==='ok'?ledger.steps.partitioned_image.result:undefined;
+ if(!/^[0-9a-f]{64}$/.test(sourceDigest||'')||!result||result.status!=='ok'||result.image!=='adl-worker-partitioned:'+sourceDigest.slice(0,24)||!/^\/var\/backups\/adl-partitioned-upgrade-[A-Za-z0-9_-]+$/.test(result.backup||'')||result.progressPhase!=='prepared'||result.workerRestarted!==false||result.offlinePartitionsVerified!==true||result.offlineType38Verified!==true)return;
+ return result;
+}
 export async function run(args){
  const requestedMode=args.at(-1);
  const indexedPublicationRepair=requestedMode==='--indexed-publication-repair';
@@ -478,7 +483,7 @@ export async function run(args){
      repairOptions.requiredApiSourceCompatibilityVerified=readerCompatibilityVerified;
     }
     const sourceDigest=canonicalSourceDigest(files);
-    const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup,sourceDigest}):undefined;
+    const reusedPrepared=snapshotMemoryRepair?reusablePreparedImage(ledger,{...repairOptions,backup:repairOptions.checkpointRepairBackup,sourceDigest}):args[4]==='--partitioned-recovery'?reusablePartitionedRecoveryImage(ledger,sourceDigest):undefined;
     const prepared=reusedPrepared?(emit({stage:'prepared_image_reuse',status:'reused',image:reusedPrepared.image,backup:reusedPrepared.backup,workerStarted:false,workerRestarted:false}),reusedPrepared):await remote('upgrade_partitioned',{phase:'prepare',files,baseHashes,...repairOptions});
     if(repairOptions.pipelineRepair&&prepared.offlinePipelineLoadVerified!==true)throw Error('PIPELINE_LOAD_OFFLINE_UNVERIFIED_NO_STOP');
     if(snapshotMemoryRepair&&prepared.offlineSnapshotMemoryVerified!==true)throw Error('SNAPSHOT_MEMORY_OFFLINE_UNVERIFIED');
@@ -492,7 +497,7 @@ export async function run(args){
     if(fullMode&&prepared.offlineFullRecoveryVerified!==true)throw Error('FULL_RECOVERY_OFFLINE_UNVERIFIED');
     if(distributionMode&&prepared.offlinePropagationVerified!==true)throw Error('DISTRIBUTION_PROPAGATION_TEST_UNVERIFIED');
     ledger.steps[throughputMode?'throughput_image':nullableMode?'nullable_markets_image':supplierMode?'supplier_order_image':fullMode?'full_image':distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
-    const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair||fullMode?[2]:[]});const fresh=freshRows.find(r=>r.operation==='cutover.audit');
+    const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair||fullMode||modeAllowsMissingMacCheckpoint(args[4])?[2]:[]});const fresh=freshRows.find(r=>r.operation==='cutover.audit');
     if(!macAuditProvesStopped(fresh,{allowMissingCheckpoint:snapshotMemoryRepair||fullMode||modeAllowsMissingMacCheckpoint(args[4])}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     if(['--supplier-order-rollback','--nullable-markets-rollback','--recovery-throughput-rollback'].includes(args[4])){const result=await remote('upgrade_partitioned',{phase:'rollback',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});ledger.steps[throughputMode?'throughput_rollback':nullableMode?'nullable_markets_rollback':'supplier_order_rollback']={status:'ok',result};await save();return;}
     let activationAudit=fresh;
