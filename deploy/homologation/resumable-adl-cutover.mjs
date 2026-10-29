@@ -59,6 +59,7 @@ export function macAuditProvesStopped(audit,{allowMissingCheckpoint=false}={}){
  if(audit?.status==='ok'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true)return true;
  return allowMissingCheckpoint&&audit?.status==='blocked'&&audit.matchingWorkerProcesses===0&&audit.workerLockAbsent===true&&audit.processes?.status==='ok'&&audit.processes?.matching===0&&Array.isArray(audit.locks)&&audit.locks.length===0&&audit.blockers?.length===1&&audit.blockers[0]?.stage==='checkpoint'&&audit.blockers[0]?.reason==='ENOENT'&&audit.journalCount>=1;
 }
+export function modeAllowsMissingMacCheckpoint(mode){return mode==='--partitioned-recovery';}
 // Authorized protected recovery + resumable migration. No credentials are copied or printed.
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -290,7 +291,7 @@ export async function run(args){
    const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair||args[4]==='--full-recovery'||args[4]==='--snapshot-validation-report'?[2]:[]});
    const mac=rows.find(r=>r.operation==='cutover.audit');
    const handoff=await protectedJson(path.join(ledger.steps.journal_export.result.destination,'handoff.json'));
-   if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:snapshotMemoryRepair||args[4]==='--full-recovery'||args[4]==='--snapshot-validation-report'}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+   if(!macAuditProvesStopped(mac,{allowMissingCheckpoint:snapshotMemoryRepair||args[4]==='--full-recovery'||args[4]==='--snapshot-validation-report'||modeAllowsMissingMacCheckpoint(args[4])}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
    if(args[4]==='--startup-report'){
     stage='startup_report';
     const {createHash}=await import('node:crypto');
@@ -492,7 +493,7 @@ export async function run(args){
     if(distributionMode&&prepared.offlinePropagationVerified!==true)throw Error('DISTRIBUTION_PROPAGATION_TEST_UNVERIFIED');
     ledger.steps[throughputMode?'throughput_image':nullableMode?'nullable_markets_image':supplierMode?'supplier_order_image':fullMode?'full_image':distributionMode?'distribution_image':'partitioned_image']={status:'ok',at:new Date().toISOString(),result:prepared};await save();
     const freshRows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair||fullMode?[2]:[]});const fresh=freshRows.find(r=>r.operation==='cutover.audit');
-    if(!macAuditProvesStopped(fresh,{allowMissingCheckpoint:snapshotMemoryRepair||fullMode}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+    if(!macAuditProvesStopped(fresh,{allowMissingCheckpoint:snapshotMemoryRepair||fullMode||modeAllowsMissingMacCheckpoint(args[4])}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     if(['--supplier-order-rollback','--nullable-markets-rollback','--recovery-throughput-rollback'].includes(args[4])){const result=await remote('upgrade_partitioned',{phase:'rollback',files,baseHashes,handoff,freshAuditAt:fresh.capturedAt,...repairOptions});ledger.steps[throughputMode?'throughput_rollback':nullableMode?'nullable_markets_rollback':'supplier_order_rollback']={status:'ok',result};await save();return;}
     let activationAudit=fresh;
     if(snapshotMemoryRepair){
@@ -500,7 +501,7 @@ export async function run(args){
      if(verified.offlineRestoreVerified!==true)throw Error('OOM_PERSISTED_DATA_NOT_VERIFIED_NO_START');
      ledger.steps.snapshot_memory_data={status:'ok',result:verified};await save();
      const rows=await command(process.execPath,['--import','tsx','--env-file-if-exists=.env',auditEntrypoint],undefined,45000,false,false,{stage,allowExitCodes:snapshotMemoryRepair?[2]:[]});activationAudit=rows.find(r=>r.operation==='cutover.audit');
-     if(!macAuditProvesStopped(activationAudit,{allowMissingCheckpoint:snapshotMemoryRepair||fullMode}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
+     if(!macAuditProvesStopped(activationAudit,{allowMissingCheckpoint:snapshotMemoryRepair||fullMode||modeAllowsMissingMacCheckpoint(args[4])}))throw Error('FRESH_MAC_ABSENCE_AUDIT_FAILED');
     }
     const activated=await remote('upgrade_partitioned',{phase:'activate',files,baseHashes,handoff,freshAuditAt:activationAudit.capturedAt,...repairOptions});
     ledger.steps[throughputMode?'throughput_upgrade':nullableMode?'nullable_markets_upgrade':supplierMode?'supplier_order_upgrade':fullMode?'full_upgrade':distributionMode?'distribution_upgrade':'partitioned_upgrade']={status:'ok',at:new Date().toISOString(),result:activated};await save();

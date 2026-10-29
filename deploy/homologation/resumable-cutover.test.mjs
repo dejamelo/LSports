@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile,verifiedExistingSnapshotMemoryProfileOption,remoteActionTimeout} from './resumable-adl-cutover.mjs';
+import {step,validateFeeds,persistenceExpectedImage,resolveAuditEntrypoint,reusablePreparedImage,canonicalSourceDigest,pinnedResumePreparation,macAuditProvesStopped,modeAllowsMissingMacCheckpoint,stoppedEightGiBWorkerFailure,verifiedSnapshotMemorySourceBackup,verifiedInstalledSnapshotMemoryProfile,verifiedExistingSnapshotMemoryProfileOption,remoteActionTimeout} from './resumable-adl-cutover.mjs';
 import path from 'node:path';
 test('8 GiB stopped-worker recovery distinguishes kernel and V8 OOM by exact worker identity',()=>{
  const base={name:'/adl-homologation-worker-1',state:'exited',id:'a'.repeat(64)};
@@ -56,6 +56,7 @@ test('protected full recovery timeout covers the measured checkpoint and publica
 test('missing local checkpoint only counts as stopped for recovery when every process and lock is absent',()=>{
  const report={status:'blocked',matchingWorkerProcesses:0,workerLockAbsent:true,processes:{status:'ok',matching:0},locks:[],blockers:[{stage:'checkpoint',reason:'ENOENT'}],journalCount:1};
  assert.equal(macAuditProvesStopped(report),false);assert.equal(macAuditProvesStopped(report,{allowMissingCheckpoint:true}),true);
+ assert.equal(modeAllowsMissingMacCheckpoint('--partitioned-recovery'),true);assert.equal(modeAllowsMissingMacCheckpoint('--recover-and-cutover'),false);
  for(const changed of [{matchingWorkerProcesses:1},{workerLockAbsent:false},{locks:[{}]},{journalCount:0},{blockers:[{stage:'checkpoint',reason:'INVALID'}]}])assert.equal(macAuditProvesStopped({...report,...changed},{allowMissingCheckpoint:true}),false);
 });
 test('completed stages are reused; failure stays pending and does not erase previous results',async()=>{
