@@ -1,6 +1,7 @@
 import PlatformOverview from "./PlatformOverview";
 import {useAdminIdleSession,announceAdminSession,type AdminSessionInfo} from "./useAdminIdleSession";
 import OperationWorkspace from "./OperationWorkspace";
+import SportsbookAppearance from "./SportsbookAppearance";
 import { useEffect, useState, useRef } from "react";
 import type { FormEvent } from "react";
 import {
@@ -417,6 +418,7 @@ export default function ControlPanel() {
               { name: "Credenciales", icon: KeyRound },
               { name: "Riesgo", icon: Activity },
               { name: "Sportsbook", icon: Activity },
+              { name: "Apariencia del sportsbook", icon: Activity },
               { name: "Billetes", icon: ScrollText },
               { name: "Terminales", icon: Users },
               { name: "Acceso", icon: KeyRound },
@@ -713,6 +715,7 @@ export default function ControlPanel() {
                     onNotice={setNotice}
                     onBack={() => setTab("Resumen")}
                   />
+                  {tab === "Apariencia del sportsbook" && <SportsbookAppearance clientId={client.id} api={api} onError={setError} onNotice={setNotice} />}
                   {tab === "Configuración" && (
                     <section className="control-card control-form">
                       <h2>Configuración del cliente</h2>

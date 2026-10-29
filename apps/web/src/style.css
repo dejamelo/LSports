@@ -1,7 +1,14 @@
 :root {
+  --theme-primary: #c9f464;
+  --theme-secondary: #253a31;
+  --theme-background: #101619;
+  --theme-surface: #151d21;
+  --theme-text: #e8edef;
+  --theme-odds-button: #202a2f;
+  --theme-selected: #c9f464;
   font-family: "DM Sans", Arial, sans-serif;
-  color: #e8edef;
-  background: #101619;
+  color: var(--theme-text);
+  background: var(--theme-background);
   font-synthesis: none;
   font-size: 14px;
 }
@@ -879,6 +886,28 @@ footer {
 .not-found a {
   color: #c7ef77;
 }
+/* Per-client published palette. State remains textual/icon based: suspended and
+   unavailable odds keep their explicit status treatment and never rely on hue alone. */
+body { color: var(--theme-text); background: var(--theme-background); }
+.header, .betslip { background: var(--theme-surface); }
+.sidebar { background: var(--theme-background); }
+.event-card { background: var(--theme-surface); }
+.event-league, .search, .slip-summary { background: var(--theme-surface); }
+.header nav .active, .tabs button.current, .tabs button.current:after { color: var(--theme-primary); }
+.header nav .active:after, .tabs button.current:after { background: var(--theme-primary); }
+.odds-row button { background: var(--theme-odds-button); }
+.odds-row button.picked, .sport.selected { background: var(--theme-selected); border-color: var(--theme-primary); }
+.brand-icon, .simulate, .hero button { background: var(--theme-primary); }
+.hero, .featured-match { background: var(--theme-secondary); }
+.principal-match, .competition-group, .competition-group>h3 { background: var(--theme-surface); }
+.featured-odds button, .principal-odds button { background: var(--theme-odds-button); }
+.featured-odds button[aria-pressed=true], .principal-odds button[aria-pressed=true] { background: var(--theme-selected); }
+.featured-odds button[aria-pressed=true], .principal-odds button[aria-pressed=true] { color:#192415; }
+.featured-odds button[aria-pressed=true]>span, .featured-odds button[aria-pressed=true]>strong,
+.principal-odds button[aria-pressed=true]>span, .principal-odds button[aria-pressed=true]>strong { color:#192415; }
+.sport.selected { background:var(--theme-selected); color:#192415; }
+.sport.selected small { color:#40562D; }
+button:focus-visible, a:focus-visible, input:focus-visible { outline-color: var(--theme-primary); }
 @media (min-width: 1450px) {
   main {
     padding-left: 38px;

@@ -26,10 +26,13 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual(dst.stat().st_mode&0o777,0o600);db.close()
     def test_schema_gate_detects_change(self):
         db=sqlite3.connect(':memory:');db.execute('CREATE TABLE tickets(id)');before=m.schema(db);db.execute('ALTER TABLE tickets ADD COLUMN unexpected');self.assertNotEqual(before,m.schema(db));db.close()
-    def test_only_reviewed_terminal_table_addition_allowed(self):
-        db=sqlite3.connect(':memory:');db.execute('CREATE TABLE operations(id TEXT PRIMARY KEY)');old=m.schema(db)
+    def test_only_reviewed_additive_panel_tables_allowed(self):
+        db=sqlite3.connect(':memory:');db.execute('CREATE TABLE operations(id TEXT PRIMARY KEY)');db.execute('CREATE TABLE clients(id TEXT PRIMARY KEY)');old=m.schema(db)
         db.execute('CREATE TABLE operation_terminals(operation_id TEXT NOT NULL REFERENCES operations(id),terminal_id TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(operation_id,terminal_id))')
-        self.assertEqual(m.compatible_schema(old,m.schema(db)),['operation_terminals'])
+        before_with_terminal=m.schema(db)
+        db.execute('CREATE TABLE client_sportsbook_themes(client_id TEXT PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,draft TEXT NOT NULL,published TEXT NOT NULL,revision INTEGER NOT NULL,updated TEXT NOT NULL)')
+        self.assertEqual(m.compatible_schema(before_with_terminal,m.schema(db)),['client_sportsbook_themes'])
+        self.assertEqual(m.compatible_schema(old,m.schema(db)),['client_sportsbook_themes','operation_terminals'])
         db.execute('CREATE TABLE other(secret)')
         with self.assertRaisesRegex(RuntimeError,'UNREVIEWED_SCHEMA_ADDITION'):m.compatible_schema(old,m.schema(db))
         db.close()

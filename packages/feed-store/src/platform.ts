@@ -31,6 +31,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { root } from "./index.js";
+import { defaultSportsbookTheme, validateSportsbookTheme, ThemeValidationError, type SportsbookTheme } from "./sportsbook-theme.js";
 export const ADMIN_IDLE_TIMEOUT_MS=300000;
 const scrypt = promisify(scryptCallback);
 export function platformEnabled() {
@@ -218,6 +219,7 @@ export class PlatformStore {
       CREATE TABLE IF NOT EXISTS operation_sessions(hash TEXT PRIMARY KEY,operation_id TEXT NOT NULL,client_id TEXT NOT NULL,currency TEXT NOT NULL,player_id TEXT NOT NULL,channel TEXT NOT NULL,terminal_id TEXT,expires INTEGER NOT NULL,credential_id TEXT NOT NULL REFERENCES operation_credentials(id),FOREIGN KEY(operation_id,client_id,currency) REFERENCES operations(id,client_id,currency));
       CREATE TABLE IF NOT EXISTS operation_embed_keys(embed_hash TEXT PRIMARY KEY,credential_id TEXT NOT NULL REFERENCES operation_credentials(id));
       CREATE TABLE IF NOT EXISTS login_limits(key TEXT PRIMARY KEY,attempts INTEGER NOT NULL,reset_at INTEGER NOT NULL);`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS client_sportsbook_themes(client_id TEXT PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,draft TEXT NOT NULL,published TEXT NOT NULL,revision INTEGER NOT NULL,updated TEXT NOT NULL);`);
     // Adopt the shorter idle policy for existing sessions once on opening.
     // Reads never renew; the worker never authenticates administrative sessions.
     this.db.prepare("UPDATE sessions SET expires=? WHERE expires>?").run(this.now()+ADMIN_IDLE_TIMEOUT_MS,this.now()+ADMIN_IDLE_TIMEOUT_MS);
@@ -544,6 +546,58 @@ export class PlatformStore {
         "No tenés permiso para esta operación.",
         403,
       );
+  }
+  private checkedTheme(value: unknown): SportsbookTheme {
+    try { return validateSportsbookTheme(value); }
+    catch (error) {
+      if (error instanceof ThemeValidationError) throw new PlatformError(error.code, error.message, 400);
+      throw error;
+    }
+  }
+  sportsbookTheme(actor: Admin, clientId: string) {
+    this.authorize(actor, clientId);
+    if (!this.client(clientId)) throw new PlatformError("CLIENT_NOT_FOUND", "Cliente no encontrado.", 404);
+    const row = this.db.prepare("SELECT draft,published,revision,updated FROM client_sportsbook_themes WHERE client_id=?").get(clientId) as {draft:string;published:string;revision:number;updated:string}|undefined;
+    return row ? { clientId, draft: JSON.parse(row.draft), published: JSON.parse(row.published), revision: Number(row.revision), updatedAt: row.updated } : { clientId, draft: { ...defaultSportsbookTheme }, published: { ...defaultSportsbookTheme }, revision: 0, updatedAt: null };
+  }
+  publishedSportsbookTheme(clientId: string): SportsbookTheme {
+    const row = this.db.prepare("SELECT published FROM client_sportsbook_themes WHERE client_id=?").get(clientId) as {published:string}|undefined;
+    if (!row) return { ...defaultSportsbookTheme };
+    try { return this.checkedTheme(JSON.parse(row.published)); }
+    catch { return { ...defaultSportsbookTheme }; }
+  }
+  saveSportsbookThemeDraft(actor: Admin, clientId: string, input: unknown) {
+    this.authorize(actor, clientId);
+    const draft = this.checkedTheme(input);
+    if (!this.client(clientId)) throw new PlatformError("CLIENT_NOT_FOUND", "Cliente no encontrado.", 404);
+    return this.transaction(() => {
+      const current = this.sportsbookTheme(actor, clientId);
+      const revision = current.revision + 1, updated = new Date(this.now()).toISOString();
+      this.db.prepare("INSERT INTO client_sportsbook_themes(client_id,draft,published,revision,updated) VALUES(?,?,?,?,?) ON CONFLICT(client_id) DO UPDATE SET draft=excluded.draft,revision=excluded.revision,updated=excluded.updated").run(clientId, JSON.stringify(draft), JSON.stringify(current.published), revision, updated);
+      this.audit(actor.id, clientId, "sportsbook.theme.draft", { revision });
+      return this.sportsbookTheme(actor, clientId);
+    });
+  }
+  publishSportsbookTheme(actor: Admin, clientId: string, input?: unknown) {
+    this.authorize(actor, clientId);
+    const supplied = input === undefined ? undefined : this.checkedTheme(input);
+    if (!this.client(clientId)) throw new PlatformError("CLIENT_NOT_FOUND", "Cliente no encontrado.", 404);
+    return this.transaction(() => {
+      const current = this.sportsbookTheme(actor, clientId), theme = supplied || current.draft, revision = current.revision + 1, updated = new Date(this.now()).toISOString();
+      this.db.prepare("INSERT INTO client_sportsbook_themes(client_id,draft,published,revision,updated) VALUES(?,?,?,?,?) ON CONFLICT(client_id) DO UPDATE SET draft=excluded.draft,published=excluded.published,revision=excluded.revision,updated=excluded.updated").run(clientId, JSON.stringify(theme), JSON.stringify(theme), revision, updated);
+      this.audit(actor.id, clientId, "sportsbook.theme.published", { revision });
+      return this.sportsbookTheme(actor, clientId);
+    });
+  }
+  restoreDefaultSportsbookTheme(actor: Admin, clientId: string) {
+    this.authorize(actor, clientId);
+    if (!this.client(clientId)) throw new PlatformError("CLIENT_NOT_FOUND", "Cliente no encontrado.", 404);
+    return this.transaction(() => {
+      const theme = { ...defaultSportsbookTheme }, revision = this.sportsbookTheme(actor, clientId).revision + 1, updated = new Date(this.now()).toISOString();
+      this.db.prepare("INSERT INTO client_sportsbook_themes(client_id,draft,published,revision,updated) VALUES(?,?,?,?,?) ON CONFLICT(client_id) DO UPDATE SET draft=excluded.draft,published=excluded.published,revision=excluded.revision,updated=excluded.updated").run(clientId, JSON.stringify(theme), JSON.stringify(theme), revision, updated);
+      this.audit(actor.id, clientId, "sportsbook.theme.default_restored", { revision });
+      return this.sportsbookTheme(actor, clientId);
+    });
   }
   clients(admin: Admin): Client[] {
     return (
@@ -1261,6 +1315,7 @@ export class PlatformStore {
         terminalId: row.terminal_id || undefined,
         operation: this.operation(scope.operationId),
         client: this.client(scope.clientId),
+        theme: this.publishedSportsbookTheme(scope.clientId),
       };
     });
   }

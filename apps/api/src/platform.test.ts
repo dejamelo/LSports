@@ -1761,3 +1761,42 @@ test('password confirmation required; current account only; password change revo
   const audit=(await s.request('/api/control/audit','GET',undefined,fresh)).data;assert(!JSON.stringify(audit).includes('changed-platform-password'));assert(!JSON.stringify(audit).includes('isolated-password-platform'));
  }finally{await s.close();}
 });
+
+test("sportsbook themes are tenant isolated, validated, persistent and bound to the authenticated iframe client", async()=>{
+ const s=await setup();try{
+  const a=await s.create("theme-alpha"),b=await s.create("theme-beta");
+  const alpha=await s.login("theme-alpha@test.example","isolated-client-password"),beta=await s.login("theme-beta@test.example","isolated-client-password");
+  const path=(id:string)=>`/api/control/clients/${id}/sportsbook-theme`;
+  const themeA={primary:"#40C4FF",secondary:"#06253D",background:"#07131D",surface:"#0B1A24",text:"#F5F8FA",oddsButton:"#12232F",selected:"#C9F464"};
+  const themeB={primary:"#C9F464",secondary:"#0D2F25",background:"#07110D",surface:"#101D16",text:"#F0F5F1",oddsButton:"#1D2B22",selected:"#C9F464"};
+  assert.equal((await s.request(path(a.id),"GET",undefined,alpha)).data.published.primary,"#C9F464");
+  assert.equal((await s.request(path(a.id)+"/draft","PUT",{theme:themeA},alpha)).status,200);
+  assert.equal((await s.request(path(a.id)+"/publish","POST",{theme:themeA},alpha)).data.published.primary,"#40C4FF");
+  assert.equal((await s.request(path(b.id)+"/publish","POST",{theme:themeB},beta)).data.published.background,"#07110D");
+  assert.equal((await s.request(path(a.id),"GET",undefined,beta)).status,403);
+  assert.equal((await s.request(path(b.id),"GET",undefined,alpha)).status,403);
+  assert.equal((await s.request(path(a.id),"GET",undefined,s.admin)).data.published.primary,"#40C4FF");
+  const freshAlpha=await s.login("theme-alpha@test.example","isolated-client-password");
+  assert.equal((await s.request(path(a.id),"GET",undefined,freshAlpha)).data.draft.background,"#07131D");
+  assert.equal((await s.request(path(a.id)+"/draft","PUT",{theme:{...themeA,background:"#FFFFFF",surface:"#FFFFFF",text:"#FFFFFF"}},freshAlpha)).status,400);
+  assert.equal((await s.request(path(a.id)+"/draft","PUT",{theme:{...themeA,primary:"url(javascript:alert(1))"}},freshAlpha)).status,400);
+  const key=await s.key(a.id,a.operation.id);
+  const actor=s.platform.session(s.admin.cookie.split("=")[1])!.admin;
+  s.platform.saveTerminal(actor,a.id,a.operation.id,{id:"theme-pos-123",name:"Theme POS",status:"active"});
+  for(const [channel,terminalId] of [["web",undefined],["mobile",undefined],["pos","theme-pos-123"]] as const){
+   const created=await s.request("/api/integration/v1/embed-sessions","POST",{playerId:`theme-player-${channel}`,parentOrigin:"https://theme-alpha.example",channel,terminalId},undefined,key.value);
+   assert.equal(created.status,201);
+   const code=new URL(created.data.iframeUrl).hash.slice(6);
+   if(channel==="web"){
+    // Deliberately send the other tenant's ID; exchange must keep the one-use server record's scope.
+    const exchanged=await s.request("/api/integration/v1/embed-exchange","POST",{clientId:b.id,operationId:a.operation.id,code});assert.equal(exchanged.status,403);
+   }
+   const valid=await s.request("/api/integration/v1/embed-sessions","POST",{playerId:`theme-player-valid-${channel}`,parentOrigin:"https://theme-alpha.example",channel,terminalId},undefined,key.value);
+   const validCode=new URL(valid.data.iframeUrl).hash.slice(6);
+   const session=await s.request("/api/integration/v1/embed-exchange","POST",{clientId:a.id,operationId:a.operation.id,code:validCode});
+   assert.equal(session.status,200);assert.equal(session.data.channel,channel);assert.equal(session.data.theme.primary,"#40C4FF");
+  }
+  const restored=await s.request(path(a.id)+"/restore-default","POST",{},alpha);
+  assert.equal(restored.data.published.primary,"#C9F464");assert.equal(restored.data.draft.text,"#E8EDEF");
+ }finally{await s.close();}
+});

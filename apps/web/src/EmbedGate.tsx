@@ -4,6 +4,18 @@ import { setEmbedAccess, setEmbedContext } from "./sportsbook-api";
 // One exchange even with React StrictMode; the single-use code is removed from
 // browser history immediately and the scoped access token stays in memory only.
 let exchange: Promise<void> | undefined;
+const themeKeys = ["primary", "secondary", "background", "surface", "text", "oddsButton", "selected"] as const;
+function applyPublishedTheme(value: unknown) {
+  if (!value || typeof value !== "object") return;
+  const theme = value as Record<string, unknown>;
+  if (themeKeys.some((key) => typeof theme[key] !== "string" || !/^#[0-9a-fA-F]{6}$/.test(theme[key] as string))) return;
+  const root = document.documentElement;
+  const vars: Record<(typeof themeKeys)[number], string> = {
+    primary: "--theme-primary", secondary: "--theme-secondary", background: "--theme-background",
+    surface: "--theme-surface", text: "--theme-text", oddsButton: "--theme-odds-button", selected: "--theme-selected",
+  };
+  for (const key of themeKeys) root.style.setProperty(vars[key], theme[key] as string);
+}
 function startExchange() {
   if (exchange) return exchange;
   const code = new URLSearchParams(location.hash.slice(1)).get("code");
@@ -21,6 +33,7 @@ function startExchange() {
     const result = await response.json();
     if (!response.ok) throw Error(result.error || "Sesión inválida.");
     setEmbedAccess(result.accessToken);
+    applyPublishedTheme(result.theme);
     setEmbedContext({
       ...result.scope,
       channel: result.channel,

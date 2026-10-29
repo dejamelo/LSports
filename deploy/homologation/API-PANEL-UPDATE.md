@@ -29,7 +29,7 @@ Não importa clientes, operações nem acessos do demo do Mac.
    são consistentes por banco, não uma fotografia atômica entre bancos; o worker
    continua liquidando. Não copia nem modifica volume do feed.
 5. Testa os construtores atuais sobre outra cópia dos bancos, sem rede ou feed.
-   A única adição aprovada é `operation_terminals`, com definição exata e sem alteração nas tabelas existentes. Outras mudanças de esquema/conjunto de bancos bloqueiam ANTES de trocar a API. Isso
+   As únicas adições revisadas são `operation_terminals` e `client_sportsbook_themes`, cada uma comparada com a definição exata e sem alteração nas tabelas existentes. Outras mudanças de esquema/conjunto de bancos bloqueiam ANTES de trocar a API. Isso
    mantém compatibilidade com o worker antigo e rollback sem restaurar dados.
 6. Compara o Compose completo: única diferença permitida é `services.api.image`.
    Conserva todas as definições, volumes, redes, aliases, credenciais e overrides.

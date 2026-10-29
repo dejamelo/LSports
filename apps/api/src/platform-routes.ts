@@ -215,6 +215,18 @@ export function platformRoutes(
   router.patch("/api/control/clients/:id", (req, res) =>
     res.json(platform.updateClient(admin(req, true), req.params.id, body(req))),
   );
+  router.get("/api/control/clients/:id/sportsbook-theme", (req, res) =>
+    res.json(platform.sportsbookTheme(admin(req), req.params.id)),
+  );
+  router.put("/api/control/clients/:id/sportsbook-theme/draft", (req, res) =>
+    res.json(platform.saveSportsbookThemeDraft(admin(req, true), req.params.id, body(req).theme)),
+  );
+  router.post("/api/control/clients/:id/sportsbook-theme/publish", (req, res) =>
+    res.json(platform.publishSportsbookTheme(admin(req, true), req.params.id, body(req).theme)),
+  );
+  router.post("/api/control/clients/:id/sportsbook-theme/restore-default", (req, res) =>
+    res.json(platform.restoreDefaultSportsbookTheme(admin(req, true), req.params.id)),
+  );
   router.get("/api/control/clients/:id/operations", (req, res) =>
     res.json({
       operations: platform.operations(admin(req), req.params.id).map((op) => ({

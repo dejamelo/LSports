@@ -25,10 +25,14 @@ def compatible_schema(before,after):
     old={(r[0],r[1]):r for r in before};new={(r[0],r[1]):r for r in after}
     require(all(new.get(k)==v for k,v in old.items()),'EXISTING_SCHEMA_CHANGED')
     additions=[v for k,v in new.items() if k not in old]
-    expected='CREATE TABLE operation_terminals(operation_id TEXT NOT NULL REFERENCES operations(id),terminal_id TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(operation_id,terminal_id))'
+    expected={
+        'operation_terminals':'CREATE TABLE operation_terminals(operation_id TEXT NOT NULL REFERENCES operations(id),terminal_id TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(operation_id,terminal_id))',
+        'client_sportsbook_themes':'CREATE TABLE client_sportsbook_themes(client_id TEXT PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,draft TEXT NOT NULL,published TEXT NOT NULL,revision INTEGER NOT NULL,updated TEXT NOT NULL)',
+    }
     normalize=lambda s:re.sub(r'\s+','',s or '').lower()
     for item in additions:
-        require(item[:3]==('table','operation_terminals','operation_terminals') and normalize(item[3])==normalize(expected),'UNREVIEWED_SCHEMA_ADDITION')
+        name=item[1]
+        require(item[0]=='table' and item[2]==name and name in expected and normalize(item[3])==normalize(expected.get(name)),'UNREVIEWED_SCHEMA_ADDITION')
     return [r[1] for r in additions]
 def backup_db(source,destination):
     require(not source.is_symlink(),'SYMLINK_DATABASE_REJECTED')

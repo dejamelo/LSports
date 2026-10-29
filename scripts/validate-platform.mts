@@ -140,6 +140,29 @@ try {
   await page
     .getByRole("heading", { name: "Casino de prueba aislada", exact: true })
     .waitFor();
+  await page.getByRole("button", { name: "Apariencia del sportsbook", exact: true }).click();
+  await page.getByRole("heading", { name: "Apariencia del sportsbook", exact: true }).waitFor();
+  await page.getByLabel("Principal", { exact: true }).evaluate((node) => {
+    const input = node as HTMLInputElement;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "#40c4ff");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.getByRole("button", { name: "Guardar borrador", exact: true }).click();
+  await page.getByText("Borrador guardado.", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Publicar", exact: true }).click();
+  await page.getByText("Tema publicado para este cliente.", { exact: true }).waitFor();
+  await page.getByRole("tab", { name: "Web", exact: true }).click();
+  assert.equal(await page.locator(".appearance-preview").evaluate((node) => getComputedStyle(node).getPropertyValue("--theme-primary").trim()), "#40C4FF");
+  await page.screenshot({ path: join(tmpdir(), "adl-theme-preview-web.png"), fullPage: true });
+  await page.getByRole("tab", { name: "Mobile", exact: true }).click();
+  assert.equal(await page.locator(".appearance-preview").evaluate((node) => node.classList.contains("appearance-mobile")), true);
+  await page.screenshot({ path: join(tmpdir(), "adl-theme-preview-mobile.png"), fullPage: true });
+  await page.getByRole("tab", { name: "POS", exact: true }).click();
+  assert.equal(await page.locator(".appearance-preview").evaluate((node) => node.classList.contains("appearance-pos")), true);
+  assert.equal(await page.locator(".appearance-pos .appearance-odds button").first().evaluate((node) => getComputedStyle(node).minHeight), "54px");
+  await page.screenshot({ path: join(tmpdir(), "adl-theme-preview-pos.png"), fullPage: true });
+  await page.getByRole("button", { name: "Sportsbook", exact: true }).click();
   await page
     .getByRole("button", { name: "Nueva operación", exact: true })
     .click();
@@ -232,8 +255,8 @@ try {
   casino.on("pageerror", (e) => errors.push(e.message));
   await casino.goto(parentOrigin);
   const frame = casino.frameLocator("iframe");
-  await frame.getByText("Equipo de prueba A", { exact: true }).waitFor();
-  await frame.locator(".odds-row button").first().click();
+  await frame.getByRole("region", { name: "Ligas principales" }).getByText("Equipo de prueba A", { exact: true }).waitFor();
+  await frame.locator(".principal-odds button:not([disabled])").first().click();
   await frame.getByLabel("Importe simulado (ARS)", { exact: true }).fill("10");
   await frame
     .getByRole("button", { name: "Simular billete", exact: true })
@@ -291,7 +314,7 @@ try {
   await frame
     .getByRole("button", { name: "Armar otro billete de prueba", exact: true })
     .click();
-  await frame.locator(".odds-row button").first().click();
+  await frame.locator(".principal-odds button:not([disabled])").first().click();
   await frame.getByLabel("Importe simulado (ARS)", { exact: true }).fill("10");
   await frame
     .getByRole("button", { name: "Simular billete", exact: true })
@@ -338,6 +361,7 @@ try {
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   );
+  await page.getByRole("button", { name: "Abrir menú de navegación", exact: true }).click();
   await page.getByRole("button", { name: "Resumen", exact: true }).click();
   await page.getByText("Nuevos billetes pausados", { exact: true }).waitFor();
   await page.setViewportSize({ width: 1024, height: 768 });
@@ -417,6 +441,8 @@ try {
         "tablet_1024px",
         "logout_and_assisted_access_recovery",
         "create_client",
+        "client_theme_draft_publish",
+        "web_mobile_pos_theme_previews",
         "create_currency_operation",
         "server_only_key",
         "panel_rotation_old_key_rejected",
