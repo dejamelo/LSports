@@ -99,7 +99,23 @@ export class IndexedFeedStore {
       const existingMarkets = this.db.prepare("SELECT market_id FROM feed_markets WHERE event_id=?");
       const removeMarket = this.db.prepare("DELETE FROM feed_markets WHERE event_id=? AND market_id=?");
       const putMarket = this.db.prepare("INSERT INTO feed_markets(event_id,market_id,body) VALUES(?,?,?) ON CONFLICT(event_id,market_id) DO UPDATE SET body=excluded.body WHERE feed_markets.body IS NOT excluded.body");
-      for (const event of upserts) { this.put(put, existingMarkets, removeMarket, putMarket, event); upsertRows++; changed = true; await yieldIfDue(); }
+      for (const event of upserts) {
+        const lane = event.source;
+        if (lane !== "prematch" && lane !== "inplay") throw Error("INDEX_EVENT_WITHOUT_LANE");
+        const { markets = [], marketDiagnostic: _diagnostic, ...rest } = event;
+        put.run(event.id, lane, event.sport, event.competition?.id ?? null, event.live ? 1 : 0,
+          Date.parse(event.updatedAt || "") || 0, JSON.stringify({ ...rest, markets: [], selections: [] }));
+        upsertRows++; changed = true; await yieldIfDue();
+        const keep = new Set(markets.map(market => market.id));
+        const current = existingMarkets.all(event.id) as { market_id: string }[];
+        for (const row of current) {
+          if (!keep.has(row.market_id)) { removeMarket.run(event.id, row.market_id); await yieldIfDue(); }
+        }
+        for (const market of markets) {
+          putMarket.run(event.id, market.id, JSON.stringify(market));
+          await yieldIfDue();
+        }
+      }
       this.commitMetadata(metadata, changed);
       const beforeCommit = performance.now(); maxSliceObservedMs = Math.max(maxSliceObservedMs, beforeCommit - sliceStarted);
       this.db.exec("COMMIT"); const commitMs = Math.ceil(performance.now() - beforeCommit); maxSliceObservedMs = Math.max(maxSliceObservedMs, commitMs);

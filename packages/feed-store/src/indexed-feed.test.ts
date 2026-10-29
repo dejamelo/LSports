@@ -130,7 +130,7 @@ test("batched snapshot deltas yield to live work and stay invisible until atomic
     release();
     const metrics = await work;
     assert.equal(metrics.upsertRows, 2);
-    assert.equal(metrics.yieldCount, 2);
+    assert.equal(metrics.yieldCount, 4, "each event and its market row must yield within the atomic delta");
     const after = reader.page({ limit: 20, scope: "snapshot", now });
     assert.equal(after.page.revision, before.page.revision + 1);
     assert.deepEqual(after.events.map(row => row.id), ["prematch:1", "prematch:2", "prematch:3"]);
@@ -142,9 +142,13 @@ test("an interrupted batched delta rolls back cleanly on reopen", async () => {
   const writer = new IndexedFeedStore(path);
   writer.rebuild([event("prematch:1", now)], metadata(now));
   try {
-    await assert.rejects(writer.applyDeltaBatched([event("prematch:2", now), event("prematch:3", now)], [], metadata(now), {
+    const partial = event("prematch:2", now);
+    for (let i = 2; i <= 256; i++) partial.markets!.push({ id: `prematch:2:${i}`, name: `market-${i}`, status: 1,
+      selections: [{ id: `prematch:2:${i}:1`, label: "A", odds: 1.8, available: true }] });
+    let yields = 0;
+    await assert.rejects(writer.applyDeltaBatched([partial, event("prematch:3", now)], [], metadata(now), {
       yieldEveryRows: 1,
-      yieldTurn: async () => { throw Error("simulated_interruption"); },
+      yieldTurn: async () => { if (++yields === 4) throw Error("simulated_interruption"); },
     }), /simulated_interruption/);
   } finally { writer.close(); }
   const restored = new IndexedFeedStore(path, true);
@@ -153,7 +157,11 @@ test("an interrupted batched delta rolls back cleanly on reopen", async () => {
     assert.deepEqual(page.events.map(row => row.id), ["prematch:1"]);
     assert.equal(page.page.revision, 1);
     const sql = new DatabaseSync(path, { readOnly: true });
-    try { assert.equal((sql.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check, "ok"); }
+    try {
+      assert.equal((sql.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check, "ok");
+      assert.equal((sql.prepare("SELECT count(*) AS n FROM feed_events WHERE id='prematch:2'").get() as { n: number }).n, 0,
+        "an interruption during market writes must roll back the event and every partial market row");
+    }
     finally { sql.close(); }
   } finally { restored.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -163,14 +171,21 @@ test("representative snapshot-sized delta yields event-loop turns", async () => 
   const writer = new IndexedFeedStore(path);
   try {
     writer.rebuild([], metadata(now));
-    function* snapshotRows() { for (let i = 1; i <= 11_887; i++) yield event(`prematch:${i}`, now); }
+    function* snapshotRows() {
+      for (let i = 1; i <= 11_892; i++) {
+        const row = event(`prematch:${i}`, now);
+        for (let market = 2; market <= 24; market++) row.markets!.push({ id: `${row.id}:${market}`, name: `market-${market}`, status: 1,
+          selections: [{ id: `${row.id}:${market}:1`, label: "A", odds: 1.8, available: true }] });
+        yield row;
+      }
+    }
     let liveTurns = 0;
     const result = await writer.applyDeltaBatched(snapshotRows(), [], metadata(now), {
       yieldEveryRows: 32,
       yieldTurn: async () => { await new Promise<void>(resolve => setImmediate(resolve)); liveTurns++; },
     });
-    assert.equal(result.upsertRows, 11_887);
-    assert.ok(result.yieldCount >= 300);
+    assert.equal(result.upsertRows, 11_892);
+    assert.ok(result.yieldCount >= 8_000, "yield count must include markets, not only event headers");
     assert.equal(liveTurns, result.yieldCount);
     const page = writer.page({ limit: 100, scope: "snapshot-volume", now });
     assert.equal(page.events.length, 100);

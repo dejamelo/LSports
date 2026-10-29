@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import amqp from "amqplib";
 import type { ConsumeMessage } from "amqplib";
-import { safeErrorFrames, session, coalescedPersistence, setSnapshotPersistenceDeferred, waitForSnapshotPersistence } from "./connected.js";
+import { safeErrorFrames, session, coalescedPersistence, setSnapshotPersistenceDeferred, waitForSnapshotPersistence, deferPublicProjection } from "./connected.js";
 import { TradeState, quoteConfirmed } from "./state.js";
 import type { PackageConfig } from "./config.js";
 import { clients } from "./provider.js";
@@ -1002,4 +1002,28 @@ test('timestamp recovery reports parser stages and defers durable checkpoints on
  }};
  await session(pkg,{packages:[pkg],snapshotUrl:'http://isolated',customersUrl:'http://isolated',staleMs:90000,recoveryMs:300000},state,save,abort.signal,{clientFactory:()=>api,connect:(async()=>{throw Error('non-durable path not expected');}) as any,durableConnect:(async()=>connection) as any},'/isolated/inbox.sqlite');
  await pendingCheckpoint;assert.equal(snapshotCalls,2);assert.equal(applyGateSeen,true);assert.deepEqual(timestampStages,['download','validate','apply']);assert.equal(inboxCheckpointDeferredDuringSnapshot(false,state),false);
+});
+
+test('periodic full refresh keeps live processing and public baseline active, reconciles newer AMQP, and finalizes only after complete apply',{timeout:10000},async()=>{
+ const realNow=Date.now;let clock=realNow(),snapshotRuns=0,deliver:(m:ConsumeMessage|null)=>void=()=>{},liveApplied=false,refreshPhaseSeen=false;
+ Date.now=()=>clock;
+ const state=new TradeState(),abort=new AbortController();
+ const channel=Object.assign(new EventEmitter(),{async prefetch(){},async consume(_queue:string,callback:typeof deliver){deliver=callback;return{consumerTag:'periodic-refresh-test'};},ack(){},nack(){assert.fail('valid live update must remain applied');}});
+ const connection=Object.assign(new EventEmitter(),{async createChannel(){return channel;},async close(){connection.emit('close');},quiesce(){}});
+ const pkg:PackageConfig={lane:'prematch',packageId:4511,username:'isolated',password:'',hostname:'unused',vhost:'StmPreMatch',port:5672,tls:false,queue:'_4511_'};
+ const market=(price:string,lastUpdate:Date)=>[{id:10,status:1,bets:[{id:'1',price,status:1,isChanged:0,lastUpdate}]}] as any;
+ const api:ReturnType<typeof clients>={async startDistribution(){},async stopDistribution(){},async distributionStatus(){return{isDistributionOn:true,consumers:[],messagesPerSecond:0,numberMessagesInQueue:0};},async catalog(){return[];},async snapshot(){assert.fail('full snapshot callback expected');},async snapshotFull(sink){
+  snapshotRuns++;const now=Date.now();sink.progress?.({stage:'waiting_http',bytes:100,validatedRows:0,appliedRows:0,lastProgressAt:new Date(now).toISOString()});sink.progress?.({stage:'validate',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date(now).toISOString()});sink.progress?.({stage:'apply',bytes:100,validatedRows:1,appliedRows:0,lastProgressAt:new Date(now).toISOString()});
+  if(snapshotRuns===1){await sink.apply({fixtureId:77,fixture:{status:1,sport:{name:'Football'}},markets:market('2.0',new Date(now-10000))},now);sink.progress?.({stage:'complete',bytes:100,validatedRows:1,appliedRows:1,lastProgressAt:new Date(now).toISOString()});setTimeout(()=>{clock+=300001;deliver({content:Buffer.from(JSON.stringify({Header:{Type:3,MsgGuid:'periodic-live-newer',ServerTimestamp:clock+1000},Body:{Events:[{FixtureId:77,Fixture:{Status:1},Markets:[{Id:10,Status:1,Bets:[{Id:'1',Price:'2.2',Status:1,LastUpdate:new Date(clock+1000).toISOString()}]}]}]}})),properties:{headers:{}},fields:{redelivered:false}} as unknown as ConsumeMessage);},20);return{ids:new Set([77]),rows:1,bytes:100};}
+  refreshPhaseSeen=true;assert.equal(state.connections.prematch.phase,'connected','routine refresh must not mark the verified lane recovering');assert.equal(deferPublicProjection(state),false,'routine refresh must leave indexed projection enabled');
+  for(let n=0;n<100;n++){const bet=state.rows.prematch.get(77)?.markets.get('10')?.bets?.[0];if(bet?.price==='2.2'){liveApplied=true;break;}await new Promise(resolve=>setTimeout(resolve,2));}
+  assert.equal(liveApplied,true,'AMQP processing continues while the periodic snapshot is being applied');
+  await sink.apply({fixtureId:77,fixture:{status:1,sport:{name:'Football'}},markets:market('2.1',new Date(clock-60000))},clock);
+  assert.equal(state.rows.prematch.get(77)?.markets.get('10')?.bets?.[0]?.price,'2.2','older snapshot values cannot overwrite newer live prices');
+  sink.progress?.({stage:'complete',bytes:100,validatedRows:1,appliedRows:1,lastProgressAt:new Date(clock).toISOString()});return{ids:new Set([77]),rows:1,bytes:100};
+ }};
+ try{
+  await session(pkg,{packages:[pkg],snapshotUrl:'http://isolated',customersUrl:'http://isolated',recoveryMs:300000,staleMs:3600000},state,async()=>{if(snapshotRuns===2&&state.connections.prematch.fullSnapshot?.completedAt)setTimeout(()=>abort.abort(),0);},abort.signal,{clientFactory:()=>api,connect:(async()=>connection) as any});
+  assert.equal(snapshotRuns,2);assert.equal(refreshPhaseSeen,true);assert.equal(liveApplied,true);assert.equal(state.connections.prematch.recoveryProgress?.regularSnapshotReady,true);assert.ok(state.connections.prematch.fullSnapshot?.completedAt);
+ }finally{Date.now=realNow;if(!abort.signal.aborted)abort.abort();}
 });

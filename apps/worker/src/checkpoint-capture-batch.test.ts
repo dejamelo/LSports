@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {setTimeout as sleep} from 'node:timers/promises';
-import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,deferPublicProjection,heartbeatPublicationDue,durableInboxBacklog,shouldDeferRoutineSnapshot,checkpointBatchThresholdForLane,INPLAY_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
+import {session,publicationCaptureTurn,coalescedPersistence,checkpointBeforeProjection,deferPublicProjection,heartbeatPublicationDue,durableInboxBacklog,shouldDeferRoutineSnapshot,routineSnapshotDeferral,checkpointBatchThresholdForLane,INPLAY_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,PREMATCH_CHECKPOINT_BATCH_FLUSH_MS} from './connected.js';import {TradeState} from './state.js';import {connectDurableMq,openInbox} from './durable-ingress.mjs';import {persistRegularCheckpoint,streamCheckpoint,restore} from './persistence.js';import {createPublisher} from '@lsports/feed-store';
 const pkg={lane:'prematch',packageId:4511,username:'test',password:'test',hostname:'unused',queue:'unused',vhost:'unused',tls:false,port:5672} as any;
 test('PreMatch commits a bounded durable delta batch inside the public freshness window',()=>{assert.equal(PREMATCH_CHECKPOINT_BATCH_THRESHOLD,512);assert.equal(PREMATCH_CHECKPOINT_BATCH_FLUSH_MS,5000);});
 test('InPlay full checkpoint cadence does not rewrite the multi-GB state every 32 control rows',()=>{assert.equal(INPLAY_CHECKPOINT_BATCH_THRESHOLD,4096);assert.equal(checkpointBatchThresholdForLane('prematch'),512);assert.equal(checkpointBatchThresholdForLane('inplay'),4096);});
@@ -23,6 +23,12 @@ test('durable backlog reserves full-state serialization for retireable checkpoin
  assert.equal(shouldDeferRoutineSnapshot(false,900000),false,'initial/reconnect baseline remains mandatory');
  assert.equal(shouldDeferRoutineSnapshot(true,PREMATCH_CHECKPOINT_BATCH_THRESHOLD+1),true);
  assert.equal(shouldDeferRoutineSnapshot(true,PREMATCH_CHECKPOINT_BATCH_THRESHOLD),false);
+ const due=300000, longHandoffAt=620000, backlog=PREMATCH_CHECKPOINT_BATCH_THRESHOLD+1;
+ const deferredUntil=routineSnapshotDeferral(true,backlog,due,longHandoffAt);
+ assert.equal(deferredUntil,longHandoffAt+60000,'a snapshot whose due time elapsed during a long handoff must be deferred again');
+ assert.equal(routineSnapshotDeferral(true,backlog,deferredUntil,deferredUntil-1),undefined,'do not retry before the new deferral expires');
+ assert.equal(routineSnapshotDeferral(true,backlog,deferredUntil,deferredUntil),deferredUntil+60000,'recheck and defer again while the backlog remains');
+ assert.equal(routineSnapshotDeferral(true,PREMATCH_CHECKPOINT_BATCH_THRESHOLD,due,longHandoffAt),undefined,'allow the refresh once durable backlog is below the threshold');
  assert.equal(heartbeatPublicationDue(state,0,120000,false,false),false,'unchanged state needs no multi-gigabyte heartbeat rewrite');
  assert.equal(heartbeatPublicationDue(state,0,120000,false,true),true,'a mutation still enables the recovery heartbeat');
 });
@@ -68,6 +74,8 @@ test('only active snapshot mutation defers public projection; a recovering lane 
  state.set('prematch',{session:undefined,recoveryProgress:undefined,phase:'starting'});
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString()}});assert.equal(deferPublicProjection(state),true);
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http'}});assert.equal(deferPublicProjection(state),true);
+ state.set('prematch',{phase:'connected',recoveryProgress:{stage:'idle',startedAt:recoveryAt,regularSnapshotReady:true},fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'apply',appliedRows:1}});assert.equal(deferPublicProjection(state),false,'periodic refreshes leave indexed publication open against the live baseline');
+ state.set('prematch',{phase:'starting',recoveryProgress:undefined,fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'waiting_http',appliedRows:0}});
  state.set('prematch',{lastSnapshotErrorAt:new Date().toISOString()});assert.equal(deferPublicProjection(state),false,'a rejected request before apply releases the projection gate');
  state.set('prematch',{fullSnapshot:{method:'disk_spool_two_pass',startedAt:new Date().toISOString(),stage:'apply',bytes:10,validatedRows:1,appliedRows:1,lastProgressAt:new Date().toISOString()}});
  assert.equal(deferPublicProjection(state),true);
