@@ -136,7 +136,8 @@ export async function writeJsonObject(file: Awaited<ReturnType<typeof open>>, va
 export async function writeJsonRecord(file:Awaited<ReturnType<typeof open>>,record:Record<string,unknown>){
  let bytes=0;
  const bounded={writeFile:async(text:string)=>{bytes+=Buffer.byteLength(text);if(bytes>32*1024*1024)throw Error('checkpoint_record_limit');await file.writeFile(text);}};
- await writeJsonObject(bounded as Awaited<ReturnType<typeof open>>,record);
+ const encoded=await writeJsonObject(bounded as Awaited<ReturnType<typeof open>>,record);
+ return {bytes:encoded.bytes,serializeMs:encoded.serializeMs,writeAwaitMs:encoded.writeAwaitMs};
 }
 // One local worker writes a single atomic projection; API only reads. Never store credentials here.
 export function createPublisher(path = statePath()) {

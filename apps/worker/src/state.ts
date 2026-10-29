@@ -150,6 +150,21 @@ const defined = <T extends object>(value: T) =>
   Object.fromEntries(
     Object.entries(value).filter(([, v]) => v !== undefined),
   ) as Partial<T>;
+// Snapshot refreshes repeat a large provider object graph. Compare values only
+// at fields that are about to be merged so a byte-identical quote can still
+// refresh row-level observation metadata without dirtying its market payload.
+function samePersistedValue(left:unknown,right:unknown,seen=new WeakMap<object,WeakSet<object>>()):boolean{
+  if(Object.is(left,right))return true;
+  if(left instanceof Date||right instanceof Date)return left instanceof Date&&right instanceof Date&&left.getTime()===right.getTime();
+  if(!left||!right||typeof left!=='object'||typeof right!=='object')return false;
+  let matches=seen.get(left);if(matches?.has(right))return true;if(!matches){matches=new WeakSet<object>();seen.set(left,matches);}matches.add(right);
+  if(Array.isArray(left)||Array.isArray(right))return Array.isArray(left)&&Array.isArray(right)&&left.length===right.length&&left.every((value,index)=>samePersistedValue(value,right[index],seen));
+  const leftKeys=Object.keys(left),rightKeys=Object.keys(right);if(leftKeys.length!==rightKeys.length)return false;
+  return leftKeys.every(key=>Object.prototype.hasOwnProperty.call(right,key)&&samePersistedValue((left as Record<string,unknown>)[key],(right as Record<string,unknown>)[key],seen));
+}
+function definedFieldsChanged(previous:object|undefined,incoming:object):boolean{
+  return Object.entries(incoming).some(([key,value])=>value!==undefined&&(!previous||!samePersistedValue((previous as Record<string,unknown>)[key],value)));
+}
 export class TradeState {
   private mutationGenerationValue = 0;
   get mutationGeneration() { return this.mutationGenerationValue; }
@@ -328,7 +343,7 @@ export class TradeState {
       const snapshotObservations=new Map<string,import("@lsports/contracts").SnapshotQuoteObservation>();
       const isoTimes=new Map<number,string>();const isoTime=(n:number)=>{let value=isoTimes.get(n);if(value===undefined){value=new Date(n).toISOString();if(isoTimes.size<1024)isoTimes.set(n,value);}return value;};
       const key = event.outright ? `outright:${event.outright.competitionId}:${event.fixtureId}` : event.fixtureId;
-      this.markProjectionDirty(lane, key,(event.markets||[]).filter(m=>m.id!==undefined).map(m=>String(m.id)));
+      const changedMarketIds:string[]=[];
       let row = this.rows[lane].get(key);
       if (!row) {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };
@@ -393,11 +408,13 @@ export class TradeState {
       else if (event.livescore) this.metrics[lane].staleUpdatesIgnored++;
       const settlementSource = event.marketRecovery ? "snapshot.outright.markets" : event.marketMessageType ? `amqp.${event.marketMessageType}` as const : undefined;
       if (settlementSource) for (const counts of event.settlementInspection?.counts || []) {
+        changedMarketIds.push(String(counts.marketId));
         const evidence = (row.settlementMarkets ||= new Map()).get(String(counts.marketId)) || {};
         evidence[settlementSource] = {...counts, receivedAt: isoTime(at)};
         row.settlementMarkets.set(String(counts.marketId), evidence);
       }
       for(const rejection of event.settlementInspection?.rejected || []) {
+        changedMarketIds.push(String(rejection.marketId));
         (row.deferredTimestampBets ||= new Map()).set(`${rejection.marketId}:${rejection.selectionId}`, {...rejection,receivedAt:isoTime(at)});
         row.freshBets?.delete(`${rejection.marketId}:${rejection.selectionId}`);
         (row.quoteInvalidations ||= new Set()).add(`${rejection.marketId}:${rejection.selectionId}`);
@@ -411,8 +428,12 @@ export class TradeState {
         const key = String(market.id);
         const old = row.markets.get(key);
         const marketTime = row.marketAt.get(key) || 0;
+        const incomingMarket=defined(market);
+        const incomingMarketFields={...incomingMarket};delete incomingMarketFields.bets;
+        let marketChanged=!old;
+        if(at>=marketTime&&definedFieldsChanged(old,incomingMarketFields))marketChanged=true;
         const merged: Market =
-          at >= marketTime ? { ...old, ...defined(market) } : { ...old };
+          at >= marketTime ? { ...old, ...incomingMarket } : { ...old };
         const bets = new Map((old?.bets || []).map((b) => [b.id, b]));
         for (const bet of market.bets || []) {
           const betKey = `${key}:${bet.id}`;
@@ -436,7 +457,9 @@ export class TradeState {
             field.timestamp.orderingSafe && Number.isFinite(Number(bet.price)) && Number(bet.price)>1 &&
             BigInt(order)>BigInt(previousOrder) && t<=at+300000 && at>=Date.parse(recovery.preparedAt);
           if(recovering && !validatesRecovery) continue;
+          if(validatesReplay||validatesRecovery||!older&&row.deferredTimestampBets?.has(betKey))marketChanged=true;
           if (settlementSource && field) {
+            changedMarketIds.push(key);
             const observation: import("@lsports/contracts").SettlementObservation = {
               source: settlementSource, receivedAt: isoTime(at), versionAt: isoTime(t),
               field: field.field, code: field.code, timestamp: field.timestamp,
@@ -472,6 +495,8 @@ export class TradeState {
             if(validatesRecovery) {recovery.status="validated_amqp";recovery.validatedAt=isoTime(at);}
             const incoming=defined(bet);
             const settlement=Number.isInteger(bet.settlement)?bet.settlement:previousBet?.settlement;
+            const betChanged=definedFieldsChanged(previousBet,incoming)||!Object.is(previousBet?.settlement,settlement);
+            if(betChanged)marketChanged=true;
             // Full snapshots commonly repeat the exact persisted quote. Reuse
             // that immutable-by-convention record instead of retaining a second
             // object for every selection during checkpoint recovery.
@@ -510,10 +535,17 @@ export class TradeState {
             if (row.marketReceipt) row.marketReceipt.staleBetUpdates++;
           }
         }
-        merged.bets = [...bets.values()];
-        row.markets.set(key, merged);
-        row.marketAt.set(key, Math.max(at, marketTime));
+        if(marketChanged){
+          merged.bets = [...bets.values()];
+          row.markets.set(key, merged);
+          row.marketAt.set(key, Math.max(at, marketTime));
+          changedMarketIds.push(key);
+        }
       }
+      // Even a repeated snapshot can update small receipt/observation fields.
+      // Persist those as an empty market-scoped merge instead of reserializing
+      // every unchanged selection under this fixture.
+      this.markProjectionDirty(lane,key,[...new Set(changedMarketIds)]);
     }
   }
   beginPartitionedSnapshot(lane:Lane){

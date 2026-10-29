@@ -863,11 +863,30 @@ export async function session(
             // validated spool is read. Inbox rows remain durable in SQLite.
             if(durable){await processing;if(backgroundCommit)await backgroundCommit;}
             await save();
+            let periodicSnapshotApplications:Promise<void>=Promise.resolve();
             const applySnapshotBatch=async(rows:import('./state.js').TradeEvent[],at:number)=>{
               if(durable&&!periodicRefresh){snapshotApplicationActive=true;setDurableSnapshotApplicationActive(state,true,pkg.lane);}
               if(!snapshotStatePreparation)throw new Error('Snapshot apply began without scheduler admission');
               await snapshotStatePreparation;
               if(!periodicRefresh)await waitForInboxCapacity();
+              if(periodicRefresh){
+                // Keep the routine snapshot's ordered apply stream independent
+                // from the durable AMQP replay chain. Both streams still enter
+                // the same mutation gate, so quote versions reconcile normally;
+                // the finite barrier before finalization orders removals after
+                // all messages and snapshot rows received during this refresh.
+                const applied=periodicSnapshotApplications.then(async()=>{for(let index=0;index<rows.length;index++){
+                  await snapshotApplyTurn(Promise.resolve(),state,()=>{requireOpen();state.apply(lane,[{...rows[index],marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{
+                  if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,periodic:true,atUTC:new Date().toISOString()}));
+                  });
+                  // Yield between fixture turns so the durable replay actor can
+                  // checkpoint live rows while this validated refresh continues.
+                  await nextTurn();
+                }});
+                periodicSnapshotApplications=applied;
+                await applied;
+                return;
+              }
               const prefix=processing;const applied=(async()=>{for(let index=0;index<rows.length;index++)await snapshotApplyTurn(index===0?prefix:Promise.resolve(),state,()=>{requireOpen();state.apply(lane,[{...rows[index],marketRecovery:true}],at,{source:'snapshot',receivedAt:Date.now()});},(waitStage,waitedMs)=>{
                 if(waitStage!=='completed'||waitedMs>=1000)console.info(JSON.stringify({operation:'snapshot.apply_wait',lane,stage:waitStage,waitedMs,batchRows:rows.length,rowInBatch:index+1,atUTC:new Date().toISOString()}));
               });})();processing=applied;await applied;
@@ -918,7 +937,11 @@ export async function session(
               if(snapshotRequestAdmitted)state.set(lane,{fullSnapshot:{...state.connections[lane].fullSnapshot!,stage:progress.stage,bytes:progress.bytes,validatedRows:progress.validatedRows,appliedRows:progress.appliedRows,lastProgressAt:progress.lastProgressAt,...(progress.readBytes!==undefined?{readBytes:progress.readBytes}:{}),...(progress.stageElapsedMs!==undefined?{stageElapsedMs:progress.stageElapsedMs}:{}),...(progress.stageDurationsMs?{stageDurationsMs:progress.stageDurationsMs}:{})}});
               if(Date.now()-lastProgressLog>=10000||progress.stage==='complete'||progress.stage==='apply'&&progress.appliedRows>0&&progress.appliedRows<=16){lastProgressLog=Date.now();console.info(JSON.stringify({lane,operation:'snapshot.events',status:'full_spool_progress',...progress}));}
             },apply:async(row,at)=>applySnapshotBatch([row],at),applyBatch:applySnapshotBatch});
-            requireOpen();await processing;requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
+            requireOpen();
+            if(periodicRefresh){
+              const finalizeBarrier=processing.then(async()=>{await periodicSnapshotApplications;});processing=finalizeBarrier;await finalizeBarrier;
+            }else await processing;
+            requireOpen();await state.exclusive(()=>state.finishPartitionedSnapshot(lane,result.ids,api.snapshotAudit?.(),fullStarted));partitionCompleted=true;fullCompleted=true;
             state.set(lane,{partitionRecovery:undefined,fullSnapshot:{...state.connections[lane].fullSnapshot!,completedAt:new Date().toISOString(),rows:result.rows,bytes:result.bytes,ackedDuringRecovery:acknowledgedMessages-ackedAtStart}});
             // The snapshot is now fully applied and its fixture set finalized.
             // Release queued persistence before the finite inbox handoff: that

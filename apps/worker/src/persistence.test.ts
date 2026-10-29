@@ -241,13 +241,55 @@ test('market-level checkpoint journal merges partial rows and restores untouched
   const records=(await readFile(path+'.checkpoint-journal.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line));
   assert.equal(records[0].op,'merge');assert.equal(records[0].entry.markets.length,2);
   assert.equal(records[1].op,'merge');assert.equal(records[1].entry.markets.length,1,'one changed market is journaled instead of the full fixture market set');
-  assert.ok(partial.bytes-initial.bytes<initial.bytes,'partial journal bytes scale with the changed market');
+  assert.ok(partial.bytes<initial.bytes,'partial journal bytes scale with the changed market');
   state.apply('prematch',[{fixtureId:777,fixture:{status:2}}],at+2000);
   changes=state.projectionChanges();await persistCheckpointDelta(path,state,changes);
   const restored=new TradeState();await restore(restored,path);const row=restored.rows.prematch.get(777)!;
   assert.equal(row.fixture?.value.status,2);assert.equal(row.markets.get('1')?.bets?.[0].price,'2.4');assert.equal(row.markets.get('2')?.bets?.[0].price,'2.2');
   assert.equal(row.deferredTimestampBets?.has('1:a'),false,'partial market replacement applies tombstones for removed per-selection state');
   assert.equal(row.deferredTimestampBets?.has('2:b'),true,'untouched market selection state remains recoverable');
+}finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('repeated full snapshot confirms receipt metadata without journaling unchanged market graphs',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-periodic-snapshot-delta-')),path=join(dir,'feed.json');
+ try{
+  const state=new TradeState(),at=Date.now();
+  const event={fixtureId:778,fixture:{status:1},markets:[
+   {id:10,status:1,bets:[{id:'a',price:'1.9',status:1,isChanged:1,lastUpdate:new Date(at)}]},
+   {id:11,status:1,bets:[{id:'b',price:'2.1',status:1,isChanged:1,lastUpdate:new Date(at)}]},
+  ]};
+  state.apply('prematch',[event],at);
+  let changes=state.projectionChanges();const first=await persistCheckpointDelta(path,state,changes);state.acknowledgeProjectionChanges(changes);
+  state.apply('prematch',[{...event,marketRecovery:true}],at+60000,{source:'snapshot',receivedAt:at+60000});
+  changes=state.projectionChanges();assert.deepEqual(changes.map(change=>change.marketIds),[[]]);
+  const repeat=await persistCheckpointDelta(path,state,changes);state.acknowledgeProjectionChanges(changes);
+  const records=(await readFile(path+'.checkpoint-journal.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(records[1].op,'merge');assert.deepEqual(records[1].marketIds,[]);assert.equal(records[1].entry.markets.length,0);
+  assert.ok(repeat.bytes<2048,`repeated snapshot ${repeat.bytes}B should be metadata-only, without market or selection payloads`);
+  state.apply('prematch',[{fixtureId:778,markets:[{id:10,status:1,bets:[{id:'a',price:'2.4',status:1,isChanged:1,lastUpdate:new Date(at+120000)}]}]}],at+120000);
+  changes=state.projectionChanges();const newer=await persistCheckpointDelta(path,state,changes);state.acknowledgeProjectionChanges(changes);
+  assert.equal(newer.rows,1);assert.deepEqual(state.projectionChanges(),[]);
+  const restored=new TradeState();await restore(restored,path);const row=restored.rows.prematch.get(778)!;
+  assert.equal(row.markets.get('10')?.bets?.[0].price,'2.4');assert.equal(row.markets.get('11')?.bets?.[0].price,'2.1');
+}finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('12,321-fixture periodic refresh keeps unchanged market deltas out of the checkpoint journal',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-periodic-snapshot-volume-')),path=join(dir,'feed.json');
+ try{
+  const state=new TradeState(),at=Date.now();
+  const events=Array.from({length:12321},(_,index)=>({fixtureId:index+1,markets:Array.from({length:3},(_,marketIndex)=>({
+   id:marketIndex+1,status:1,bets:Array.from({length:4},(_,betIndex)=>({id:`s${betIndex+1}`,price:`${2+betIndex/10}`,status:1,isChanged:0,lastUpdate:new Date(at)})),
+  }))}));
+  state.apply('prematch',events,at);let changes=state.projectionChanges();
+  const initial=await persistCheckpointDelta(path,state,changes);state.acknowledgeProjectionChanges(changes);
+  state.apply('prematch',events.map(event=>({...event,marketRecovery:true})),at+60000,{source:'snapshot',receivedAt:at+60000});
+  changes=state.projectionChanges();assert.equal(changes.length,12321);assert.ok(changes.every(change=>change.marketIds?.length===0));
+  const refresh=await persistCheckpointDelta(path,state,changes);
+  assert.ok(refresh.bytes<initial.bytes/2,`repeat metadata delta ${refresh.bytes}B should be materially smaller than full market state ${initial.bytes}B`);
+  const records=(await readFile(path+'.checkpoint-journal.jsonl','utf8')).trim().split('\n');
+  const sample=JSON.parse(records.at(-1)!);assert.deepEqual(sample.marketIds,[]);assert.equal(sample.entry.markets.length,0);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
