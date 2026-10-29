@@ -18,7 +18,7 @@ class PublicationScope(unittest.TestCase):
   added={'apps/worker/src/snapshot-capacity.ts':Path('apps/worker/src/snapshot-capacity.ts').read_text(),'packages/feed-store/src/tenant-tickets.ts':'old'}
   self.assertEqual(hashlib.sha256(added['apps/worker/src/snapshot-capacity.ts'].encode()).hexdigest(),ns['PIPELINE_ADDED_DEPENDENCY_SHA256']['apps/worker/src/snapshot-capacity.ts'])
   indexed_name='packages/feed-store/src/indexed-feed.ts';installed_indexed=subprocess.check_output(['git','show','HEAD:'+indexed_name],cwd=Path(__file__).parents[2],text=True);old_indexed={indexed_name:installed_indexed}
-  base={**old,**added,**old_indexed};digest=hashlib.sha256(json.dumps({p:base[p] for p in ns['PARTITION_FILES']|set(old_indexed)},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  base={**old,**added,**old_indexed};digest=hashlib.sha256(json.dumps({p:base[p] for p in ns['PARTITION_FILES']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
   files={p:base[p] if p in base else 'old' for p in ns['PARTITION_FILES']}
   for name in ('apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts'):
    files[name]=(Path(__file__).parents[2]/name).read_text()

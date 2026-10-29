@@ -233,17 +233,25 @@ class Upgrade(unittest.TestCase):
    'packages/feed-store/src/index.ts':'export { IndexedFeedStore, indexedFeedPath } from "./indexed-feed.js";',
    str(indexed.relative_to(HERE.parent.parent)):indexed.read_text()}
   oldSubset={name:value for name,value in old.items() if name in source_ns['PIPELINE_BASE_FILES']|source_ns['PIPELINE_AUXILIARY_FILES']}
-  digest=hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  digest=hashlib.sha256(json.dumps({name:base[name] for name in source_ns['PARTITION_FILES']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
   indexedName=str(indexed.relative_to(HERE.parent.parent))
   initialCandidate={**candidate,indexedName:installed_indexed}
   self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,initialCandidate,digest,added))
   oldIndexed={indexedName:installed_indexed}
-  indexedBase={**base,**oldIndexed}
-  indexedDigest=hashlib.sha256(json.dumps(indexedBase,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-  self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,candidate,indexedDigest,added,oldIndexed))
-  with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,candidate,indexedDigest,added,{**oldIndexed,str(indexed.relative_to(HERE.parent.parent)):'different-installed-index'})
-  with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,indexedName:'changed'},indexedDigest,added,oldIndexed)
+  self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,candidate,digest,added,oldIndexed))
+  self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,candidate,digest,added,{**oldIndexed,str(indexed.relative_to(HERE.parent.parent)):'different-installed-index'}))
+  with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,indexedName:'changed'},digest,added,oldIndexed)
   with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,'packages/feed-store/src/index.ts':'no export'},digest,added)
+
+ def test_pipeline_api_source_manifest_must_match_candidate_reader_and_contract(self):
+  indexed='packages/feed-store/src/indexed-feed.ts';contracts='packages/contracts/src/index.ts'
+  files={indexed:(HERE.parent.parent/indexed).read_text(),contracts:(HERE.parent.parent/contracts).read_text()}
+  manifest={name:hashlib.sha256(value.encode()).hexdigest() for name,value in files.items()}
+  source_ns={'__name__':'tested_upgrade_manifest','require':NS['require'],'hashlib':hashlib,'json':json,'re':__import__('re'),'Path':Path}
+  exec((HERE/'upgrade-partitioned-worker.py').read_text().split("if __name__=='__main__':")[0],source_ns)
+  source_ns['verify_pipeline_api_source_compatibility'](files,manifest)
+  with self.assertRaises(Exception):source_ns['verify_pipeline_api_source_compatibility'](files,{**manifest,indexed:'0'*64})
+  with self.assertRaises(Exception):source_ns['verify_pipeline_api_source_compatibility'](files,{indexed:manifest[indexed]})
 
  def test_measured_restore_serialization_window_includes_return_readback(self):
   self.assertEqual(NS['OOM_REHEARSAL_TIMEOUT_SECONDS'],1200)

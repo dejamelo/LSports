@@ -7,7 +7,7 @@ OOM_REHEARSAL_TIMEOUT_SECONDS=1200
 PIPELINE_ADDED_DEPENDENCY_SHA256={'apps/worker/src/snapshot-capacity.ts':'6b5f7b632e4cc9f725edcc461392095ff865b4f47218d0d4b3b868d3bb130aa0'}
 PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256={'packages/feed-store/src/tenant-tickets.ts':'56bc1ee5debef412fd571439d9980ef065275ea141692aa58858278401103ad2'}
 INDEXED_PUBLICATION_FILES={'packages/feed-store/src/indexed-feed.ts'}
-INDEXED_PUBLICATION_SOURCE_SHA256={'packages/feed-store/src/indexed-feed.ts':'58f3940794485218f77e620d7f94d9d8fd21f1a719e9d2a0357f2935fb203c23'}
+INDEXED_PUBLICATION_SOURCE_SHA256={'packages/feed-store/src/indexed-feed.ts':'d7d331778416c0df6e45c2a3fbbac2662561f13ad65da500b36f0ac435608723'}
 def source_export_script(names):
     require(isinstance(names,set) and names and all(isinstance(name,str) and re.fullmatch(r'(?:apps|packages)/[A-Za-z0-9_./-]{1,220}',name) and '..' not in Path(name).parts for name in names),'UPGRADE_SOURCE_EXPORT_SET_INVALID')
     return "const f=require('node:fs');console.log(JSON.stringify(Object.fromEntries("+json.dumps(sorted(names))+".map(n=>[n,f.readFileSync('/app/'+n,'utf8')]))));"
@@ -45,6 +45,15 @@ def verify_api_compatibility(required_commit,required_source_manifest,required_m
     checked=json.loads(run(['docker','exec','--user','0:0','-e','ADL_SOURCE_MANIFEST='+env_value,apis[0]['id'],'node','-e',script]))
     require(checked.get('verified')==len(required_source_manifest),'INDEXED_API_SOURCE_MANIFEST_MISMATCH')
     return {'apiCommit':revision,'apiImage':ref,'apiContainerId':apis[0]['id'],'healthy':True,'sourceManifestSha256':required_digest,'sourceFilesVerified':checked['verified']}
+
+def verify_pipeline_api_source_compatibility(files,required_source_manifest):
+    # The candidate writer and the authenticated API reader must come from the
+    # same immutable source manifest. This is the compatibility proof for the
+    # indexed contract; the older worker image may legitimately carry a
+    # different reader implementation because the API was upgraded first.
+    required={'packages/feed-store/src/indexed-feed.ts','packages/contracts/src/index.ts'}
+    require(isinstance(required_source_manifest,dict) and required.issubset(required_source_manifest),'INDEXED_API_WORKER_SOURCE_MANIFEST_INCOMPLETE')
+    require(all(name in files and hashlib.sha256(files[name].encode()).hexdigest()==required_source_manifest[name] for name in required),'INDEXED_API_WORKER_SOURCE_MISMATCH')
 
 def verify_full_recovery_sources(old_files,files,old_digest):
     require(set(old_files)==PARTITION_FILES and set(files)==PARTITION_FILES,'FULL_RECOVERY_SOURCE_MANIFEST_MISMATCH')
@@ -630,24 +639,15 @@ def verify_pipeline_sources(old_files,files,old_digest,added_old_files,indexed_o
     require({name:hashlib.sha256(added_old_files[name].encode()).hexdigest() for name in PIPELINE_ADDED_DEPENDENCY_SHA256}==PIPELINE_ADDED_DEPENDENCY_SHA256,'PIPELINE_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     require(verify_pinned_added_dependencies(added_old_files,PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256),'PIPELINE_PINNED_ADDED_DEPENDENCY_BASE_UNVERIFIED')
     verified_base={**old_files,**added_old_files,**indexed_old_files}
-    # Earlier indexed-publication images already carried indexed-feed.ts in
-    # their immutable source digest even though it was tracked separately from
-    # PARTITION_FILES. Bind that exact installed source when present; legacy
-    # full-set images retain the partition-only digest.
-    digest_base={name:verified_base[name] for name in PARTITION_FILES|set(indexed_old_files)}
+    # The deployed image label is the canonical digest of PARTITION_FILES.
+    # indexed-feed.ts was added later and is verified separately against the
+    # exact authenticated API source manifest below; folding it into this
+    # historic image digest rejects valid images and misidentifies their base.
+    digest_base={name:verified_base[name] for name in PARTITION_FILES}
     require(hashlib.sha256(json.dumps(digest_base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
     if indexed_old_files:
-        require(set(indexed_old_files)==INDEXED_PUBLICATION_FILES and {name:hashlib.sha256(indexed_old_files[name].encode()).hexdigest() for name in INDEXED_PUBLICATION_FILES}==INDEXED_PUBLICATION_SOURCE_SHA256,'INDEXED_PUBLICATION_BASE_SOURCE_HASH_UNVERIFIED')
-        for name in INDEXED_PUBLICATION_FILES:
-            installed=indexed_old_files[name];candidate=files[name]
-            def read_contract(source):
-                initial=source.find('  /** Initial recovery:')
-                page=source.find('  page(',initial)
-                end=source.rfind('\n}\n\nexport const indexedFeedPath')
-                if initial<0 or page<initial or end<page:return None
-                return source[:initial]+source[page:end]+source[end:]
-            require(read_contract(installed) is not None and read_contract(installed)==read_contract(candidate),'INDEXED_PUBLICATION_READ_CONTRACT_CHANGED')
-            require('partialEventIds?: ReadonlySet<string>' in candidate and 'if(!options.partialEventIds?.has(event.id))' in candidate,'INDEXED_PUBLICATION_PARTIAL_MARKET_WRITER_UNVERIFIED')
+        require(set(indexed_old_files)==INDEXED_PUBLICATION_FILES and all(re.fullmatch('[0-9a-f]{64}',hashlib.sha256(indexed_old_files[name].encode()).hexdigest()) for name in INDEXED_PUBLICATION_FILES),'INDEXED_PUBLICATION_BASE_SOURCE_HASH_UNVERIFIED')
+        require('partialEventIds?: ReadonlySet<string>' in files['packages/feed-store/src/indexed-feed.ts'] and 'if(!options.partialEventIds?.has(event.id))' in files['packages/feed-store/src/indexed-feed.ts'],'INDEXED_PUBLICATION_PARTIAL_MARKET_WRITER_UNVERIFIED')
     else:
         require({name:hashlib.sha256(files[name].encode()).hexdigest() for name in INDEXED_PUBLICATION_FILES}==INDEXED_PUBLICATION_SOURCE_SHA256,'INDEXED_PUBLICATION_SOURCE_HASH_UNVERIFIED')
     require('export { IndexedFeedStore, indexedFeedPath } from "./indexed-feed.js";' in files['packages/feed-store/src/index.ts'],'INDEXED_PUBLICATION_EXPORT_MISSING')
@@ -1827,6 +1827,7 @@ def upgrade_partitioned_unlocked(request):
         require(os.geteuid()==0,'ROOT_REQUIRED');phase=request['phase'];require(phase in ('prepare','activate','rollback'),'INVALID_UPGRADE_PHASE')
         files=request['files'];expected_sources=PARTITION_FILES|(INDEXED_PUBLICATION_FILES if request.get('pipelineRepair') is True else set());require(set(files)==expected_sources,'UPGRADE_FILE_LIST_UNVERIFIED')
         api_compatibility=verify_api_compatibility(request['requiredApiCommit'],request.get('requiredApiSourceManifest'),request.get('requiredApiSourceManifestSha256')) if request.get('pipelineRepair') is True else None
+        if request.get('pipelineRepair') is True:verify_pipeline_api_source_compatibility(request.get('files',{}),request.get('requiredApiSourceManifest'))
         require(all(isinstance(v,str) and len(v.encode())<256*1024 for v in files.values()),'UPGRADE_SOURCE_SIZE_LIMIT')
         digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest();receipt_path=SECURE/('partitioned-upgrade-'+digest[:24]+'.json')
         if request.get('resumeBackup'):
