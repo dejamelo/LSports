@@ -401,7 +401,7 @@ export async function run(args){
      projectionReadbackBudgetBytes:snapshotMemoryResult.projectionReadbackBudget.budgetBytes
     }:undefined;
     const memoryProfileOption=verifiedExistingSnapshotMemoryProfileOption(existingSnapshotMemoryProof);
-    const repairOptions=supplierMode?{fullRecovery:true,...memoryProfileOption,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true,...memoryProfileOption}:distributionMode?{fixCommit:'2aa06f7'}:{};
+    const repairOptions=supplierMode?{fullRecovery:true,...memoryProfileOption,supplierOrder:true,fixCommit:'2aa06f7',...(throughputMode?{throughputFix:true,...(['--snapshot-throughput-repair','--spool-memory-repair'].includes(args[4])?{spoolMemoryFix:true,...(args[4]==='--snapshot-throughput-repair'?{snapshotThroughputFix:true}:{})}:{})}:{}),...(nullableMode?{nullableEvidence:'/var/backups/adl-snapshot-shape-2thwo24l'}:{})}:fullMode?{fullRecovery:true,...memoryProfileOption}:distributionMode?{fixCommit:'2aa06f7'}:args[4]==='--partitioned-recovery'?{...memoryProfileOption}:{};
     if(durableMode)repairOptions.durableIngress=true;
     if(snapshotMemoryRepair){repairOptions.snapshotMemoryRepair=true;if(!snapshotMemoryEightGiB)repairOptions.checkpointRepairBackup=ledger.steps.throughput_image?.result?.backup;}
     if(snapshotMemoryEightGiB){
