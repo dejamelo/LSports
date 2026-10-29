@@ -16,7 +16,7 @@ export interface IndexedFeedFilter {
   marketId?: string;
 }
 const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-const decode = (value: string) => JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as { revision: number; lastId: string; scope: string };
+const decode = (value: string) => JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as { revision: number; lastUpdatedAt: number; lastId: string; scope: string };
 
 /** Durable, per-event public materialization. A committed transaction is the only visible revision. */
 export class IndexedFeedStore {
@@ -157,17 +157,25 @@ export class IndexedFeedStore {
     const limit = Math.max(1, Math.min(200, Math.trunc(input.limit || 100)));
     const row = this.db.prepare("SELECT revision,body FROM feed_meta WHERE id=1").get() as { revision: number; body: string } | undefined;
     if (!row) throw Error("INDEX_NOT_READY");
+    let lastUpdatedAt: number | undefined;
     let lastId = "";
     if (input.cursor) {
       const cursor = decode(input.cursor);
-      if (cursor.revision !== row.revision || cursor.scope !== input.scope) throw Error("INDEX_CURSOR_STALE");
+      if (cursor.revision !== row.revision || cursor.scope !== input.scope || !Number.isSafeInteger(cursor.lastUpdatedAt) || typeof cursor.lastId !== "string") throw Error("INDEX_CURSOR_STALE");
+      lastUpdatedAt = cursor.lastUpdatedAt;
       lastId = cursor.lastId;
     }
     const filter = input.filter || {};
-    // IDs are stored as lane:<provider fixture id>; this exact primary-key
-    // lookup avoids a correlated scan of the full InPlay index per PreMatch row.
-    const clauses = ["id > ?", "NOT (lane='prematch' AND EXISTS (SELECT 1 FROM feed_events ip WHERE ip.id='inplay:' || substr(feed_events.id,10) AND ip.live=1))"];
-    const args: (string | number)[] = [lastId];
+    // Start with the most recently changed source events so the first bounded
+    // page contains current fixtures instead of an ID-ordered set of old rows.
+    // The timestamp comes from event.updatedAt (provider data), never receipt time.
+    // IDs are the deterministic tie-breaker and the cursor is revision-bound.
+    const clauses = ["NOT (lane='prematch' AND EXISTS (SELECT 1 FROM feed_events ip WHERE ip.id='inplay:' || substr(feed_events.id,10) AND ip.live=1))"];
+    const args: (string | number)[] = [];
+    if (input.cursor) {
+      clauses.push("(updated_at_ms < ? OR (updated_at_ms = ? AND id > ?))");
+      args.push(lastUpdatedAt!, lastUpdatedAt!, lastId);
+    }
     if (filter.lane) { clauses.push("lane = ?"); args.push(filter.lane); }
     if (filter.sport) { clauses.push("sport = ?"); args.push(filter.sport); }
     if (filter.competitionId !== undefined) { clauses.push("competition_id = ?"); args.push(filter.competitionId); }
@@ -176,7 +184,7 @@ export class IndexedFeedStore {
     args.push(limit + 1);
     const marketBytes=filter.marketId?"(SELECT COALESCE(sum(length(CAST(fm.body AS BLOB))),0) FROM feed_markets fm WHERE fm.event_id=feed_events.id AND fm.market_id=?)":"(SELECT COALESCE(sum(length(CAST(fm.body AS BLOB))),0) FROM feed_markets fm WHERE fm.event_id=feed_events.id)";
     const candidateArgs=filter.marketId?[filter.marketId,...args]:args;
-    const candidates = this.db.prepare(`SELECT id,length(CAST(body AS BLOB))+${marketBytes} AS bytes FROM feed_events WHERE ${clauses.join(" AND ")} ORDER BY id LIMIT ?`).all(...candidateArgs) as { id: string; bytes: number }[];
+    const candidates = this.db.prepare(`SELECT id,updated_at_ms,length(CAST(body AS BLOB))+${marketBytes} AS bytes FROM feed_events WHERE ${clauses.join(" AND ")} ORDER BY updated_at_ms DESC,id ASC LIMIT ?`).all(...candidateArgs) as { id: string; updated_at_ms: number; bytes: number }[];
     // Bound the complete HTTP response well below the historical 8 MiB read/heap safety ceiling.
     const pageBudget = 4 * 1024 * 1024;
     const ids: string[] = []; let bytes = 0;
@@ -186,7 +194,9 @@ export class IndexedFeedStore {
     }
     if (!ids.length && candidates.length) throw Error("INDEX_EVENT_EXCEEDS_PAGE_LIMIT");
     const hasMore = candidates.length > ids.length;
-    const visible = ids.length ? this.db.prepare(`SELECT id,body FROM feed_events WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY id`).all(...ids) as { id: string; body: string }[] : [];
+    const visibleRows = ids.length ? this.db.prepare(`SELECT id,body FROM feed_events WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids) as { id: string; body: string }[] : [];
+    const visibleById=new Map(visibleRows.map(record=>[record.id,record]));
+    const visible=ids.map(id=>visibleById.get(id)!).filter(Boolean);
     const markets=ids.length?this.db.prepare(`SELECT event_id,market_id,body FROM feed_markets WHERE event_id IN (${ids.map(()=>'?').join(',')})${filter.marketId?' AND market_id=?':''} ORDER BY event_id,market_id`).all(...(filter.marketId?[...ids,filter.marketId]:ids)) as {event_id:string;market_id:string;body:string}[]:[];
     const byEvent=new Map<string, SportEvent['markets']>();
     for(const row of markets){let list=byEvent.get(row.event_id);if(!list){list=[];byEvent.set(row.event_id,list);}list.push(JSON.parse(row.body) as NonNullable<SportEvent['markets']>[number]);}
@@ -246,7 +256,7 @@ export class IndexedFeedStore {
       return { ...event, available: eligibleEvent, selections: primary >= 0 ? markets![primary].selections : selections, markets };
     });
     return { feed: metadata, events: safeEvents, page: { revision: row.revision, limit,
-      ...(hasMore && visible.length ? { nextCursor: encode({ revision: row.revision, lastId: visible.at(-1)!.id, scope: input.scope }) } : {}), hasMore } };
+      ...(hasMore && visible.length ? { nextCursor: encode({ revision: row.revision, lastUpdatedAt: candidates[ids.length-1].updated_at_ms, lastId: visible.at(-1)!.id, scope: input.scope }) } : {}), hasMore } };
   }
   eventsByIds(ids: string[], scope: string, now = Date.now()): EventFeed {
     if (ids.length > 12 || new Set(ids).size !== ids.length) throw Error("INDEX_EVENT_ID_LIMIT");

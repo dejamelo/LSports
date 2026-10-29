@@ -20,6 +20,8 @@ test("indexed feed atomically pages committed revisions and rejects cross-scope/
     assert.equal(first.events.length, 1);
     assert.ok(first.page.nextCursor);
     assert.throws(() => writer.page({ limit: 1, cursor: first.page.nextCursor, scope: "client-b", now }), /INDEX_CURSOR_STALE/);
+    const legacyCursor=Buffer.from(JSON.stringify({revision:first.page.revision,lastId:"prematch:1",scope:"client-a"})).toString("base64url");
+    assert.throws(() => writer.page({ limit: 1, cursor: legacyCursor, scope: "client-a", now }), /INDEX_CURSOR_STALE/);
     const second = writer.page({ limit: 1, cursor: first.page.nextCursor, scope: "client-a", now });
     assert.equal(second.events.length, 1);
     const oldCursor = second.page.nextCursor;
@@ -38,6 +40,27 @@ test("indexed feed atomically pages committed revisions and rejects cross-scope/
     assert.equal(marketOnly.events[0].markets?.length,1);
     assert.equal(marketOnly.events[0].selections[0].id,"prematch:2:1:1");
   } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("newest provider-updated fixtures lead the first page without relaxing stale or market guards", () => {
+  const dir=mkdtempSync(join(tmpdir(),"adl-indexed-fresh-first-")),path=join(dir,"public.sqlite"),now=Date.now(),writer=new IndexedFeedStore(path);
+  try {
+    const old=event("prematch:1",now-60_000),fresh=event("prematch:99999999",now-2_000),closed=event("prematch:99999998",now-1_000);
+    for(const row of [old,fresh,closed]){row.markets![0].selections[0].status=1;row.selections[0].status=1;}
+    closed.markets![0].status=2;closed.markets![0].selections[0].available=false;closed.markets![0].selections[0].unavailableReasons=["market_not_open"];
+    closed.selections=closed.markets![0].selections;
+    writer.rebuild([old,fresh,closed],metadata(now));
+    const first=writer.page({filter:{lane:"prematch"},limit:1,scope:"fresh-first",now});
+    assert.deepEqual(first.events.map(row=>row.id),["prematch:99999998"]);
+    assert.equal(first.events[0].markets![0].selections[0].available,false,"closed markets stay blocked even when updated recently");
+    assert.ok(first.page.nextCursor);
+    const second=writer.page({filter:{lane:"prematch"},limit:1,cursor:first.page.nextCursor,scope:"fresh-first",now});
+    assert.deepEqual(second.events.map(row=>row.id),["prematch:99999999"]);
+    assert.equal(second.events[0].markets![0].selections[0].available,true,"fresh open odds remain available");
+    const third=writer.page({filter:{lane:"prematch"},limit:1,cursor:second.page.nextCursor,scope:"fresh-first",now});
+    assert.deepEqual(third.events.map(row=>row.id),["prematch:1"]);
+    assert.equal(third.events[0].markets![0].selections[0].available,false,"old provider data remains stale");
+  } finally { writer.close();rmSync(dir,{recursive:true,force:true}); }
 });
 
 test("re-evaluates only transient blocks per lane after recovery and keeps quote/status guards", () => {
