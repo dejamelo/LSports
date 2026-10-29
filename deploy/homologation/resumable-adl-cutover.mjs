@@ -122,6 +122,10 @@ export function indexedApiDeploymentReceipt(rows,commit){
  if(!complete||complete.installedCommit!==commit||complete.installedSourceVerified!==true||complete.workersUnchanged!==true||complete.posnetChanged!==false||!sourceManifest||canonicalSourceDigest(sourceManifest)!==complete.sourceManifestSha256)return;
  return {commit,installedCommit:complete.installedCommit,imageId:complete.installedImageId,sourceFilesVerified:true,sourceManifest,sourceManifestSha256:complete.sourceManifestSha256,workersUnchanged:true,posnetChanged:false};
 }
+export function indexedApiCompatibilityStepKey(commit){
+ if(typeof commit!=='string'||!/^[0-9a-f]{40}$/.test(commit))throw Error('INDEXED_API_COMMIT_REQUIRED');
+ return `indexed_api_compatibility_${commit.slice(0,12)}`;
+}
 export function indexedApiReaderCompatible(installedSource,candidateSource){
  const contract=source=>{
   if(typeof source!=='string')return;
@@ -444,7 +448,10 @@ export async function run(args){
     if(snapshotMemoryRepair){ledger.beforeSnapshotMemoryRepair??={image:ledger.steps.throughput_image,upgrade:ledger.steps.throughput_upgrade};await save();}
     if(repairOptions.pipelineRepair){
      const workerCommit=(await command('git',['rev-parse',runtimeRef],undefined,10000,true)).trim();
-     const recordedApiDeployment=await step(ledger,'indexed_api_compatibility',save,async()=>{
+     // Compatibility receipts are valid only for the exact API source commit.
+     // A prior receipt under one fixed key can outlive a later API-only deploy
+     // and cause a false reader-contract mismatch against an obsolete tree.
+     const recordedApiDeployment=await step(ledger,indexedApiCompatibilityStepKey(workerCommit),save,async()=>{
       stage='indexed_api_compatibility';
       const output=await command(process.execPath,[path.join(here,'update-adl-api.mjs'),'--repo',root,'--commit',workerCommit,'--preserve-local-changes'],undefined,1800000,true,false,{stage});
       const rows=output.split('\n').filter(Boolean).flatMap(line=>{try{return[JSON.parse(line)]}catch{return[]}});

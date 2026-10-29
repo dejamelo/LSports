@@ -133,7 +133,7 @@ test('inventory repair separates repeated current-container distribution errors 
 
 
 test('OOM repair and rollback remain distinct durable modes; no migration mode is selected',async()=>{
- const {recoveryMode,partitionedRepairMode,indexedApiDeploymentReceipt,alignApiDeploymentReceipt,indexedApiReaderCompatible,indexedApiChangesCompatible}=await import('./resumable-adl-cutover.mjs');
+ const {recoveryMode,partitionedRepairMode,indexedApiDeploymentReceipt,indexedApiCompatibilityStepKey,alignApiDeploymentReceipt,indexedApiReaderCompatible,indexedApiChangesCompatible}=await import('./resumable-adl-cutover.mjs');
  assert.deepEqual(recoveryMode('--snapshot-memory-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--indexed-publication-repair'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:false});
  assert.deepEqual(recoveryMode('--snapshot-memory-rollback'),{snapshotMemoryRepair:true,durableMode:true,durableRollback:true});
@@ -148,6 +148,8 @@ test('OOM repair and rollback remain distinct durable modes; no migration mode i
  assert.deepEqual(receipt,{commit,installedCommit:commit,imageId:complete.installedImageId,sourceFilesVerified:true,sourceManifest,sourceManifestSha256:complete.sourceManifestSha256,workersUnchanged:true,posnetChanged:false});
  assert.equal(indexedApiDeploymentReceipt([complete],'c'.repeat(40)),undefined);
  assert.equal(indexedApiDeploymentReceipt([{...complete,workersUnchanged:false}],commit),undefined);
+ assert.equal(indexedApiCompatibilityStepKey(commit),'indexed_api_compatibility_aaaaaaaaaaaa');
+ assert.notEqual(indexedApiCompatibilityStepKey(commit),indexedApiCompatibilityStepKey('c'.repeat(40)),'an API compatibility receipt cannot be reused for a different source revision');
  const next='c'.repeat(40);
  assert.equal(alignApiDeploymentReceipt(receipt,next,['apps/api/src/app.ts']),undefined);
  assert.deepEqual(alignApiDeploymentReceipt(receipt,next,[]),{...receipt,commit:next,sourceCompatibilityVerified:true});
