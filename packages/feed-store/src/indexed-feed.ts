@@ -192,7 +192,9 @@ export class IndexedFeedStore {
     for(const row of markets){let list=byEvent.get(row.event_id);if(!list){list=[];byEvent.set(row.event_id,list);}list.push(JSON.parse(row.body) as NonNullable<SportEvent['markets']>[number]);}
     const metadata = JSON.parse(row.body) as Omit<EventFeed, "events">;
     const age = input.now === undefined ? 0 : input.now - Date.parse(metadata.updatedAt || "");
-    // Stale or unhealthy sources never return selectable odds, even if rows remain indexed.
+    // The global health flag is aggregate across both feeds. A recovering InPlay
+    // lane must not hide a ready PreMatch lane; readiness is checked per event
+    // below. A stale global market heartbeat still suppresses all odds.
     const events = age > 20000 || age < -5000 || metadata.health === "unavailable"
       ? [] : visible.map(record => {
         const base=JSON.parse(record.body) as SportEvent, eventMarkets=byEvent.get(record.id)||[];
@@ -207,11 +209,41 @@ export class IndexedFeedStore {
       if (progress && (progress.processingBacklog ?? progress.backlog) > 0 && (progress.oldestProcessingAgeMs ?? progress.oldestAgeMs) > 5000) reasons.push('processing_backlog');
       const eventAge = input.now === undefined ? 0 : input.now - Date.parse(event.updatedAt || '');
       if (!Number.isFinite(eventAge) || eventAge < -5000 || eventAge > 20000) reasons.push('stale_odds');
-      if (!reasons.length) return event;
-      const selections = event.selections.map(selection => ({ ...selection, available: false, unavailableReasons: [...new Set([...(selection.unavailableReasons || []), ...reasons])] }));
-      const markets = event.markets?.map(market => ({ ...market, selections: market.selections.map(selection => ({ ...selection, available: false, unavailableReasons: [...new Set([...(selection.unavailableReasons || []), ...reasons])] })) }));
+      const transient = new Set(['feed_disconnected', 'processing_backlog', 'stale_odds']);
+      const eligibleEventStatus = [1, 2, 9].includes(event.status ?? 0);
+      const eligibleEvent = connection?.phase === 'connected' && !reasons.length && eligibleEventStatus;
+      const normalizeSelection = (selection: SportEvent['selections'][number], marketOpen: boolean) => {
+        const prior = selection.unavailableReasons || [];
+        const retained = prior.filter(reason => !transient.has(reason));
+        const onlyHadTransientBlocks = selection.available !== true && prior.length > 0 && retained.length === 0;
+        const statusOpen = selection.status === 1;
+        const settled = selection.settlement !== undefined && selection.settlement !== null && selection.settlement !== 0;
+        const priceValid = Number.isFinite(selection.odds) && selection.odds > 1;
+        const staticReasons = [
+          ...(!eligibleEventStatus ? ['event_inactive'] : []),
+          ...(!marketOpen ? ['market_not_open'] : []),
+          ...(!statusOpen ? ['selection_not_open'] : []),
+          ...(settled ? ['selection_settled'] : []),
+          ...(!priceValid ? ['invalid_price'] : []),
+        ];
+        const unavailableReasons = [...new Set([...retained, ...staticReasons, ...reasons])];
+        // Reopen only selections whose stored projection was blocked solely by
+        // transient lane/backlog/freshness state, and only after every current
+        // feed, event, status, settlement, price and freshness guard passes.
+        const previouslyEligible = selection.available === true || onlyHadTransientBlocks;
+        const available = previouslyEligible && eligibleEvent && marketOpen && statusOpen && !settled && priceValid && unavailableReasons.length === 0;
+        return { ...selection, available, unavailableReasons };
+      };
+      const markets = event.markets?.map(market => ({
+        ...market,
+        selections: market.selections.map(selection => normalizeSelection(selection, market.status === 1)),
+      }));
+      const selections = event.selections.map(selection => {
+        const market = event.markets?.find(candidate => candidate.selections.includes(selection));
+        return normalizeSelection(selection, market?.status === 1);
+      });
       const primary = event.markets?.findIndex(market => market.selections === event.selections) ?? -1;
-      return { ...event, available: false, selections: primary >= 0 ? markets![primary].selections : selections, markets };
+      return { ...event, available: eligibleEvent, selections: primary >= 0 ? markets![primary].selections : selections, markets };
     });
     return { feed: metadata, events: safeEvents, page: { revision: row.revision, limit,
       ...(hasMore && visible.length ? { nextCursor: encode({ revision: row.revision, lastId: visible.at(-1)!.id, scope: input.scope }) } : {}), hasMore } };

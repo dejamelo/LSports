@@ -40,6 +40,75 @@ test("indexed feed atomically pages committed revisions and rejects cross-scope/
   } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("re-evaluates only transient blocks per lane after recovery and keeps quote/status guards", () => {
+  const dir = mkdtempSync(join(tmpdir(), "adl-indexed-lane-recovery-")), path = join(dir, "public.sqlite"), now = Date.now();
+  const writer = new IndexedFeedStore(path);
+  try {
+    const recovered = event("prematch:recovered", now);
+    recovered.available = false;
+    recovered.markets![0].selections[0].status = 1;
+    recovered.markets![0].selections[0].available = false;
+    recovered.markets![0].selections[0].unavailableReasons = ["feed_disconnected", "processing_backlog"];
+    recovered.selections[0].status = 1;
+    recovered.selections[0].available = false;
+    recovered.selections[0].unavailableReasons = ["feed_disconnected", "processing_backlog"];
+
+    const awaiting = event("prematch:awaiting", now);
+    awaiting.available = false;
+    awaiting.markets![0].selections[0].status = 1;
+    awaiting.markets![0].selections[0].available = false;
+    awaiting.markets![0].selections[0].unavailableReasons = ["feed_disconnected", "awaiting_update"];
+    awaiting.selections[0].status = 1;
+    awaiting.selections[0].available = false;
+    awaiting.selections[0].unavailableReasons = ["feed_disconnected", "awaiting_update"];
+
+    const closed = event("prematch:closed", now);
+    closed.available = false;
+    closed.markets![0].status = 3;
+    closed.markets![0].selections[0].status = 1;
+    closed.markets![0].selections[0].available = false;
+    closed.markets![0].selections[0].unavailableReasons = ["feed_disconnected"];
+    closed.selections[0].status = 1;
+    closed.selections[0].available = false;
+    closed.selections[0].unavailableReasons = ["feed_disconnected"];
+
+    const meta = { ...metadata(now), health: "degraded" as const,
+      connections: { prematch: { phase: "connected", message: "ready", ingressProgress: { backlog: 0, processingBacklog: 0, oldestProcessingAgeMs: 0 } },
+        inplay: { phase: "recovering", message: "waiting for baseline" } } };
+    writer.rebuild([recovered, awaiting, closed], meta);
+    const page = writer.page({ lane: "prematch", limit: 10, scope: "facundo-ars", now });
+    const marketEvent = (id: string) => page.events.find(row => row.id === id)!;
+    const reopened = marketEvent("prematch:recovered");
+    assert.equal(reopened.available, true);
+    assert.equal(reopened.markets![0].selections[0].available, true);
+    assert.deepEqual(reopened.markets![0].selections[0].unavailableReasons, []);
+
+    const stillAwaiting = marketEvent("prematch:awaiting");
+    assert.equal(stillAwaiting.available, true, "fixture readiness is independent of quote readiness");
+    assert.equal(stillAwaiting.markets![0].selections[0].available, false);
+    assert.deepEqual(stillAwaiting.markets![0].selections[0].unavailableReasons, ["awaiting_update"]);
+
+    const stillClosed = marketEvent("prematch:closed");
+    assert.equal(stillClosed.markets![0].selections[0].available, false);
+    assert.deepEqual(stillClosed.markets![0].selections[0].unavailableReasons, ["market_not_open"]);
+
+    writer.applyDelta([], [], { ...meta, health: "degraded",
+      connections: { prematch: { phase: "recovering", message: "recovering" }, inplay: { phase: "connected", message: "ready" } } });
+    const recovering = writer.page({ lane: "prematch", limit: 10, scope: "facundo-ars", now }).events.find(row => row.id === "prematch:recovered")!;
+    assert.equal(recovering.available, false);
+    assert.equal(recovering.markets![0].selections[0].available, false);
+    assert.ok(recovering.markets![0].selections[0].unavailableReasons?.includes("feed_disconnected"));
+
+    writer.applyDelta([], [], { ...meta,
+      connections: { prematch: { phase: "connected", message: "ready", ingressProgress: { backlog: 1, processingBacklog: 1, oldestProcessingAgeMs: 5001 } },
+        inplay: { phase: "recovering", message: "waiting for baseline" } } });
+    const backlogged = writer.page({ lane: "prematch", limit: 10, scope: "facundo-ars", now }).events.find(row => row.id === "prematch:recovered")!;
+    assert.equal(backlogged.available, false);
+    assert.equal(backlogged.markets![0].selections[0].available, false);
+    assert.ok(backlogged.markets![0].selections[0].unavailableReasons?.includes("processing_backlog"));
+  } finally { writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("page budget counts UTF-8 bytes so a multibyte market cannot exceed the HTTP response ceiling", () => {
   const dir = mkdtempSync(join(tmpdir(), "adl-indexed-bytes-")), path = join(dir, "public.sqlite"), now = Date.now();
   const writer = new IndexedFeedStore(path);
