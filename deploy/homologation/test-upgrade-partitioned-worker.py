@@ -94,6 +94,7 @@ class Upgrade(unittest.TestCase):
   old['apps/worker/src/full-snapshot.ts']='transportComplete=res.complete===true; if(!transportComplete) throw Error(); transportBytes!==contentLengthBytes; Snapshot HTTP Content-Length mismatch'
   connected='lanes.length>0&&lanes.every(c=>c.phase===\'recovering\'&&c.recoveryProgress?.regularSnapshotReady===false)'
   candidate=dict(old);candidate['apps/worker/src/connected.ts']=connected+'; ingress.processingBacklog??ingress.backlog; ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000'
+  candidate['apps/worker/src/persistence.ts']='CHECKPOINT_JOURNAL_WRITE_BUFFER_BYTES=1024*1024; checkpointJournalWriteBuffer(file); await output.flush(); await file.sync()'
   digest=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':')).encode()).hexdigest()
   self.assertEqual(NS['verify_full_recovery_sources'](old,candidate,digest),None)
   unsafe=dict(candidate);unsafe['apps/worker/src/connected.ts']=connected+'; true'

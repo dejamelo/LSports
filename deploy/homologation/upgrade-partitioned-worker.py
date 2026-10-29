@@ -51,12 +51,15 @@ def verify_full_recovery_sources(old_files,files,old_digest):
     installed_digest=hashlib.sha256(json.dumps(old_files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     require(installed_digest==old_digest,'FULL_RECOVERY_INSTALLED_SOURCE_DIGEST_MISMATCH')
     changed={name for name in files if files[name]!=old_files[name]}
-    require(changed=={'apps/worker/src/connected.ts'},'FULL_RECOVERY_PATCH_SCOPE_UNVERIFIED')
+    require(changed in ({'apps/worker/src/connected.ts'},{'apps/worker/src/connected.ts','apps/worker/src/persistence.ts'}),'FULL_RECOVERY_PATCH_SCOPE_UNVERIFIED')
     connected=files['apps/worker/src/connected.ts']
     snapshot_gate="lanes.length>0&&lanes.every(c=>c.phase==='recovering'&&c.recoveryProgress?.regularSnapshotReady===false)" in connected
     stale_backlog_gate=("ingress.processingBacklog??ingress.backlog" in connected and
                         "ingress.oldestProcessingAgeMs??ingress.oldestAgeMs)>5000" in connected)
     require(snapshot_gate and (changed==set() or stale_backlog_gate),'FULL_RECOVERY_PROJECTION_DEFER_GUARD_UNVERIFIED')
+    if 'apps/worker/src/persistence.ts' in changed:
+        persistence=files['apps/worker/src/persistence.ts']
+        require('CHECKPOINT_JOURNAL_WRITE_BUFFER_BYTES=1024*1024' in persistence and 'checkpointJournalWriteBuffer(file)' in persistence and 'await output.flush()' in persistence and 'await file.sync()' in persistence,'FULL_RECOVERY_CHECKPOINT_BATCH_GUARD_UNVERIFIED')
     snapshot=old_files['apps/worker/src/full-snapshot.ts']
     require('transportComplete=res.complete===true' in snapshot and 'if(!transportComplete)' in snapshot and 'transportBytes!==contentLengthBytes' in snapshot and 'Snapshot HTTP Content-Length mismatch' in snapshot,'FULL_RECOVERY_TRANSPORT_GUARD_MISSING')
 
