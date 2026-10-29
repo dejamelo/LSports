@@ -633,7 +633,20 @@ def verify_pipeline_sources(old_files,files,old_digest,added_old_files,indexed_o
     # full-set images retain the partition-only digest.
     digest_base={name:verified_base[name] for name in PARTITION_FILES|set(indexed_old_files)}
     require(hashlib.sha256(json.dumps(digest_base,sort_keys=True,separators=(',',':')).encode()).hexdigest()==old_digest,'PIPELINE_BASE_SOURCE_DIGEST_MISMATCH')
-    require({name:hashlib.sha256(files[name].encode()).hexdigest() for name in INDEXED_PUBLICATION_FILES}==INDEXED_PUBLICATION_SOURCE_SHA256,'INDEXED_PUBLICATION_SOURCE_HASH_UNVERIFIED')
+    if indexed_old_files:
+        require(set(indexed_old_files)==INDEXED_PUBLICATION_FILES and {name:hashlib.sha256(indexed_old_files[name].encode()).hexdigest() for name in INDEXED_PUBLICATION_FILES}==INDEXED_PUBLICATION_SOURCE_SHA256,'INDEXED_PUBLICATION_BASE_SOURCE_HASH_UNVERIFIED')
+        for name in INDEXED_PUBLICATION_FILES:
+            installed=indexed_old_files[name];candidate=files[name]
+            def read_contract(source):
+                initial=source.find('  /** Initial recovery:')
+                page=source.find('  page(',initial)
+                end=source.rfind('\n}\n\nexport const indexedFeedPath')
+                if initial<0 or page<initial or end<page:return None
+                return source[:initial]+source[page:end]+source[end:]
+            require(read_contract(installed) is not None and read_contract(installed)==read_contract(candidate),'INDEXED_PUBLICATION_READ_CONTRACT_CHANGED')
+            require('partialEventIds?: ReadonlySet<string>' in candidate and 'if(!options.partialEventIds?.has(event.id))' in candidate,'INDEXED_PUBLICATION_PARTIAL_MARKET_WRITER_UNVERIFIED')
+    else:
+        require({name:hashlib.sha256(files[name].encode()).hexdigest() for name in INDEXED_PUBLICATION_FILES}==INDEXED_PUBLICATION_SOURCE_SHA256,'INDEXED_PUBLICATION_SOURCE_HASH_UNVERIFIED')
     require('export { IndexedFeedStore, indexedFeedPath } from "./indexed-feed.js";' in files['packages/feed-store/src/index.ts'],'INDEXED_PUBLICATION_EXPORT_MISSING')
     changed={n for n in files if n not in verified_base or files[n]!=verified_base[n]}
     require(changed and changed<={'apps/worker/src/connected.ts','apps/worker/src/full-snapshot.ts','apps/worker/src/provider.ts','apps/worker/src/diagnostics.ts','apps/worker/src/snapshot-capacity.ts','apps/worker/src/state.ts','apps/worker/src/persistence.ts','apps/worker/src/durable-ingress.mjs','apps/worker/src/durable-ingress.d.mts','packages/contracts/src/index.ts','packages/feed-store/src/index.ts','packages/feed-store/src/operation-risk.ts','packages/feed-store/src/tenant-tickets.ts'}|INDEXED_PUBLICATION_FILES,'PIPELINE_PATCH_SCOPE_UNVERIFIED')
@@ -2213,6 +2226,22 @@ def upgrade_partitioned_unlocked(request):
                 require((volume.get('Labels') or {}).get('com.docker.compose.project')=='adl-homologation','ROLLBACK_RECOVERY_VOLUME_PROJECT_UNVERIFIED')
                 rollback_directory=Path(volume['Mountpoint']);require(not rollback_directory.is_symlink(),'ROLLBACK_RECOVERY_VOLUME_SYMLINK')
                 require(not (rollback_directory/'trade-feed.json.lock').exists() and not list(rollback_directory.glob('trade-feed.json*.reclaim')),'ROLLBACK_RECOVERY_LOCK_STILL_PRESENT')
+                # The candidate journal has market-level `merge` records that
+                # the previous worker cannot read. Normalize the stopped,
+                # durable state with the candidate before recording rollback
+                # evidence; then prove the preserved old image can read it.
+                # This keeps rollback data current without deleting the inbox.
+                compact_code="import{TradeState}from'/app/apps/worker/src/state.ts';import{restore,compactCheckpointJournal,checkpointJournalPath}from'/app/apps/worker/src/persistence.ts';import{stat}from'node:fs/promises';const p='/app/.runtime/feed/trade-feed.json',state=new TradeState(),before=await restore(state,p);if(!Number.isSafeInteger(before.rows))throw Error('ROLLBACK_STATE_NOT_RESTORED');const counts=s=>{let rows=0,markets=0,bets=0;for(const lane of ['prematch','inplay'])for(const row of s.rows[lane].values()){rows++;markets+=row.markets.size;for(const m of row.markets.values())bets+=m.bets?.length||0;}return{rows,markets,bets}};const expected=counts(state),compact=await compactCheckpointJournal(p,state),journal=await stat(checkpointJournalPath(p));if(compact.rows!==expected.rows||journal.size!==0)throw Error('ROLLBACK_STATE_COMPACTION_UNVERIFIED');console.log(JSON.stringify({operation:'rollback.compatibility_compaction',rows:compact.rows,bytes:compact.bytes,markets:expected.markets,bets:expected.bets,journalBytes:journal.size,verified:true}));"
+                memory=str(partition_memory(progress));heap=str(partition_heap_mib(progress))
+                mount='type=volume,source='+feed_mounts[0]['Name']+',target=/app/.runtime/feed'
+                output=run(['docker','run','--rm','--network','none','--memory',memory,'--memory-swap',memory,'--read-only','--tmpfs','/tmp:size=268435456,mode=1777','--mount',mount,'-e','NODE_OPTIONS=--max-old-space-size='+heap,'--entrypoint','node',progress['image'],'--import','tsx','--input-type=module','-e',compact_code],timeout=900,log=backup/'rollback-compatibility-compact.private.log')
+                require(b'"operation":"rollback.compatibility_compaction"' in output and b'"verified":true' in output,'ROLLBACK_COMPATIBILITY_COMPACTION_FAILED')
+                compact_receipt=next((json.loads(line) for line in output.splitlines() if b'"operation":"rollback.compatibility_compaction"' in line),None)
+                require(isinstance(compact_receipt,dict) and compact_receipt.get('verified') is True and all(isinstance(compact_receipt.get(k),int) and compact_receipt[k]>=0 for k in ('rows','markets','bets','bytes','journalBytes')) and compact_receipt['journalBytes']==0,'ROLLBACK_COMPATIBILITY_COMPACTION_RECEIPT_INVALID')
+                old_readback="import{restore}from'/app/apps/worker/src/persistence.ts';import{TradeState}from'/app/apps/worker/src/state.ts';const state=new TradeState(),result=await restore(state,'/app/.runtime/feed/trade-feed.json');if(!Number.isSafeInteger(result.rows)||state.rows.prematch.size+state.rows.inplay.size!==result.rows)throw Error('OLD_IMAGE_ROLLBACK_READBACK_MISMATCH');console.log('rollback-old-image-readback-ok')"
+                output=run(['docker','run','--rm','--network','none','--memory',memory,'--memory-swap',memory,'--read-only','--tmpfs','/tmp:size=268435456,mode=1777','--mount',mount+',readonly','--entrypoint','node',progress['baseImage'],'--import','tsx','--input-type=module','-e',old_readback],timeout=900,log=backup/'rollback-old-image-readback.private.log')
+                require(b'rollback-old-image-readback-ok' in output,'ROLLBACK_OLD_IMAGE_READBACK_FAILED')
+                emit(operation='cutover.aws',stage='partitioned_upgrade.rollback_compatibility',status='verified',stateRows=compact_receipt['rows'],markets=compact_receipt['markets'],bets=compact_receipt['bets'],checkpointBytes=compact_receipt['bytes'],oldImageReadback=True,workerStarted=False,posnetChanged=False)
                 rollback_recovery=capture_recovery_generation(rollback_directory,backup)
                 progress['rollbackRecoveryGeneration']=rollback_recovery;save(progress)
                 verified_generation=verify_recovery_generation(backup,rollback_recovery)

@@ -204,7 +204,7 @@ class Upgrade(unittest.TestCase):
 
  def test_pipeline_dependency_pin_matches_current_source_manifest(self):
   path=HERE.parent.parent/'packages/feed-store/src/tenant-tickets.ts';indexed=HERE.parent.parent/'packages/feed-store/src/indexed-feed.ts'
-  digest=hashlib.sha256(path.read_bytes()).hexdigest();indexed_digest=hashlib.sha256(indexed.read_bytes()).hexdigest()
+  digest=hashlib.sha256(path.read_bytes()).hexdigest();installed_indexed=subprocess.check_output(['git','show','HEAD:'+str(indexed.relative_to(HERE.parent.parent))],cwd=HERE.parent.parent,text=True);indexed_digest=hashlib.sha256(installed_indexed.encode()).hexdigest()
   source_ns={'__name__':'tested_upgrade_manifest','require':NS['require'],'hashlib':hashlib,'json':json,'re':__import__('re'),'Path':Path}
   exec((HERE/'upgrade-partitioned-worker.py').read_text().split("if __name__=='__main__':")[0],source_ns)
   self.assertEqual(source_ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256'][str(path.relative_to(HERE.parent.parent))],digest)
@@ -223,13 +223,15 @@ class Upgrade(unittest.TestCase):
    str(indexed.relative_to(HERE.parent.parent)):indexed.read_text()}
   oldSubset={name:value for name,value in old.items() if name in source_ns['PIPELINE_BASE_FILES']|source_ns['PIPELINE_AUXILIARY_FILES']}
   digest=hashlib.sha256(json.dumps(base,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-  self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,candidate,digest,added))
-  oldIndexed={str(indexed.relative_to(HERE.parent.parent)):'installed:indexed-feed.ts'}
+  indexedName=str(indexed.relative_to(HERE.parent.parent))
+  initialCandidate={**candidate,indexedName:installed_indexed}
+  self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,initialCandidate,digest,added))
+  oldIndexed={indexedName:installed_indexed}
   indexedBase={**base,**oldIndexed}
   indexedDigest=hashlib.sha256(json.dumps(indexedBase,sort_keys=True,separators=(',',':')).encode()).hexdigest()
   self.assertIsNone(source_ns['verify_pipeline_sources'](oldSubset,candidate,indexedDigest,added,oldIndexed))
   with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,candidate,indexedDigest,added,{**oldIndexed,str(indexed.relative_to(HERE.parent.parent)):'different-installed-index'})
-  with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,str(indexed.relative_to(HERE.parent.parent)):'changed'},digest,added)
+  with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,indexedName:'changed'},indexedDigest,added,oldIndexed)
   with self.assertRaises(Exception):source_ns['verify_pipeline_sources'](oldSubset,{**candidate,'packages/feed-store/src/index.ts':'no export'},digest,added)
 
  def test_measured_restore_serialization_window_includes_return_readback(self):
@@ -499,6 +501,8 @@ class Upgrade(unittest.TestCase):
     if args[:2]==['docker','run'] and any("Object.fromEntries(names.map(n=>[n,fs.existsSync" in str(a) for a in args):return json.dumps(old_files).encode()
     if args[:2]==['docker','run'] and any('process.getuid()' in str(a) for a in args):return json.dumps({'uid':os.getuid() or 1000,'gid':os.getgid() or 1000,'groups':[os.getgid() or 1000],'opened':not read_access_fails,'readBytes':0 if read_access_fails else 1,'code':'EACCES' if read_access_fails else None,'chain':[]}).encode()
     if args[:2]==['docker','run'] and readback_fails and any('verifyProjectionFile' in str(v) for v in args):raise subprocess.CalledProcessError(1,args)
+    if args[:2]==['docker','run'] and any('rollback.compatibility_compaction' in str(v) for v in args):return b'{"operation":"rollback.compatibility_compaction","rows":1,"bytes":100,"markets":1,"bets":1,"journalBytes":0,"verified":true}'
+    if args[:2]==['docker','run'] and any('rollback-old-image-readback-ok' in str(v) for v in args):return b'rollback-old-image-readback-ok'
     if args[:2]==['docker','run'] and any('projection-serialize-ok' in str(v) for v in args):
      target=next(v for v in args if 'target=/output' in str(v));folder=Path(target.split('source=')[1].split(',target=')[0]);(folder/'receipt.json').write_text('{}');mount=next(v for v in args if 'target=/recovery' in str(v));inputs=Path(mount.split('source=')[1].split(',target=')[0]);files=list(inputs.iterdir());removed=sum(p.stat().st_size for p in files);[p.unlink() for p in files];record={'operation':'offline.rehearsal_inputs_consumed','removedFiles':len(files),'removedBytes':removed,'stage':'checkpoint_and_snapshot_fully_consumed_before_serialization'};return (json.dumps(record)+'\nprojection-serialize-ok').encode()
     if args[:2]==['docker','run']:return b'partitioned-offline-ok distribution-propagation-offline-ok full-recovery-offline-ok supplier-order-offline-ok nullable-markets-offline-ok throughput-offline-ok spool-memory-offline-ok snapshot-throughput-offline-ok planned-distribution-stop-ok durable-ingress-offline-ok snapshot-memory-offline-ok oom-checkpoint-restore-ok' if '--input-type=module' in args or any(str(a).endswith('-proof.mjs') for a in args) else json.dumps(hashes).encode()
@@ -582,7 +586,7 @@ class Upgrade(unittest.TestCase):
     self.assertEqual(len([c for c in calls if 'up' in c]),1);self.assertEqual(len([c for c in calls if c[:2]==['docker','build']]),1)
     self.assertTrue(all(c[-1]=='worker' and '--no-deps' in c and '--pull' in c for c in calls if 'up' in c))
     if supplier:
-     code,result=invoke('rollback');self.assertEqual(code,0,result);self.assertFalse(running);self.assertEqual(selected,'base');self.assertTrue(result['oldWorkerKeptStopped']);self.assertEqual(journal.read_bytes(),journal_before);self.assertTrue(all(c[-1]=='worker' and '--no-deps' in c for c in calls if 'create' in c));code,result=invoke('rollback');self.assertEqual(code,0,result);self.assertTrue(result['reused']);self.assertEqual(len([c for c in calls if 'create' in c]),1)
+     code,result=invoke('rollback');self.assertEqual(code,0,result);self.assertFalse(running);self.assertEqual(selected,'base');self.assertTrue(result['oldWorkerKeptStopped']);self.assertEqual(journal.read_bytes(),journal_before);self.assertTrue(any(any('rollback.compatibility_compaction' in str(arg) for arg in call) for call in calls if call[:2]==['docker','run']));self.assertTrue(any(any('rollback-old-image-readback-ok' in str(arg) for arg in call) for call in calls if call[:2]==['docker','run']));self.assertTrue(all(c[-1]=='worker' and '--no-deps' in c for c in calls if 'create' in c));code,result=invoke('rollback');self.assertEqual(code,0,result);self.assertTrue(result['reused']);self.assertEqual(len([c for c in calls if 'create' in c]),1)
    finally:NS.update(old)
  def test_checkpoint_parser_derives_prepared_image_reuses_stop_and_immutable_backup(self):
   with tempfile.TemporaryDirectory() as tmp:

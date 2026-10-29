@@ -311,10 +311,11 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           memoryStage('indexed_projection.delta');
           const ticketOutcomes:NonNullable<import('@lsports/contracts').EventFeed['ticketOutcomes']>=[];
           const ticketVersionRecoveries:NonNullable<import('@lsports/contracts').EventFeed['ticketVersionRecoveries']>=[];
-          const upserts=(function*(){for(const change of changes){const delta=stable.projectDelta(change.lane,change.key);ticketOutcomes.push(...(delta.ticketOutcomes||[]));ticketVersionRecoveries.push(...(delta.ticketVersionRecoveries||[]));const event=delta.events[0];if(event)yield event;}})();
+          const upserts=(function*(){for(const change of changes){const delta=stable.projectDelta(change.lane,change.key);ticketOutcomes.push(...(delta.ticketOutcomes||[]));ticketVersionRecoveries.push(...(delta.ticketVersionRecoveries||[]));const event=delta.events[0];if(event)yield change.marketIds===null?event:{...event,markets:event.markets?.filter(m=>change.marketIds!.includes(String(m.id)))||[]};}})();
           const deleted=(function*(){for(const change of changes)if(!stable.rows[change.lane].has(change.key))yield `${change.lane}:${String(change.key)}`;})();
+          const partialEventIds=new Set(changes.filter(change=>change.marketIds!==null&&stable.rows[change.lane].has(change.key)).map(change=>`${change.lane}:${String(change.key)}`));
           indexRows=changes.length;
-          indexDetails=await indexedFeed!.applyDeltaBatched(upserts,deleted,stable.projectionMetadata());
+          indexDetails=await indexedFeed!.applyDeltaBatched(upserts,deleted,stable.projectionMetadata(),{partialEventIds});
           state.acknowledgeProjectionChanges(changes);
           const deltaFeed={...stable.projectionMetadata(),events:[],ticketOutcomes,ticketVersionRecoveries};
           if(tenantTickets)tenantTickets.reconcile(deltaFeed);

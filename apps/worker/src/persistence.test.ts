@@ -200,7 +200,7 @@ test('both lanes persist concurrently through one writer; private checkpoint and
  const packages=(['prematch','inplay'] as const).map((lane,i)=>({lane,packageId:4511-i,username:'isolated',password:'',hostname:'unused',vhost:'unused',port:5672,tls:false,queue:'unused'}));
  try{await runConnected(abort.signal,{path,ticketPath:join(dir,'tickets.sqlite'),config:{packages,snapshotUrl:'https://unused.invalid',customersUrl:'https://unused.invalid',recoveryMs:300000,staleMs:90000},session:async(pkg,_cfg,state,save)=>{
   state.apply(pkg.lane,[{fixtureId:pkg.packageId,markets:[{id:1,status:1,bets:[{id:'123',price:'2.1',status:1,isChanged:1}]}]}],Date.now());await save();
-  const journal=(await readFile(path+'.checkpoint-journal.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line) as {op:string;lane:string});assert.ok(journal.some(r=>r.op==='upsert'&&r.lane===pkg.lane));
+  const journal=(await readFile(path+'.checkpoint-journal.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line) as {op:string;lane:string});assert.ok(journal.some(r=>['upsert','merge'].includes(r.op)&&r.lane===pkg.lane));
   if(++committed===2)abort.abort();
  }});
  const restarted=new TradeState();await restore(restarted,path);assert.equal(restarted.rows.prematch.size,1);assert.equal(restarted.rows.inplay.size,1);assert.equal(committed,2);
@@ -220,6 +220,34 @@ test('append-only checkpoint journal survives restart, compacts atomically and r
   restored=new TradeState();assert.equal((await restore(restored,path)).rows,1);assert.equal(restored.rows.prematch.get(501)?.markets.get('1')?.bets?.[0].price,'2.9');
   const journal=path+'.checkpoint-journal.jsonl',valid=await readFile(journal,'utf8');await writeFile(journal,valid+'{"op":"upsert"');
   const before=await readFile(path);await assert.rejects(restore(new TradeState(),path),/Truncated checkpoint journal/);assert.deepEqual(await readFile(path),before);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('market-level checkpoint journal merges partial rows and restores untouched markets after interruption',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-checkpoint-market-delta-')),path=join(dir,'feed.json');
+ try{
+  const state=new TradeState(),at=Date.now();
+  state.apply('prematch',[{fixtureId:777,fixture:{status:1},markets:[
+   {id:1,status:1,bets:[{id:'a',price:'1.8',status:1,isChanged:1,lastUpdate:new Date(at)}]},
+   {id:2,status:1,bets:[{id:'b',price:'2.2',status:1,isChanged:1,lastUpdate:new Date(at)}]},
+  ]}],at);
+  state.rows.prematch.get(777)!.deferredTimestampBets=new Map([
+   ['1:a',{marketId:1,selectionId:'a',bet:{id:'a'},inspection:{},receivedAt:new Date(at).toISOString()}],
+   ['2:b',{marketId:2,selectionId:'b',bet:{id:'b'},inspection:{},receivedAt:new Date(at).toISOString()}],
+  ]) as any;
+  let changes=state.projectionChanges();const initial=await persistCheckpointDelta(path,state,changes);state.acknowledgeProjectionChanges(changes);
+  state.apply('prematch',[{fixtureId:777,markets:[{id:1,status:1,bets:[{id:'a',price:'2.4',status:1,isChanged:1,lastUpdate:new Date(at+1000)}]}]}],at+1000);
+  changes=state.projectionChanges();const partial=await persistCheckpointDelta(path,state,changes);state.acknowledgeProjectionChanges(changes);
+  const records=(await readFile(path+'.checkpoint-journal.jsonl','utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(records[0].op,'merge');assert.equal(records[0].entry.markets.length,2);
+  assert.equal(records[1].op,'merge');assert.equal(records[1].entry.markets.length,1,'one changed market is journaled instead of the full fixture market set');
+  assert.ok(partial.bytes-initial.bytes<initial.bytes,'partial journal bytes scale with the changed market');
+  state.apply('prematch',[{fixtureId:777,fixture:{status:2}}],at+2000);
+  changes=state.projectionChanges();await persistCheckpointDelta(path,state,changes);
+  const restored=new TradeState();await restore(restored,path);const row=restored.rows.prematch.get(777)!;
+  assert.equal(row.fixture?.value.status,2);assert.equal(row.markets.get('1')?.bets?.[0].price,'2.4');assert.equal(row.markets.get('2')?.bets?.[0].price,'2.2');
+  assert.equal(row.deferredTimestampBets?.has('1:a'),false,'partial market replacement applies tombstones for removed per-selection state');
+  assert.equal(row.deferredTimestampBets?.has('2:b'),true,'untouched market selection state remains recoverable');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 

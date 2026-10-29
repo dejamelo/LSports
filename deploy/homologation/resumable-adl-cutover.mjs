@@ -136,9 +136,11 @@ export function indexedApiReaderCompatible(installedSource,candidateSource){
  return typeof a==='string'&&a===b;
 }
 export function indexedApiChangesCompatible(changedFiles,installedFeedStore,candidateFeedStore,installedContracts,candidateContracts){
- if(!Array.isArray(changedFiles)||changedFiles.some(name=>!['apps/worker/src/connected.ts','packages/contracts/src/index.ts','packages/feed-store/src/indexed-feed.ts'].includes(name)))return false;
- if(changedFiles.includes('packages/feed-store/src/indexed-feed.ts')&&!indexedApiReaderCompatible(installedFeedStore,candidateFeedStore))return false;
- if(changedFiles.includes('packages/contracts/src/index.ts')){
+ if(!Array.isArray(changedFiles))return false;
+ const apiFiles=changedFiles.filter(name=>!name.startsWith('apps/worker/'));
+ if(apiFiles.some(name=>!['packages/contracts/src/index.ts','packages/feed-store/src/indexed-feed.ts'].includes(name)))return false;
+ if(apiFiles.includes('packages/feed-store/src/indexed-feed.ts')&&!indexedApiReaderCompatible(installedFeedStore,candidateFeedStore))return false;
+ if(apiFiles.includes('packages/contracts/src/index.ts')){
   if(typeof installedContracts!=='string'||typeof candidateContracts!=='string')return false;
   const before='rssBytes?:number};',after='rssBytes?:number;indexedProjection?:{rows:number;rebuild:boolean;durationMs:number;upsertRows?:number;deletedRows?:number;yieldCount?:number;maxSliceMs?:number;commitMs?:number;elapsedMs?:number};};';
   if(installedContracts.split(before).length!==2||candidateContracts!==installedContracts.replace(before,after))return false;

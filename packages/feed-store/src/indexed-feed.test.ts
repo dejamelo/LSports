@@ -137,6 +137,26 @@ test("batched snapshot deltas yield to live work and stay invisible until atomic
   } finally { reader.close(); writer.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("partial market commits preserve untouched markets while a full snapshot can replace them", async () => {
+  const dir=mkdtempSync(join(tmpdir(),"adl-indexed-partial-market-")),path=join(dir,"public.sqlite"),now=Date.now(),writer=new IndexedFeedStore(path);
+  try{
+    const initial=event("prematch:partial",now);
+    initial.markets=[
+      {id:"m1",name:"one",status:1,selections:[{id:"s1",label:"A",odds:1.8,available:true}]},
+      {id:"m2",name:"two",status:1,selections:[{id:"s2",label:"B",odds:2.2,available:true}]},
+    ];
+    writer.rebuild([initial],metadata(now));
+    const changed={...initial,updatedAt:new Date(now+1000).toISOString(),markets:[{id:"m1",name:"one",status:1,selections:[{id:"s1",label:"A",odds:2.1,available:true}]}]};
+    await writer.applyDeltaBatched([changed],[],metadata(now+1000),{partialEventIds:new Set(["prematch:partial"])});
+    let page=writer.page({limit:10,scope:"partial",now:now+1000});
+    assert.equal(page.events[0].markets?.find(m=>m.id==="m1")?.selections[0].odds,2.1);
+    assert.equal(page.events[0].markets?.find(m=>m.id==="m2")?.selections[0].odds,2.2,"markets absent from the delta stay intact");
+    await writer.applyDeltaBatched([changed],[],metadata(now+2000));
+    page=writer.page({limit:10,scope:"full",now:now+2000});
+    assert.deepEqual(page.events[0].markets?.map(m=>m.id),["m1"],"a complete replacement removes markets absent from the full snapshot");
+  }finally{writer.close();rmSync(dir,{recursive:true,force:true});}
+});
+
 test("an interrupted batched delta rolls back cleanly on reopen", async () => {
   const dir = mkdtempSync(join(tmpdir(), "adl-indexed-batched-rollback-")), path = join(dir, "public.sqlite"), now = Date.now();
   const writer = new IndexedFeedStore(path);

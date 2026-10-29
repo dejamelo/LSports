@@ -76,7 +76,7 @@ export class IndexedFeedStore {
     upserts: Iterable<SportEvent>,
     deletedIds: Iterable<string>,
     metadata: Omit<EventFeed, "events">,
-    options: { maxSliceMs?: number; yieldEveryRows?: number; yieldTurn?: () => Promise<void> } = {},
+    options: { maxSliceMs?: number; yieldEveryRows?: number; yieldTurn?: () => Promise<void>; partialEventIds?: ReadonlySet<string> } = {},
   ) {
     const maxSliceMs = options.maxSliceMs ?? 8;
     const yieldEveryRows = options.yieldEveryRows ?? 32;
@@ -106,10 +106,12 @@ export class IndexedFeedStore {
         put.run(event.id, lane, event.sport, event.competition?.id ?? null, event.live ? 1 : 0,
           Date.parse(event.updatedAt || "") || 0, JSON.stringify({ ...rest, markets: [], selections: [] }));
         upsertRows++; changed = true; await yieldIfDue();
-        const keep = new Set(markets.map(market => market.id));
-        const current = existingMarkets.all(event.id) as { market_id: string }[];
-        for (const row of current) {
-          if (!keep.has(row.market_id)) { removeMarket.run(event.id, row.market_id); await yieldIfDue(); }
+        if(!options.partialEventIds?.has(event.id)){
+          const keep = new Set(markets.map(market => market.id));
+          const current = existingMarkets.all(event.id) as { market_id: string }[];
+          for (const row of current) {
+            if (!keep.has(row.market_id)) { removeMarket.run(event.id, row.market_id); await yieldIfDue(); }
+          }
         }
         for (const market of markets) {
           putMarket.run(event.id, market.id, JSON.stringify(market));

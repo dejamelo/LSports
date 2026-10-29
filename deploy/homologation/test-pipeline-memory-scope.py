@@ -43,13 +43,14 @@ class Scope(unittest.TestCase):
   old={p:'old' for p in ns['PIPELINE_BASE_FILES']|ns['PIPELINE_AUXILIARY_FILES']}
   dep='apps/worker/src/snapshot-capacity.ts';tenant='packages/feed-store/src/tenant-tickets.ts';added={dep:'installed-dependency',tenant:'installed-tenant-dependency'};base_hash=hashlib.sha256(added[dep].encode()).hexdigest();pinned=ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep];tenant_pinned=ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256'][tenant];ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep]=base_hash;ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256'][tenant]=hashlib.sha256(added[tenant].encode()).hexdigest()
   try:
-   digest=hashlib.sha256(json.dumps({p:({**old,**added})[p] for p in ns['PARTITION_FILES']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+   indexed_name='packages/feed-store/src/indexed-feed.ts';installed_indexed=subprocess.check_output(['git','show','HEAD:'+indexed_name],cwd=test_dir.parents[1],text=True);old_indexed={indexed_name:installed_indexed}
+   digest=hashlib.sha256(json.dumps({p:({**old,**added,**old_indexed})[p] for p in ns['PARTITION_FILES']|set(old_indexed)},sort_keys=True,separators=(',',':')).encode()).hexdigest()
    candidate={**old,**added,'apps/worker/src/connected.ts':'batch-fairness','apps/worker/src/durable-ingress.mjs':'covering-index','apps/worker/src/full-snapshot.ts':'bounded-batch','apps/worker/src/provider.ts':'batch-plumbing','apps/worker/src/diagnostics.ts':'heap-and-container-admission',dep:'two-source-memory-budget'}
    candidate[tenant]='bounded-tenant-index'
    for name in ('apps/worker/src/connected.ts','apps/worker/src/persistence.ts','packages/feed-store/src/index.ts'):
     candidate[name]=(test_dir.parents[1]/name).read_text()
    candidate['packages/feed-store/src/indexed-feed.ts']=(test_dir.parents[1]/'packages/feed-store/src/indexed-feed.ts').read_text()
-   self.assertEqual(set(candidate),ns['PARTITION_FILES']|ns['INDEXED_PUBLICATION_FILES']);ns['verify_pipeline_sources'](old,candidate,digest,added)
+   self.assertEqual(set(candidate),ns['PARTITION_FILES']|ns['INDEXED_PUBLICATION_FILES']);ns['verify_pipeline_sources'](old,candidate,digest,added,old_indexed)
    for changed,sha,source in ((old,digest,added),({**candidate,'apps/worker/src/persistence.ts':'unrelated'},digest,added),({**candidate,'apps/worker/src/messages.ts':'unrelated'},digest,added),(candidate,'f'*64,added),(candidate,digest,{dep:'unverified-dependency'})):
     with self.assertRaises(RuntimeError):ns['verify_pipeline_sources'](old,changed,sha,source)
   finally:ns['PIPELINE_ADDED_DEPENDENCY_SHA256'][dep]=pinned;ns['PIPELINE_PINNED_ADDED_DEPENDENCY_SHA256'][tenant]=tenant_pinned

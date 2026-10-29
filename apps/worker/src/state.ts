@@ -61,9 +61,9 @@ function setOrder(row:Row,key:string,bet:object,order:string,t:number){
   if(BigInt(order)===BigInt(t)*1000000n){delete value[preciseOrder];row.betOrder?.delete(key);return;}
   Object.defineProperty(value,preciseOrder,{value:order,writable:true,configurable:true});row.betOrder?.delete(key);
 }
-export function* persistedBetOrders(row:Row):Generator<[string,string]>{
-  if(row.betOrder)yield* row.betOrder;
-  for(const [marketId,market] of row.markets)for(const bet of market.bets||[]){
+export function* persistedBetOrders(row:Row,marketIds?:ReadonlySet<string>):Generator<[string,string]>{
+  if(row.betOrder)for(const [key,value] of row.betOrder)if(!marketIds||marketIds.has(key.slice(0,key.indexOf(':'))))yield [key,value];
+  for(const [marketId,market] of row.markets)if(!marketIds||marketIds.has(marketId))for(const bet of market.bets||[]){
     const order=(bet as OrderedBet)[preciseOrder];if(order!==undefined)yield [`${marketId}:${bet.id}`,order];
   }
 }
@@ -155,12 +155,14 @@ export class TradeState {
   get mutationGeneration() { return this.mutationGenerationValue; }
   private noteMutation() { this.mutationGenerationValue++; }
   private projectionSequence = 0;
-  private projectionDirtyRows = new Map<string, { lane: Lane; key: number | string; sequence: number }>();
-  private markProjectionDirty(lane: Lane, key: number | string) {
+  private projectionDirtyRows = new Map<string, { lane: Lane; key: number | string; sequence: number; marketIds: Set<string> | null }>();
+  private markProjectionDirty(lane: Lane, key: number | string, marketIds?: readonly string[] | null) {
     const sequence = ++this.projectionSequence;
-    this.projectionDirtyRows.set(`${lane}:${String(key)}`, { lane, key, sequence });
+    const id=`${lane}:${String(key)}`,previous=this.projectionDirtyRows.get(id);
+    if(previous?.marketIds===null||marketIds===undefined||marketIds===null)this.projectionDirtyRows.set(id,{lane,key,sequence,marketIds:null});
+    else this.projectionDirtyRows.set(id,{lane,key,sequence,marketIds:new Set([...(previous?.marketIds||[]),...marketIds])});
   }
-  projectionChanges() { return [...this.projectionDirtyRows.values()]; }
+  projectionChanges() { return [...this.projectionDirtyRows.values()].map(change=>({...change,marketIds:change.marketIds===null?null:[...change.marketIds]})); }
   acknowledgeProjectionChanges(changes: readonly { lane: Lane; key: number | string; sequence: number }[]) {
     for (const change of changes) {
       const id = `${change.lane}:${String(change.key)}`;
@@ -232,7 +234,7 @@ export class TradeState {
     this.publicationStarted=Date.now();this.publicationPhase='capture';
     const captured=Object.create(this) as TradeState;
     captured.mutationGenerationValue=this.mutationGenerationValue;
-    captured.projectionDirtyRows = new Map(this.projectionDirtyRows);
+    captured.projectionDirtyRows = new Map([...this.projectionDirtyRows].map(([id,change])=>[id,{...change,marketIds:change.marketIds===null?null:new Set(change.marketIds)}]));
     captured.projectionSequence = this.projectionSequence;
     captured.rows={prematch:new Map(this.rows.prematch),inplay:new Map(this.rows.inplay)};
     captured.connections=structuredClone(this.connections);captured.metrics=structuredClone(this.metrics);
@@ -326,7 +328,7 @@ export class TradeState {
       const snapshotObservations=new Map<string,import("@lsports/contracts").SnapshotQuoteObservation>();
       const isoTimes=new Map<number,string>();const isoTime=(n:number)=>{let value=isoTimes.get(n);if(value===undefined){value=new Date(n).toISOString();if(isoTimes.size<1024)isoTimes.set(n,value);}return value;};
       const key = event.outright ? `outright:${event.outright.competitionId}:${event.fixtureId}` : event.fixtureId;
-      this.markProjectionDirty(lane, key);
+      this.markProjectionDirty(lane, key,(event.markets||[]).filter(m=>m.id!==undefined).map(m=>String(m.id)));
       let row = this.rows[lane].get(key);
       if (!row) {
         row = { markets: new Map(), marketAt: new Map(), betAt: new Map() };

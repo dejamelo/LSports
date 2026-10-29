@@ -40,12 +40,12 @@ export function checkpoint(state: TradeState, includeRegular=true) {
 }
 
 // Internal writer payload: emitted arrays are lazy; wire/checkpoint schema is unchanged.
-const mapItems=(value:Map<any,any>|undefined)=>value?jsonItems(function*(){yield* value;}):undefined;
-export function streamedRow(lane:Lane,key:string|number,row:Row,outright=false){return {
+const mapItems=(value:Map<any,any>|undefined,marketIds?:ReadonlySet<string>)=>value?jsonItems(function*(){for(const [key,item] of value)if(!marketIds||marketIds.has(String(key).split(':',1)[0]))yield [key,item];}):undefined;
+export function streamedRow(lane:Lane,key:string|number,row:Row,outright=false,marketIds?:ReadonlySet<string>){return {
  lane,fixtureId:outright?Number(String(key).split(':').at(-1)):Number(key),fixture:row.fixture,
  ...(outright?{outright:row.outright,outrightScore:row.outrightScore}:{}),livescore:row.livescore,
- markets:mapItems(row.markets),marketAt:mapItems(row.marketAt),betAt:mapItems(row.betAt),betOrder:jsonItems(function*(){yield* persistedBetOrders(row);}),marketReceipt:row.marketReceipt,
- deferredTimestampBets:mapItems(row.deferredTimestampBets),timestampRecovery:mapItems(row.timestampRecovery),settlementAudit:mapItems(row.settlementAudit),settlementMarkets:mapItems(row.settlementMarkets),
+ markets:mapItems(row.markets,marketIds),marketAt:mapItems(row.marketAt,marketIds),betAt:mapItems(row.betAt,marketIds),betOrder:jsonItems(function*(){yield* persistedBetOrders(row,marketIds);}),marketReceipt:row.marketReceipt,
+ deferredTimestampBets:mapItems(row.deferredTimestampBets,marketIds),timestampRecovery:mapItems(row.timestampRecovery,marketIds),settlementAudit:mapItems(row.settlementAudit,marketIds),settlementMarkets:mapItems(row.settlementMarkets,marketIds),
 };}
 // Use under publicationTurn/state.exclusive, exactly like streamed regular persistence.
 export function streamCheckpoint(state:TradeState){
@@ -55,13 +55,15 @@ export function streamCheckpoint(state:TradeState){
 
 export const checkpointJournalPath=(path:string)=>path+'.checkpoint-journal.jsonl';
 export const CHECKPOINT_JOURNAL_COMPACT_BYTES=1024**3;
-export async function persistCheckpointDelta(path:string,state:TradeState,changes:readonly {lane:Lane;key:number|string}[]){
+export async function persistCheckpointDelta(path:string,state:TradeState,changes:readonly {lane:Lane;key:number|string;marketIds?:readonly string[]|null}[]){
  const journal=checkpointJournalPath(path);await mkdir(dirname(path),{recursive:true});
  const file=await open(journal,'a',0o600);let rows=0,bytes=0,serializeMs=0,writeAwaitMs=0,fsyncAwaitMs=0;
  try{
   for(const change of changes){
    const row=state.rows[change.lane].get(change.key);
-   const record=row?{op:'upsert',lane:change.lane,key:change.key,regular:!row.outright,entry:streamedRow(change.lane,change.key,row,!!row.outright)}:{op:'delete',lane:change.lane,key:change.key};
+   const partial=!!row&&change.marketIds!==undefined&&change.marketIds!==null;
+   const marketIds=partial?new Set(change.marketIds):undefined;
+   const record=row?{op:partial?'merge':'upsert',lane:change.lane,key:change.key,regular:!row.outright,...(partial?{marketIds:[...marketIds!]}:{}),entry:streamedRow(change.lane,change.key,row,!!row.outright,marketIds)}:{op:'delete',lane:change.lane,key:change.key};
    const atWrite=performance.now();await writeJsonRecord(file,record);writeAwaitMs+=performance.now()-atWrite;
    const at=performance.now();await file.writeFile('\n');writeAwaitMs+=performance.now()-at;rows++;
   }
@@ -175,14 +177,14 @@ export async function restore(state: TradeState, path: string, progress?:(sample
   const recovered = new TradeState();
   let rows = 0;
   let restoreStage='checkpoint.rebuild';
-  let restoreJournalEntry:((entry:unknown,regular:boolean,replace?:boolean)=>void)|undefined;
+  let restoreJournalEntry:((entry:unknown,regular:boolean,mode?:'replace'|'merge',marketIds?:readonly string[])=>void)|undefined;
   if (value.workerCheckpoint !== undefined) {
     const saved = value.workerCheckpoint;
     if (!object(saved) || saved.version !== 1 || !Array.isArray(saved.outright))
       throw new Error('Unsupported TRADE checkpoint; original file preserved');
     if(saved.regularExternal!==undefined&&saved.regularExternal!==true)throw new Error('Invalid private checkpoint reference');
     if(saved.regular!==undefined&&!Array.isArray(saved.regular))throw new Error('Invalid regular checkpoint');
-    const restoreEntry=(entry:unknown,regular:boolean,replace=false)=>{
+    const restoreEntry=(entry:unknown,regular:boolean,mode?:'replace'|'merge',mergeMarketIds?:readonly string[])=>{
       if(rows%100===0)progress?.({stage:restoreStage,rows});
       if(Math.min(getHeapStatistics().heap_size_limit-process.memoryUsage().heapUsed,process.availableMemory?.()??Infinity)<320*1024**2)throw new Error('Private checkpoint incremental memory guard; original preserved');
       if (!object(entry) || !['prematch', 'inplay'].includes(String(entry.lane)) || !validId(entry.fixtureId) ||
@@ -217,21 +219,35 @@ export async function restore(state: TradeState, path: string, progress?:(sample
       if(entry.betOrder !== undefined && (!tuples(entry.betOrder) || entry.betOrder.some(([,v])=>typeof v!=='string'||!/^[-]?[0-9]{1,25}$/.test(v))))throw new Error('Invalid precise timestamp ordering; original preserved');
       const lane = entry.lane as Lane;
       const key = regular?entry.fixtureId:`outright:${(entry.outright as Record<string,unknown>).competitionId}:${entry.fixtureId}`;
-      if(replace)recovered.rows[lane].delete(key);
-      if (recovered.rows[lane].has(key)) throw new Error('Duplicate checkpoint identity');
-      const markets=new Map(entry.markets) as Map<string,Market>;
-      const betAt=compactBetAt(markets,entry.betAt as [string,number][]);
+      const existing=mode==='merge'?recovered.rows[lane].get(key):undefined;
+      if(mode==='replace')recovered.rows[lane].delete(key);
+      if (mode!=='merge'&&recovered.rows[lane].has(key)) throw new Error('Duplicate checkpoint identity');
+      const mergeScopedTuples=<T>(prior:Map<string,T>|undefined,incoming:unknown,scope:readonly string[]|undefined,compound:boolean):Map<string,T>=>{
+        const result=new Map(prior||[]);
+        if(scope){const touched=new Set(scope);for(const id of result.keys()){const marketId=compound?id.slice(0,id.indexOf(':')):id;if(touched.has(marketId))result.delete(id);}}
+        if(incoming!==undefined)for(const [id,value] of incoming as [string,T][])result.set(id,value);
+        return result;
+      };
+      const scoped=mode==='merge'?mergeMarketIds:undefined;
+      const markets=mergeScopedTuples(existing?.markets,entry.markets,scoped,false) as Map<string,Market>;
+      const marketAt=mergeScopedTuples(existing?.marketAt,entry.marketAt,scoped,false);
+      const savedBetAt=mergeScopedTuples(existing?.betAt,entry.betAt,scoped,true);
+      const betAt=compactBetAt(markets,savedBetAt);
+      const mergeTuples=<T>(prior:Map<string,T>|undefined,incoming:unknown):Map<string,T>|undefined=>{
+        if(incoming===undefined)return prior?new Map(prior):undefined;
+        const result=new Map(prior||[]);for(const [id,value] of incoming as [string,T][])result.set(id,value);return result;
+      };
+      const betOrder=mode==='merge'?mergeScopedTuples(existing?.betOrder,entry.betOrder,scoped,true):mergeTuples(existing?.betOrder,entry.betOrder);
       const restoredRow:Row={
-        deferredTimestampBets: entry.deferredTimestampBets === undefined ? undefined : new Map(entry.deferredTimestampBets as [string, unknown][]) as Row["deferredTimestampBets"],
-        timestampRecovery: entry.timestampRecovery === undefined ? undefined : new Map(entry.timestampRecovery as [string, unknown][]) as Row["timestampRecovery"],
-        settlementAudit: entry.settlementAudit === undefined ? undefined : new Map(entry.settlementAudit as [string, unknown][]) as Row["settlementAudit"],
-        settlementMarkets: entry.settlementMarkets === undefined ? undefined : new Map(entry.settlementMarkets as [string, unknown][]) as Row["settlementMarkets"],
-        outrightScore: entry.outrightScore as unknown as Row["outrightScore"],
-        fixture: entry.fixture as unknown as Row["fixture"], outright: entry.outright as unknown as Row["outright"],
-        livescore: entry.livescore as unknown as Row["livescore"], marketReceipt: entry.marketReceipt as unknown as Row["marketReceipt"],
-        betOrder: entry.betOrder === undefined ? undefined : new Map(entry.betOrder as [string,string][]),
-        markets,
-        marketAt: new Map(entry.marketAt) as Map<string, number>, betAt,
+        deferredTimestampBets: (mode==='merge'?mergeScopedTuples(existing?.deferredTimestampBets,entry.deferredTimestampBets,scoped,true):mergeTuples(existing?.deferredTimestampBets,entry.deferredTimestampBets)) as Row["deferredTimestampBets"],
+        timestampRecovery: (mode==='merge'?mergeScopedTuples(existing?.timestampRecovery,entry.timestampRecovery,scoped,true):mergeTuples(existing?.timestampRecovery,entry.timestampRecovery)) as Row["timestampRecovery"],
+        settlementAudit: (mode==='merge'?mergeScopedTuples(existing?.settlementAudit,entry.settlementAudit,scoped,true):mergeTuples(existing?.settlementAudit,entry.settlementAudit)) as Row["settlementAudit"],
+        settlementMarkets: (mode==='merge'?mergeScopedTuples(existing?.settlementMarkets,entry.settlementMarkets,scoped,false):mergeTuples(existing?.settlementMarkets,entry.settlementMarkets)) as Row["settlementMarkets"],
+        outrightScore: (entry.outrightScore??existing?.outrightScore) as Row["outrightScore"],
+        fixture: (entry.fixture??existing?.fixture) as Row["fixture"], outright: (entry.outright??existing?.outright) as Row["outright"],
+        livescore: (entry.livescore??existing?.livescore) as Row["livescore"], marketReceipt: (entry.marketReceipt??existing?.marketReceipt) as Row["marketReceipt"],
+        betOrder,
+        markets, marketAt, betAt,
       };
       restorePreciseBetOrders(restoredRow);
       recovered.rows[lane].set(key, restoredRow);
@@ -306,7 +322,7 @@ export async function restore(state: TradeState, path: string, progress?:(sample
       if(Buffer.byteLength(pending)>32*1024**2&&!pending.includes('\n'))throw new Error('Checkpoint journal record limit; original preserved');
       for(;;){const end=pending.indexOf('\n');if(end<0)break;const line=pending.slice(0,end);pending=pending.slice(end+1);if(!line)throw new Error('Empty checkpoint journal record; original preserved');
         let record:unknown;try{record=JSON.parse(line);}catch{throw new Error('Invalid checkpoint journal record; original preserved');}
-        if(!object(record)||!['upsert','delete'].includes(String(record.op))||!['prematch','inplay'].includes(String(record.lane))||!(typeof record.key==='number'&&validId(record.key)||typeof record.key==='string'&&record.key.length>0&&record.key.length<=128))throw new Error('Invalid checkpoint journal identity; original preserved');
+        if(!object(record)||!['upsert','merge','delete'].includes(String(record.op))||!['prematch','inplay'].includes(String(record.lane))||!(typeof record.key==='number'&&validId(record.key)||typeof record.key==='string'&&record.key.length>0&&record.key.length<=128)||(record.op==='merge'&&(!Array.isArray(record.marketIds)||record.marketIds.some(id=>typeof id!=='string'||!validId(Number(id))))))throw new Error('Invalid checkpoint journal identity; original preserved');
         const lane=record.lane as Lane;
         if(record.op==='delete')recovered.rows[lane].delete(record.key as number|string);
         else{
@@ -315,7 +331,7 @@ export async function restore(state: TradeState, path: string, progress?:(sample
           const key=record.regular?entry.fixtureId:`outright:${(entry.outright as Record<string,unknown>)?.competitionId}:${entry.fixtureId}`;
           if(key!==record.key)throw new Error('Checkpoint journal key mismatch; original preserved');
           if(!restoreJournalEntry)throw new Error('Checkpoint journal cannot apply to legacy baseline; original preserved');
-          restoreJournalEntry(entry,record.regular,true);
+          restoreJournalEntry(entry,record.regular,record.op==='merge'?'merge':'replace',record.op==='merge'?record.marketIds as string[]:undefined);
         }
         journalRows++;
       }
