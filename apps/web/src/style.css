@@ -1283,9 +1283,38 @@ footer {
 /* Real iframe viewport layout; no zoom/transform scaling or session mutation. */
 .sportsbook { min-width:0; max-width:100%; }
 .sports-rail { display:none; }
-.sportsbook .slip-content { min-height:0; }
+.sportsbook .slip-content {
+  min-width:0;
+  min-height:0;
+  flex:1 1 auto;
+  overflow-y:auto;
+  overscroll-behavior-y:contain;
+  -webkit-overflow-scrolling:touch;
+  touch-action:pan-y;
+}
+.sportsbook .betslip {
+  flex-direction:column;
+  min-height:0;
+  height:calc(100dvh - 24px);
+  max-height:calc(100dvh - 24px);
+  top:12px;
+  overflow:hidden;
+}
+@media(min-width:901px){.sportsbook:not(.compact-sportsbook) .betslip{display:flex;}}
+.sportsbook .betslip .slip-title,
+.sportsbook .betslip .slip-confirm,
+.sportsbook .betslip .slip-bottom { flex:0 0 auto; }
+.sportsbook .betslip .picks { max-height:none; overflow:visible; }
 .sportsbook .slip-confirm {padding:12px 16px;background:#192226;border-top:1px solid #35434b;flex-shrink:0;}
 .sportsbook .slip-confirm .simulate {width:100%;min-height:48px;margin:0;}
+@media(max-height:560px){
+  .sportsbook:not(.compact-sportsbook) .betslip .slip-mode,
+  .sportsbook:not(.compact-sportsbook) .betslip .slip-fine,
+  .sportsbook:not(.compact-sportsbook) .betslip .slip-limits,
+  .sportsbook:not(.compact-sportsbook) .betslip .slip-bottom { display:none; }
+  .sportsbook:not(.compact-sportsbook) .betslip .slip-title { padding:8px 12px; }
+  .sportsbook:not(.compact-sportsbook) .betslip .slip-confirm { padding:8px 10px; }
+}
 .compact-sportsbook .header {height:60px;padding:8px 12px;gap:8px;}
 .compact-sportsbook .header nav,.compact-sportsbook .locale {display:none;}
 .compact-sportsbook .header-right {margin-left:auto;gap:4px;}
