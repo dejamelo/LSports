@@ -90,23 +90,31 @@ export async function persistCheckpointDelta(path:string,state:TradeState,change
 
 /** Atomic full-state compaction. The journal is rotated only after the new baseline is durable. */
 export async function compactCheckpointJournal(path:string,state:TradeState){
- const temp=path+'.checkpoint-compaction.tmp',journal=checkpointJournalPath(path),journalTemp=journal+'.empty.tmp';
+ const began=performance.now(),temp=path+'.checkpoint-compaction.tmp',journal=checkpointJournalPath(path),journalTemp=journal+'.empty.tmp';
  await mkdir(dirname(path),{recursive:true});
- try{await copyFile(path,path+'.pre-indexed-compaction.bak',constants.COPYFILE_EXCL);}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST'&&(error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
- const file=await open(temp,'w',0o600);let rows=0,bytes=0;const write=async(s:string)=>{await file.writeFile(s);bytes+=Buffer.byteLength(s);};
+ let backupMs=0,backupCreated=false;
+ {const at=performance.now();try{await copyFile(path,path+'.pre-indexed-compaction.bak',constants.COPYFILE_EXCL);backupCreated=true;}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST'&&(error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}finally{backupMs=performance.now()-at;}}
+ const openStarted=performance.now(),file=await open(temp,'w',0o600),openMs=performance.now()-openStarted;
+ // The old compactor awaited a 64 KiB write for every record fragment. At the
+ // production checkpoint size (~1.31 GB) those tens of thousands of small
+ // writes took over 160 seconds. Keep the same streamed JSON and atomic rename,
+ // but coalesce fragments across row boundaries into bounded 1 MiB writes.
+ const output=checkpointWriteBuffer(file);let rows=0,bytes=0,serializeMs=0,recordWriteAwaitMs=0;
+ const write=async(s:string)=>{bytes+=Buffer.byteLength(s);await output.writeFile(s);};
  try{
   await write('{"mode":"connected","events":[],"workerCheckpoint":{"version":1,"regular":[');
   let first=true;
-  for(const lane of ['prematch','inplay'] as const)for(const[key,row]of state.rows[lane])if(!row.outright){if(!first)await write(',');first=false;await writePrivateCheckpointRecord(file,streamedRow(lane,key,row,false));rows++;}
+  for(const lane of ['prematch','inplay'] as const)for(const[key,row]of state.rows[lane])if(!row.outright){if(!first)await write(',');first=false;const metrics=await writePrivateCheckpointRecord(output as unknown as typeof file,streamedRow(lane,key,row,false));serializeMs+=metrics.serializeMs;recordWriteAwaitMs+=metrics.writeAwaitMs;rows++;}
   await write('],"outright":[');first=true;
-  for(const lane of ['prematch','inplay'] as const)for(const[key,row]of state.rows[lane])if(row.outright){if(!first)await write(',');first=false;await writePrivateCheckpointRecord(file,streamedRow(lane,key,row,true));rows++;}
-  await write(']}}');const at=performance.now();await file.sync();const fsyncMs=performance.now()-at;
-  bytes=(await file.stat()).size;
-  await file.close();await rename(temp,path);
-  const directory=await open(dirname(path),'r');try{await directory.sync();}finally{await directory.close();}
-  const empty=await open(journalTemp,'w',0o600);try{await empty.sync();}finally{await empty.close();}
-  await rename(journalTemp,journal);const journalDir=await open(dirname(journal),'r');try{await journalDir.sync();}finally{await journalDir.close();}
-  return {rows,bytes,fsyncMs:Math.ceil(fsyncMs)};
+  for(const lane of ['prematch','inplay'] as const)for(const[key,row]of state.rows[lane])if(row.outright){if(!first)await write(',');first=false;const metrics=await writePrivateCheckpointRecord(output as unknown as typeof file,streamedRow(lane,key,row,true));serializeMs+=metrics.serializeMs;recordWriteAwaitMs+=metrics.writeAwaitMs;rows++;}
+  await write(']}}');await output.flush();
+  const bytesOnDisk=(await file.stat()).size,fsyncStarted=performance.now();await file.sync();const fsyncMs=performance.now()-fsyncStarted;
+  const closeStarted=performance.now();await file.close();const closeMs=performance.now()-closeStarted;
+  const renameStarted=performance.now();await rename(temp,path);const renameMs=performance.now()-renameStarted;
+  const directoryStarted=performance.now(),directory=await open(dirname(path),'r');try{await directory.sync();}finally{await directory.close();}const directorySyncMs=performance.now()-directoryStarted;
+  const journalStarted=performance.now(),empty=await open(journalTemp,'w',0o600);try{await empty.sync();}finally{await empty.close();}
+  await rename(journalTemp,journal);const journalDir=await open(dirname(journal),'r');try{await journalDir.sync();}finally{await journalDir.close();}const journalRotateMs=performance.now()-journalStarted;
+  return {rows,bytes:bytesOnDisk,serializeMs:Math.ceil(serializeMs),recordWriteAwaitMs:Math.ceil(recordWriteAwaitMs),writeCalls:output.stats.writeCalls,writeAwaitMs:output.stats.writeAwaitMs,maxBufferedBytes:output.stats.maxBufferedBytes,backupCreated,backupMs:Math.ceil(backupMs),openMs:Math.ceil(openMs),fsyncMs:Math.ceil(fsyncMs),closeMs:Math.ceil(closeMs),renameMs:Math.ceil(renameMs),directorySyncMs:Math.ceil(directorySyncMs),journalRotateMs:Math.ceil(journalRotateMs),totalMs:Math.ceil(performance.now()-began),accountedBytes:output.stats.writeBytes};
  }catch(error){try{await file.close();}catch{}throw error;}
 }
 

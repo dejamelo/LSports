@@ -297,6 +297,12 @@ test('12,321-fixture periodic refresh keeps unchanged market deltas out of the c
   const recovered=new TradeState();const recovery=await restore(recovered,path);
   assert.equal(recovery.rows,12321,'the batched journal remains a complete recoverable prefix after restart');
   assert.equal(recovered.rows.prematch.get(1)?.markets.size,3);
+  const compacted=await compactCheckpointJournal(path,state);
+  assert.equal(compacted.rows,12321,'snapshot compaction includes the full validated state');
+  assert.equal(compacted.bytes,compacted.accountedBytes,'the bounded writer accounts for every checkpoint byte');
+  assert.ok(compacted.writeCalls<compacted.bytes/(1024*1024)*2,`compaction coalesces record fragments across rows (${compacted.writeCalls} writes for ${compacted.bytes} bytes)`);
+  assert.ok(compacted.maxBufferedBytes<=1024*1024,'compaction memory remains bounded');
+  const afterCompaction=new TradeState();assert.equal((await restore(afterCompaction,path)).rows,12321,'the atomically installed baseline remains independently recoverable');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 

@@ -83,46 +83,55 @@ export class IndexedFeedStore {
     if (!Number.isFinite(maxSliceMs) || maxSliceMs < 1 || maxSliceMs > 1000 || !Number.isSafeInteger(yieldEveryRows) || yieldEveryRows < 1 || yieldEveryRows > 10000) throw Error("INVALID_INDEX_DELTA_SLICE");
     const yieldTurn = options.yieldTurn ?? (() => new Promise<void>(resolve => setImmediate(resolve)));
     const started = performance.now(); let sliceStarted = started, maxSliceObservedMs = 0, yieldCount = 0, upsertRows = 0, deletedRows = 0, sliceRows = 0;
+    const phase={beginMs:0,prepareStatementsMs:0,eventSerializeMs:0,eventWriteMs:0,eventDeleteMs:0,marketLookupMs:0,marketSerializeMs:0,marketWriteMs:0,marketDeleteMs:0,metadataMs:0,yieldAwaitMs:0};
     const yieldIfDue = async () => {
       sliceRows++;
       const elapsed = performance.now() - sliceStarted;
       if (elapsed < maxSliceMs && sliceRows < yieldEveryRows) return;
-      maxSliceObservedMs = Math.max(maxSliceObservedMs, elapsed); yieldCount++; await yieldTurn(); sliceStarted = performance.now();
+      maxSliceObservedMs = Math.max(maxSliceObservedMs, elapsed); yieldCount++;const yielded=performance.now();await yieldTurn();phase.yieldAwaitMs+=performance.now()-yielded;sliceStarted = performance.now();
       sliceRows = 0;
     };
-    this.db.exec("BEGIN IMMEDIATE");
+    let measured=performance.now();this.db.exec("BEGIN IMMEDIATE");phase.beginMs=performance.now()-measured;
     try {
+      measured=performance.now();
       const remove = this.db.prepare("DELETE FROM feed_events WHERE id=?");
-      let changed = false;
-      for (const id of deletedIds) { remove.run(id); deletedRows++; changed = true; await yieldIfDue(); }
       const put = this.db.prepare("INSERT INTO feed_events(id,lane,sport,competition_id,live,updated_at_ms,body) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lane=excluded.lane,sport=excluded.sport,competition_id=excluded.competition_id,live=excluded.live,updated_at_ms=excluded.updated_at_ms,body=excluded.body");
       const existingMarkets = this.db.prepare("SELECT market_id FROM feed_markets WHERE event_id=?");
       const removeMarket = this.db.prepare("DELETE FROM feed_markets WHERE event_id=? AND market_id=?");
       const putMarket = this.db.prepare("INSERT INTO feed_markets(event_id,market_id,body) VALUES(?,?,?) ON CONFLICT(event_id,market_id) DO UPDATE SET body=excluded.body WHERE feed_markets.body IS NOT excluded.body");
+      phase.prepareStatementsMs=performance.now()-measured;
+      let changed = false;
+      for (const id of deletedIds) { measured=performance.now();remove.run(id);phase.eventDeleteMs+=performance.now()-measured;deletedRows++; changed = true; await yieldIfDue(); }
       for (const event of upserts) {
         const lane = event.source;
         if (lane !== "prematch" && lane !== "inplay") throw Error("INDEX_EVENT_WITHOUT_LANE");
         const { markets = [], marketDiagnostic: _diagnostic, ...rest } = event;
+        measured=performance.now();const eventBody=JSON.stringify({ ...rest, markets: [], selections: [] });phase.eventSerializeMs+=performance.now()-measured;
+        measured=performance.now();
         put.run(event.id, lane, event.sport, event.competition?.id ?? null, event.live ? 1 : 0,
-          Date.parse(event.updatedAt || "") || 0, JSON.stringify({ ...rest, markets: [], selections: [] }));
+          Date.parse(event.updatedAt || "") || 0, eventBody);phase.eventWriteMs+=performance.now()-measured;
         upsertRows++; changed = true; await yieldIfDue();
         if(!options.partialEventIds?.has(event.id)){
           const keep = new Set(markets.map(market => market.id));
-          const current = existingMarkets.all(event.id) as { market_id: string }[];
+          measured=performance.now();const current = existingMarkets.all(event.id) as { market_id: string }[];phase.marketLookupMs+=performance.now()-measured;
           for (const row of current) {
-            if (!keep.has(row.market_id)) { removeMarket.run(event.id, row.market_id); await yieldIfDue(); }
+            if (!keep.has(row.market_id)) { measured=performance.now();removeMarket.run(event.id, row.market_id);phase.marketDeleteMs+=performance.now()-measured;await yieldIfDue(); }
           }
         }
         for (const market of markets) {
-          putMarket.run(event.id, market.id, JSON.stringify(market));
+          measured=performance.now();const marketBody=JSON.stringify(market);phase.marketSerializeMs+=performance.now()-measured;
+          measured=performance.now();putMarket.run(event.id, market.id, marketBody);phase.marketWriteMs+=performance.now()-measured;
           await yieldIfDue();
         }
       }
-      this.commitMetadata(metadata, changed);
+      measured=performance.now();this.commitMetadata(metadata, changed);phase.metadataMs=performance.now()-measured;
       const beforeCommit = performance.now(); maxSliceObservedMs = Math.max(maxSliceObservedMs, beforeCommit - sliceStarted);
       this.db.exec("COMMIT"); const commitMs = Math.ceil(performance.now() - beforeCommit); maxSliceObservedMs = Math.max(maxSliceObservedMs, commitMs);
       const elapsedMs = Math.ceil(performance.now() - started);
-      return { upsertRows, deletedRows, yieldCount, maxSliceMs: Math.ceil(maxSliceObservedMs), commitMs, elapsedMs };
+      const sqlWriteMs=phase.eventDeleteMs+phase.eventWriteMs+phase.marketDeleteMs+phase.marketWriteMs+phase.metadataMs;
+      return { upsertRows, deletedRows, yieldCount, maxSliceMs: Math.ceil(maxSliceObservedMs), commitMs, elapsedMs,
+        ...Object.fromEntries(Object.entries(phase).map(([key,value])=>[key,Math.ceil(value)])),sqlWriteMs:Math.ceil(sqlWriteMs),
+        indexMaintenanceIncludedInSqlMs:true,indexedTables:"feed_events,feed_markets" };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   private put(stmt: ReturnType<DatabaseSync["prepare"]>, putMarket: ReturnType<DatabaseSync["prepare"]>, event: SportEvent): void;

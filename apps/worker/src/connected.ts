@@ -298,7 +298,7 @@ export async function runConnected(signal: AbortSignal, dependencies: {
         );
         const checkpointIo=durable.checkpointResult;
         const regularDurationMs=Math.ceil(performance.now()-regularStarted),indexStarted=performance.now();
-        let indexRows=0,indexRebuild=false,indexDetails:Record<string,number>|undefined;
+        let indexRows=0,indexRebuild=false,indexDetails:Record<string,number|string|boolean>|undefined,checkpointCompaction:Record<string,number|boolean>|undefined;
         if(!indexedReady){
           memoryStage('indexed_projection.rebuild');
           const feed=stable.projection(Date.now(),false);
@@ -311,21 +311,27 @@ export async function runConnected(signal: AbortSignal, dependencies: {
           memoryStage('indexed_projection.delta');
           const ticketOutcomes:NonNullable<import('@lsports/contracts').EventFeed['ticketOutcomes']>=[];
           const ticketVersionRecoveries:NonNullable<import('@lsports/contracts').EventFeed['ticketVersionRecoveries']>=[];
-          const upserts=(function*(){for(const change of changes){const delta=stable.projectDelta(change.lane,change.key);ticketOutcomes.push(...(delta.ticketOutcomes||[]));ticketVersionRecoveries.push(...(delta.ticketVersionRecoveries||[]));const event=delta.events[0];if(event)yield change.marketIds===null?event:{...event,markets:event.markets?.filter(m=>change.marketIds!.includes(String(m.id)))||[]};}})();
+          let projectionPrepareMs=0;
+          const upserts=(function*(){for(const change of changes){const prepared=performance.now();const delta=stable.projectDelta(change.lane,change.key);ticketOutcomes.push(...(delta.ticketOutcomes||[]));ticketVersionRecoveries.push(...(delta.ticketVersionRecoveries||[]));const event=delta.events[0];if(event)yield change.marketIds===null?event:{...event,markets:event.markets?.filter(m=>change.marketIds!.includes(String(m.id)))||[]};projectionPrepareMs+=performance.now()-prepared;}})();
           const deleted=(function*(){for(const change of changes)if(!stable.rows[change.lane].has(change.key))yield `${change.lane}:${String(change.key)}`;})();
           const partialEventIds=new Set(changes.filter(change=>change.marketIds!==null&&stable.rows[change.lane].has(change.key)).map(change=>`${change.lane}:${String(change.key)}`));
           indexRows=changes.length;
           indexDetails=await indexedFeed!.applyDeltaBatched(upserts,deleted,stable.projectionMetadata(),{partialEventIds});
+          indexDetails.projectionPrepareMs=Math.ceil(projectionPrepareMs);
           state.acknowledgeProjectionChanges(changes);
           const deltaFeed={...stable.projectionMetadata(),events:[],ticketOutcomes,ticketVersionRecoveries};
           if(tenantTickets)tenantTickets.reconcile(deltaFeed);
           ticketStore.reconcile(deltaFeed);
         }
-        if(durable.checkpointResult.compactDue){memoryStage('checkpoint.compact');const compacted=await compactCheckpointJournal(path,stable);console.info(JSON.stringify({operation:'checkpoint.compaction',status:'ok',...compacted,atUTC:new Date().toISOString()}));}
         const indexDurationMs=Math.ceil(performance.now()-indexStarted);
+        // Keep full-state checkpoint maintenance out of the indexed-publication
+        // measurement. It runs only after the durable delta and public revision
+        // have committed, and is reported with its own preparation/write/sync/
+        // rotation timings so it cannot be mistaken for SQLite index work.
+        if(durable.checkpointResult.compactDue){memoryStage('checkpoint.compact');checkpointCompaction=await compactCheckpointJournal(path,stable);console.info(JSON.stringify({operation:'checkpoint.compaction',status:'ok',...checkpointCompaction,atUTC:new Date().toISOString()}));}
         lastCompletedPublication=Date.now();
         lastPersistedMutationGeneration=stable.mutationGeneration;
-        const metric={publicationId,checkpointIo,indexedProjection:{rows:indexRows,rebuild:indexRebuild,durationMs:indexDurationMs,...(indexDetails||{})},writes:++writes,publicProjectionDeferredForSnapshot:false,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:indexDurationMs,maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
+        const metric={publicationId,checkpointIo,indexedProjection:{rows:indexRows,rebuild:indexRebuild,durationMs:indexDurationMs,...(indexDetails||{})},...(checkpointCompaction?{checkpointCompaction}:{}),writes:++writes,publicProjectionDeferredForSnapshot:false,lastDurationMs:Math.ceil(performance.now()-started),lastCompletedAt:new Date().toISOString(),captureDurationMs,regularDurationMs,publishDurationMs:indexDurationMs,maxEventLoopDelayMs:Math.ceil(loopDelay.max/1e6),metricWindowStartUTC:new Date(loopWindowStart).toISOString(),metricWindowEndUTC:new Date().toISOString(),rssBytes:process.memoryUsage().rss};
         for(const pkg of config.packages)state.set(pkg.lane,{persistenceProgress:metric});
         if(Date.now()-lastPersistLog>=10000){lastPersistLog=Date.now();console.info(JSON.stringify({operation:'file.persist',status:'ok',...metric,regularFixtures:state.rows.prematch.size+state.rows.inplay.size}));loopDelay.reset();loopWindowStart=Date.now();}
         }catch(error){
